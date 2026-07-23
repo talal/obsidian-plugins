@@ -1,0 +1,27 @@
+[project]
+name = "obsidian-anki-sync"
+version = "0.1.0"
+description = "Addon for Anki to accept rapid blind syncs from Obsidian"
+readme = "README.md"
+authors = [{ name = "Muhammad Talal Anwar", email = "noreply@talal.ch" }]
+requires-python = ">=3.14"
+dependencies = ["requests>=2.34.2"]
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["obsidian_anki_sync"]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.src]
+include = ["src/**/*.py"]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]

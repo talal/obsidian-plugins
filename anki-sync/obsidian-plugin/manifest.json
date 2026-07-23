@@ -1,0 +1,9 @@
+{
+	"id": "anki-sync",
+	"name": "Anki Sync",
+	"version": "0.1.0",
+	"minAppVersion": "1.0.0",
+	"description": "Sync flashcards written in plain markdown to Anki.",
+	"author": "Talal",
+	"isDesktopOnly": false
+}

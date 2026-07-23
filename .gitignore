@@ -1,0 +1,51 @@
+!AGENTS.md
+.jj
+docs/
+
+# Obsidian
+cache.json
+test-vault
+data.json
+
+# Anki
+backups
+
+# npm
+dist
+node_modules
+
+# Rust / WASM
+**/*.rs.bk
+**/mutants.out*/
+debug
+rustc-ice-*.txt
+target
+pkg
+corpus
+artifacts
+coverage
+
+# Python
+__pycache__
+**/__pycache__
+**/__pycache__/**
+*.py[codz]
+*$py.class
+*.so
+.Python
+build
+eggs
+.eggs
+*.egg-info
+*.egg
+.coverage
+.coverage.*
+.cache
+.pytest_cache
+.env
+.envrc
+.venv
+env
+venv
+.ruff_cache
+.mypy_cache
