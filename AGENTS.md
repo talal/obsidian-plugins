@@ -1,6 +1,6 @@
 # Agent Development Guide
 
-This file serves as a [guide for coding agents](https://agents.md/).
+Conventions and setup instructions for AI coding agents working in this repo. See [agents.md](https://agents.md/) for the general spec.
 
 This repository contains my personal Obsidian plugins. When an AI agent is assisting with creating a new plugin or modifying an existing one, it must strictly adhere to the following conventions and best practices.
 
