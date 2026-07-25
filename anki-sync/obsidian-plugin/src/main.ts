@@ -46,7 +46,7 @@ export default class AnkiSyncPlugin extends Plugin {
 
 		// Status bar item (desktop only)
 		const statusBarEl = this.addStatusBarItem();
-		statusBarEl.setText('Anki Sync');
+		statusBarEl.empty();
 
 		// Command: Sync current file
 		this.addCommand({
@@ -141,7 +141,7 @@ export default class AnkiSyncPlugin extends Plugin {
 				'Anki Sync: API Key is not configured. Please set it in the plugin settings.',
 				8000,
 			);
-			statusBarEl.setText('Anki Sync');
+			statusBarEl.empty();
 			return;
 		}
 
@@ -158,7 +158,7 @@ export default class AnkiSyncPlugin extends Plugin {
 					'Anki Sync: Cannot connect to Anki addon. Is Anki running with the sync addon installed?';
 			}
 			new Notice(msg, 8000);
-			statusBarEl.setText('Anki Sync');
+			statusBarEl.empty();
 			return;
 		}
 
@@ -171,7 +171,7 @@ export default class AnkiSyncPlugin extends Plugin {
 			this.logger.logError('Anki Sync error', e);
 		}
 
-		statusBarEl.setText('Anki Sync');
+		statusBarEl.empty();
 	}
 
 	/**
@@ -194,7 +194,7 @@ export default class AnkiSyncPlugin extends Plugin {
 					'Anki Sync: API Key is not configured. Please set it in the plugin settings.',
 					8000,
 				);
-				statusBarEl.setText('Anki Sync');
+				statusBarEl.empty();
 				return;
 			}
 
@@ -211,7 +211,7 @@ export default class AnkiSyncPlugin extends Plugin {
 						'Anki Sync: Cannot connect to Anki addon. Is Anki running with the sync addon installed?';
 				}
 				new Notice(msg, 8000);
-				statusBarEl.setText('Anki Sync');
+				statusBarEl.empty();
 				return;
 			}
 
@@ -285,7 +285,7 @@ export default class AnkiSyncPlugin extends Plugin {
 			await this.cache.save();
 
 			this.showResult(totals, `${processedCount} files`);
-			statusBarEl.setText('Anki Sync');
+			statusBarEl.empty();
 		} finally {
 			this.isSyncing = false;
 		}
