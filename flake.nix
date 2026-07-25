@@ -1,5 +1,5 @@
 {
-  description = "Development shell for Obsidian plugins and Anki addons";
+  description = "Development shell for Obsidian plugins";
 
   inputs = {
     nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
@@ -38,7 +38,7 @@
         treefmtEval.config.build.wrapper
 
         # Type-/JavaScript
-        nodejs_26
+        nodejs_24
         typescript-language-server
 
         # Rust + WASM
@@ -46,11 +46,12 @@
         lld
         wasm-pack
         cargo-fuzz
-
-        # Python
-        uv
-        sqlite # for working with Anki databases
       ];
+
+      shellHook = ''
+        # Add the local Node executable directory to PATH
+        export PATH="$PWD/node_modules/.bin:$PATH"
+      '';
     };
   };
 }
