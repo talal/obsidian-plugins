@@ -5,8 +5,7 @@
 
 ## Plugins
 
-| Name                       | Description                                                                 |
-| -------------------------- | --------------------------------------------------------------------------- |
-| [Anki Sync](./anki-sync)   | Sync flashcards written in plain markdown to Anki.                          |
-| [Formatter](/formatter)    | Format notes using a fast Rust-based formatter on file save.                |
-| [Typst Math](./typst-math) | Render Typst math via MathML, i.e. use Typst Math syntax instead of MathJax |
+| Name                             | Description                                                                 |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| [Formatter](plugins/formatter)   | Format notes using a fast Rust-based formatter on file save.                |
+| [Typst Math](plugins/typst-math) | Render Typst math via MathML, i.e. use Typst Math syntax instead of MathJax |

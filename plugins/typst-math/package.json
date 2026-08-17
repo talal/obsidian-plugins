@@ -1,0 +1,16 @@
+{
+	"name": "typst-math",
+	"version": "0.1.0",
+	"description": "Render Typst math via MathML in Obsidian",
+	"keywords": [],
+	"license": "0BSD",
+	"type": "module",
+	"main": "dist/main.js",
+	"scripts": {
+		"build": "npm run build:wasm && vp build",
+		"build:wasm": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('typst_math_wasm_bg.wasm', import.meta.url)/'typst_math_wasm_bg.wasm'/g\" pkg/typst_math_wasm.js",
+		"check": "vp check",
+		"check:fix": "vp check --fix",
+		"test": "vp test"
+	}
+}

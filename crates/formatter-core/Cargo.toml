@@ -1,0 +1,11 @@
+[package]
+name = "formatter-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dprint-core = "0.67"
+dprint-plugin-markdown = "0.22.1"
+regex = "1"
+serde_yaml = "0.9"

@@ -1,0 +1,16 @@
+{
+	"name": "formatter",
+	"version": "0.1.0",
+	"description": "Formatter plugin for Obsidian",
+	"keywords": [],
+	"license": "0BSD",
+	"type": "module",
+	"main": "dist/main.js",
+	"scripts": {
+		"build": "npm run build:wasm && vp build",
+		"build:wasm": "cd ../../crates/formatter-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('formatter_wasm_bg.wasm', import.meta.url)/'formatter_wasm_bg.wasm'/g\" pkg/formatter_wasm.js",
+		"check": "vp check",
+		"check:fix": "vp check --fix",
+		"test": "vp test"
+	}
+}

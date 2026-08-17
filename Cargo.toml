@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "0BSD"
+
+[workspace.dependencies]
+console_error_panic_hook = "0.1"
+formatter-core = { path = "crates/formatter-core" }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 'z' # Optimize for size
+lto = true # Enable Link Time Optimization (LTO)
+codegen-units = 1 # Reduce parallel code generation units to increase optimization
+panic = 'abort' # Abort on panic
+strip = true # Strip symbols from binary

@@ -1,0 +1,28 @@
+[package]
+name = "typst-math-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["wasmbind", "clock"] }
+console_error_panic_hook.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+typst = "=0.15.0"
+typst-assets = "=0.15.0"
+typst-html = "=0.15.0"
+wasm-bindgen.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+	"-Oz",
+	"--enable-bulk-memory",
+	"--enable-nontrapping-float-to-int",
+	"--enable-sign-ext",
+	"--enable-mutable-globals",
+	"--enable-reference-types",
+]

@@ -1,0 +1,24 @@
+{
+	"name": "obsidian-plugins",
+	"private": true,
+	"workspaces": [
+		"plugins/*"
+	],
+	"type": "module",
+	"scripts": {
+		"build": "vp run -r build",
+		"check": "vp check",
+		"check:fix": "vp check --fix",
+		"test": "vp run -r test"
+	},
+	"devDependencies": {
+		"@types/node": "^24.1.0",
+		"obsidian": "latest",
+		"typescript": "^7.0.2",
+		"vite-plus": "latest"
+	},
+	"packageManager": "npm@11.17.0",
+	"allowScripts": {
+		"esbuild@0.25.5": true
+	}
+}

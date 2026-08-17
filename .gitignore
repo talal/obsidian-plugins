@@ -1,20 +1,17 @@
+!.agents/
 !AGENTS.md
-.jj
 docs/
 
 # Obsidian
 cache.json
-test-vault
 data.json
+test-vault/
 
-# Anki
-backups
-
-# npm
+# npm & bundler outputs
 dist
 node_modules
 
-# Rust / WASM
+# Rust / Wasm
 **/*.rs.bk
 **/mutants.out*/
 debug
@@ -24,28 +21,3 @@ pkg
 corpus
 artifacts
 coverage
-
-# Python
-__pycache__
-**/__pycache__
-**/__pycache__/**
-*.py[codz]
-*$py.class
-*.so
-.Python
-build
-eggs
-.eggs
-*.egg-info
-*.egg
-.coverage
-.coverage.*
-.cache
-.pytest_cache
-.env
-.envrc
-.venv
-env
-venv
-.ruff_cache
-.mypy_cache
