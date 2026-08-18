@@ -1,80 +1,76 @@
 # Obsidian Plugins Development Guide
 
-Conventions and setup instructions for AI coding agents working in this repo. See [agents.md](https://agents.md/) for the general spec.
+Instructions for coding agents working in this repository.
+
+These are personal, unpublished Obsidian plugins. Optimize for simplicity, maintainability, performance, and minimal code surface rather than backwards compatibility unless the task says otherwise.
 
 ## Directory structure
 
-- Each plugin lives under its own subdirectory inside `plugins/`.
-- Reference documentations for plugin development are cloned and kept up-to-date under `docs/` (git ignored).
-- Rust/WASM components reside in their own subdirectories within `crates/`.
+- `plugins/` contains the TypeScript Obsidian plugins.
+- `crates/` contains shared/native/WASM Rust components.
+- Read a plugin's `ARCHITECTURE.md` before making architectural or cross-component changes.
+- Reference documentation may be available under the gitignored `docs/` directory.
+
+## Core principles
+
+- These are defaults, not absolutes. Deviate when the task clearly requires it, and briefly explain why.
+- Make the smallest coherent change that fully solves the task.
+- Debug and inspect existing behavior before guessing.
+- Prefer simple, direct implementations over new abstractions.
+- Prioritize clarity over cleverness; avoid unnecessary complexity and nesting.
+- Follow existing patterns unless there is a concrete reason to improve them.
+- Do not add backwards compatibility, migration layers, or fallback paths unless required.
+- Preserve performance-sensitive behavior and avoid unnecessary runtime work.
+- Write self-documenting code: clear names, obvious structure, minimal comments.
+- Keep comments focused on non-obvious reasoning rather than narrating code; code says _what_, comments say _why_.
+- Add or update tests for meaningful behavior changes. Bug fixes should normally include regression coverage.
+- Use structural tools such as `ast-grep` when syntax-aware search or transformation is useful; otherwise use the simplest appropriate search/editing tool.
+- Use fuzz testing for crates parsing untrusted file content or user text.
+
+## Safety
+
+- Do not create commits, push, or modify Git state unless explicitly asked.
+- Do not install tools globally.
+- Do not run `just install-*` recipes unless explicitly asked; they modify the user's vault or home directory.
+- Put generated plans, reports, logs, and other temporary artifacts under `.agents/scratch/`.
+- Current plugins target both desktop and mobile. Do not introduce Node.js or Electron runtime dependencies unless deliberately changing that requirement.
+- Do not add telemetry, remote code execution, or transmission of vault contents unless explicitly required by the task.
 
 ## Commands
 
-Do not use `nix develop --command` or `npx`. The tools in `nix/devShell.nix` and `node_modules/.bin` are available in `PATH` so use local executables directly.
+The development environment already exposes repository-local and Nix-provided tools in `PATH`. Do not use `npx` or `nix develop --command`.
 
-- **Build:** `vp run -r build`
-- **Build (WASM):** `wasm-pack build crates/<crate> --target web`
-- **Lint:** `vp lint`
-- **Lint (Rust):** `cargo clippy --workspace --all-targets -- -D warnings`
-- **Formatting**: `vp fmt`
-- **Formatting (Rust)**: `cargo fmt --all`
-- **Test**: `vp test` (or `vp test plugins/<plugin>`)
-- **Test (Rust)**: `cargo test --workspace` (or `cargo test -p <crate>`)
-- Prefer to run targeted tests because the full test suite is slow to run.
-- The `Justfile` is intended for users only. **Do not use the `Justfile`**, run commands directly using `vp` and `cargo`.
+Prefer targeted commands while iterating:
 
-## Ground rules
+- Plugin build: `npm run build -w <plugin>`
+- Plugin check: `npm run check -w <plugin>`
+- Plugin tests: `npm run test -w <plugin>`
+- Rust tests: `cargo test -p <crate>`
+- Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
+- Rust formatting: `cargo fmt --all`
 
-- Never create Git commits unless explicitly asked.
-- Never push to Git remotes.
-- Never create a GitHub issue or pull request.
-- **Do not install tools globally.** Use `vp install` or add package to `nix/devShell.nix`.
+Use workspace-wide checks when a change crosses boundaries or before finalizing when proportionate.
 
-## Coding rules
+## Verification
 
-- **Make the smallest coherent change.**
-- **Debug, don't guess.**
-- Do not add backward compatibility unless explicitly requested.
-- Performance is key, both high level (design) and low level (impl).
-- Avoid redundant code and abstractions; avoid unnecessary complexity and nesting.
-- Concise one-liners are fine, but prioritize clarity over cleverness.
-- **Every changed or added behaviour must have a test**. Do not add tests for standard-library or third-party functions. The exception is deliberate behaviour or integration tests, which may cross those boundaries by design.
-- When fixing a bug or regression, first write a test for it that fails, then change the code to fix the bug and make sure the test passes.
-- Write self-documenting code: clear names, obvious structure, minimal comments.
-- No section-separator comments (e.g. `// ---- Protocols ----` or `// === Input ===`). Code structure should be clear from the code itself.
-- **Comment sparingly — code says _what_, comments say _why_.** Add a comment only when the reasoning is non-obvious and cannot be carried by a clear name or the code itself. Do not write narrating comments that restate the next line, do not pad logic with multi-line prose, and do not repeat the same rationale at several sites — put one concise note at the source of truth and let the others stand on their own. Tests whose names already describe intent need no explanatory comment. Reserve longer explanation for genuinely complex or non-obvious logic (e.g. a security check whose threat model isn't apparent), and keep even that as tight as it can be. Over-commenting is noise that ages badly and obscures the code it wraps.
-- When a change invalidates documented behavior or structure, update the relevant document in `docs/`.
-- Put any files you generate (plan, reports, scratch output) under `.agents/scratch/` directory.
-- Run proportionate validation, review the diff, and report commands that could not run because dependencies or platform toolchains are unavailable.
-- Prefer AST-based tools and codemods (jscodeshift) over manual or regex-based refactors, except for tiny edits.
-- For any code search that requires understanding of syntax or code structure, you should default to using `ast-grep`, see ast-grep skill for usage details. Avoid using text-only search tools unless a plain-text search is explicitly requested.
+- Run proportionate validation for the code changed and review the final diff.
+- Prefer targeted tests during iteration; broaden validation when the change warrants it.
+- Report checks that could not run because required dependencies or platform capabilities are unavailable.
 
-### Toolchain
+### Token-efficient verification
 
-- **Self-Contained `dist` Folder:** `vite.config.ts` must be configured to output everything required for the plugin into a `dist/` subdirectory for easy copying, including `.wasm` assets using Vite's static asset handlers or `vite-plus` hooks.
-- **Vite+ Unified Toolchain:** This project uses Vite+, a unified toolchain built on top of Vite, Rolldown, Vitest, tsdown, Oxlint, Oxfmt, and Vite Task. Vite+ wraps runtime management, package management, and frontend tooling in a single global CLI called `vp`.
-- **Distinct from Vite:** Vite+ is distinct from Vite, and it invokes Vite through `vp dev` and `vp build`.
+- Do not dump verbose successful build or test output into the conversation.
+- For potentially verbose commands, capture full output under `.agents/scratch/` and report only: command, exit status, duration, test/build summary, and relevant warnings or failure excerpts.
+- On failure, inspect the first relevant/root error with limited surrounding context; expand only as needed.
+- On success, briefly scan for warnings before reporting; don't assume a passing exit code means the log is clean.
+- Do not read full successful logs unless exact evidence is required.
+- For long-running commands, avoid polling repeatedly. Inspect a small tail only when needed to diagnose a hang, timeout, or lack of progress.
+- Read only the relevant portions of long documentation and do not reload the same documentation unnecessarily.
+- Treat `.agents/scratch/` as disposable, gitignored, and not to be overwritten mid-session; use timestamped or run-specific filenames.
 
-### JavaScript
+## Plugin Development
 
-- Prefer plain `for..in/of` loops over iterator methods like `map`/`reduce`.
-
-### TypeScript
-
-- Avoid `any` and type casting (`as`).
-- Avoid runtime overhead just to get the types right.
-
-### Rust & WASM
-
-- All Rust crates must use the latest Rust edition (currently **2024**).
-- Enforce idiomatic Rust by utilizing `cargo clippy --fix --workspace` and `cargo fmt`. Always leverage the newest syntactical idioms (e.g., `let_chains` for collapsed nested `if let` statements).
-- **Fuzz Testing:** `cargo fuzz` is highly encouraged and expected for all Rust/WASM crates that handle complex inputs to catch edge-case panics. Use existing fuzzers in `crates/*/fuzz` as reference implementations.
-
-### UI & Styles
-
-- **No Boilerplate CSS:** Only include a `styles.css` file if the plugin introduces UI elements that genuinely require custom styling.
-
-### Plugin Architecture & Lifecycle
+### Architecture & Lifecycle
 
 - **Organize code across multiple files**: Split functionality into separate modules rather than placing everything in `main.ts`.
 - **Minimal `main.ts`**: Keep `main.ts` small and focused strictly on the plugin lifecycle (`onload`, `onunload`, registering commands/events). Delegate feature logic to dedicated modules (`settings.ts`, `commands/`, `ui/`, `utils/`, `types.ts`).
@@ -119,26 +115,10 @@ Do not use `nix develop --command` or `npx`. The tools in `nix/devShell.nix` and
 ## Manual Vault Testing
 
 To test plugins in Obsidian:
+
 1. Build the target plugin: `vp run build` (and WASM if applicable: `wasm-pack build crates/<crate> --target web`).
 2. Copy files from `plugins/<plugin>/dist/` (`main.js`, `manifest.json`, `styles.css` if present, `.wasm` if present) to:
    ```
    <Vault>/.obsidian/plugins/<plugin-id>/
    ```
 3. Reload plugins / Obsidian and enable the plugin in **Settings → Community plugins**.
-
-## Token-efficient verification
-
-- Do not stream verbose successful build, migration, reset, or test output into the conversation.
-- Capture complete verification output in a local artifact in `.agents/scratch/` directory.
-- Report only the command, exit status, duration, suite summary, warnings, and relevant failure excerpt.
-- On failure, inspect the smallest useful log section first and expand only when needed.
-- Preserve full logs locally in `.agents/scratch/` when they are required as evidence.
-- When a verification command is still running, inspect its artifact only after completion. Read the smallest useful failure excerpt; never load full passing artifacts unless exact evidence is required.
-- Before loading long skill, browser, or tool documentation, read only the required instructions. If the tool requires its full documentation, keep it out of user-facing updates and summarize only the rules relevant to the task. Do not reload the same documentation in the same task.
-
-## References
-
-- [Obsidian API Documentation](https://docs.obsidian.md)
-- [Obsidian Developer Policies](https://docs.obsidian.md/Developer+policies)
-- [Obsidian Plugin Guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines)
-- [Obsidian Style Guide](https://help.obsidian.md/style-guide)
