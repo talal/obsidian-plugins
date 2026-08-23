@@ -6,15 +6,15 @@
 
 One formatting engine, two front ends, zero drift between them:
 
-- **`formatter-cli`** — a command-line tool (`format` / `check`) for running against a vault from a terminal, script, or CI/pre-commit hook.
-- **`formatter-wasm` + Obsidian plugin** — the same engine compiled to WebAssembly, wrapped by a thin TypeScript plugin that formats the active note on save, inside Obsidian itself.
+- **`formatter-cli`** — a command-line tool (`formatter-cli [PATHS]...`) for formatting vault files from a terminal or script. With no paths, it formats stdin.
+- **`formatter-wasm` + Obsidian plugin** — the same engine compiled to WebAssembly, wrapped by a thin TypeScript plugin that formats the current note through an Obsidian command.
 
 Both are consumers of a single **`formatter-core`** crate. To minimize custom code surface, the core logic relies on `dprint-plugin-markdown` configured strictly with a 4-space indent rule.
 
 ### Explicit non-goals
 
 - No config file, no per-project style options. One opinion.
-- No "format on type" — only on-demand (CLI invocation) or on-save (plugin).
+- No "format on type" or format-on-save hook — formatting is explicitly on-demand through the CLI or plugin command.
 - No Node.js dependency anywhere in the _runtime_ path. `formatter-cli` is a plain native binary; the plugin's runtime cost is one `.wasm` file loaded by Obsidian's JS engine.
 
 ---
@@ -33,7 +33,7 @@ formatter/                              # cargo workspace root
 │   ├── formatter-cli/                  # bin crate, depends on formatter-core
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       └── main.rs                 # subcommand dispatch
+│   │       └── main.rs                 # path and stdin dispatch
 │   │
 │   └── formatter-wasm/                 # wasm-bindgen shim, depends on formatter-core
 │       ├── Cargo.toml
@@ -44,9 +44,9 @@ formatter/                              # cargo workspace root
     ├── package.json
     ├── vite.config.ts
     └── src/
-        ├── main.ts                     # save-hotkey intercept
+        ├── main.ts                     # command and plugin lifecycle
         ├── formatter.ts                # loads .wasm, calls format_markdown
-        └── settings.ts                 # "Format on Save" toggle
+        └── logger.ts                   # error logging
 ```
 
 ---
@@ -61,6 +61,6 @@ The engine delegates markdown formatting to `dprint-plugin-markdown`, which stri
   - `` ``` ... ``` `` fenced code blocks (handled by core to bypass exotic whitespace normalizer)
   - `%% ... %%` Obsidian comments (handled by dprint)
   - `$$ ... $$` math blocks (handled by dprint)
-- **Frontmatter Sorting**: YAML frontmatter keys are alphabetized, with `created` forced to the top and `aliases` next, followed by everything else, and `tags` at the bottom.
+- **Frontmatter Sorting**: Existing YAML frontmatter is formatted and sorted, with `created` forced to the top and `aliases` next, followed by everything else, and `tags` at the bottom. The formatter never adds frontmatter.
 
 These protections ensure that `dprint` processes the core Markdown structure without destroying Obsidian's non-standard extensions.

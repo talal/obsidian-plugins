@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { formatMarkdown, injectMetadata, initFormatterWasm } from '../src/formatter';
+import { formatMarkdown, initFormatterWasm } from '../src/formatter';
 
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');
 
@@ -57,25 +57,17 @@ describe('Prettier Formatter', () => {
 		expect(formatted).toBe(afterContent);
 	});
 
+	it('does not add frontmatter to notes without frontmatter', async () => {
+		const formatted = await formatMarkdown('# Hello\nWorld');
+
+		expect(formatted).not.toMatch(/^---\n/);
+	});
+
 	it('formats list continuation lines with HTML tags correctly', async () => {
 		const beforeContent = fs.readFileSync(path.join(FIXTURES_DIR, 'html_wrap_before.md'), 'utf-8');
 		const formatted = await formatMarkdown(beforeContent);
 		const afterPath = path.join(FIXTURES_DIR, 'html_wrap_after.md');
 		const afterContent = fs.readFileSync(afterPath, 'utf-8');
 		expect(formatted).toBe(afterContent);
-	});
-
-	it('injects metadata correctly', () => {
-		const text = '# Hello\nWorld';
-		const ctime = new Date('2026-07-15T18:14:15+02:00').getTime();
-		const result = injectMetadata(text, ctime);
-		expect(result).toContain('created: 2026-07-15T18:14:15+02:00');
-		expect(result).toContain('tags:');
-		expect(result).toContain('# Hello\nWorld');
-
-		// Test that it does not override existing
-		const existing = '---\ncreated: 2020-01-01T00:00:00Z\ntags: [old]\n---\n# Hello';
-		const resultExisting = injectMetadata(existing, ctime);
-		expect(resultExisting).toBe(existing);
 	});
 });

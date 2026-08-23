@@ -193,13 +193,6 @@ pub fn format(input: &str) -> Result<String, FormatError> {
     Ok(out)
 }
 
-pub fn would_change(input: &str) -> Result<bool, FormatError> {
-    let formatted = format(input)?;
-    // Normalize newlines before comparing, simple approximation
-    Ok(input.replace("\r\n", "\n").replace('\r', "\n")
-        != formatted.replace("\r\n", "\n").replace('\r', "\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
