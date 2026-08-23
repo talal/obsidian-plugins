@@ -143,7 +143,7 @@ Rust side (custom WASM crate):
 
 ```
 typst-math-wasm/
-├── Cargo.toml   # depends on typst, typst-html, wasm-bindgen, serde
+├── Cargo.toml   # depends on typst, typst-html, and wasm-bindgen
 ├── src/
 │   ├── lib.rs   # wasm-bindgen entry: compile_math(source, display) -> String
 │   └── world.rs # Minimal World trait implementation
@@ -168,7 +168,7 @@ The WASM crate:
 
 ### 4.3 HTML feature gate
 
-Typst 0.15 gates HTML export behind `Feature::Html`. The WASM crate must enable this feature on the `Library` when constructing the `World` (done via `typst::Features::all()`). This will emit a warning ("html export is under active development") which we silently ignore since we only use the MathML subset — this warning is the same one referenced in §1.1's accepted-risk note, not a new concern.
+Typst 0.15.1 gates HTML export behind `Feature::Html`. The WASM crate must enable this feature on the `Library` when constructing the `World` (done via `typst::Features::all()`). This will emit a warning ("html export is under active development") which we silently ignore since we only use the MathML subset — this warning is the same one referenced in §1.1's accepted-risk note, not a new concern.
 
 ### 4.4 Binary size, optimizations, and loading
 
@@ -418,8 +418,8 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 - Cargo profile: `[profile.release]` with `lto = true`, `codegen-units = 1`, `opt-level = "s"` (optimize for size), `strip = true`.
 - Dependencies, pinned via **crates.io semver**, not git tags:
   ```toml
-  typst = "=0.15.0"
-  typst-html = "=0.15.0"
+  typst = "=0.15.1"
+  typst-html = "=0.15.1"
   wasm-bindgen = "..."
   ```
   `typst-html` is published normally on crates.io — pinning to a git tag instead would force cloning the full `typst` monorepo on every build for no reproducibility benefit, and would only be justified if a fix is needed that hasn't shipped in a release yet.
@@ -454,4 +454,4 @@ Each phase is independently testable.
 - **Web Worker:** Running the WASM compiler in a Web Worker (off main thread) could improve UI responsiveness for complex expressions. `obsidian-typst-mate` uses a Web Worker + Comlink for its SVG pipeline, so the pattern is well-understood if profiling shows main-thread jank is a real problem here too — deferred until then, since this plugin's math-only, cached workload is lighter than a full-document Typst compiler.
 - **Font customization:** The current CSS intentionally follows Obsidian's MathJax font stack. If that stack changes or a different visual style is wanted, update the CSS; font selection still belongs in the browser layer, not the Typst WASM `World`.
 - **Syntax highlighting in editor:** Typst math syntax differs from LaTeX. Obsidian's editor highlights `$...$` content as LaTeX, which is misleading. A CodeMirror extension could provide proper Typst math highlighting, but this is a separate concern and significant complexity.
-- **Typst version pinning and re-validation:** Covered in §1.1 and §7 — the WASM is built against Typst 0.15.0 exactly. Future Typst versions may change MathML output shape or the CSS needed to correct it. Pin the version, and treat every bump as requiring the visual-comparison step in build-order phase 6 before adopting it, not just a version number change.
+- **Typst version pinning and re-validation:** Covered in §1.1 and §7 — the WASM is built against Typst 0.15.1 exactly. Future Typst versions may change MathML output shape or the CSS needed to correct it. Pin the version, and treat every bump as requiring the visual-comparison step in build-order phase 6 before adopting it, not just a version number change.
