@@ -13,15 +13,11 @@ pub struct MathWorld {
     main: FileId,
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
-    fonts: Vec<Font>,
     source: Mutex<Source>,
 }
 
 impl MathWorld {
     pub fn new() -> Self {
-        let book = FontBook::new();
-        let fonts = Vec::new();
-
         let library = Library::builder()
             .with_features(typst::Features::all())
             .build();
@@ -35,8 +31,9 @@ impl MathWorld {
         Self {
             main,
             library: LazyHash::new(library),
-            book: LazyHash::new(book),
-            fonts,
+            // HTML export emits semantic MathML rather than laying out glyphs, so
+            // the browser is responsible for selecting and measuring math fonts.
+            book: LazyHash::new(FontBook::new()),
             source: Mutex::new(source),
         }
     }
@@ -72,8 +69,8 @@ impl World for MathWorld {
         Err(FileError::NotFound(id.vpath().get_without_slash().into()))
     }
 
-    fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).cloned()
+    fn font(&self, _index: usize) -> Option<Font> {
+        None
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {

@@ -1,6 +1,6 @@
 # Typst Math Plugin — Architecture
 
-**Status:** Personal plugin, not published. Optimize for simplicity and minimal code surface. Zero configuration. Obsidian plugin only — no CLI, no shared workspace with other tools.
+**Status:** Personal plugin, not published. Optimize for simplicity and minimal code surface. Obsidian plugin only — no CLI, no shared workspace with other tools. The plugin exposes separate inline and block math font-size settings.
 
 ## 1. Purpose & Scope
 
@@ -14,10 +14,9 @@ Users write `$x^2 + y^2 = z^2$` (inline) and `$$...$$` (display) using **Typst m
 
 ### Explicit non-goals
 
-- No settings UI. No configuration of any kind.
+- No font-family setting or bundled fonts. Native MathML uses Obsidian's existing MathJax font stack; only inline and block font size are configurable.
 - No full Typst document support (code blocks, `.typ` files, etc.). Math expressions only.
 - No LaTeX-to-Typst conversion or fallback. If you write LaTeX, it won't render — this is intentional.
-- No custom fonts or theming. Use whatever math font the browser/Typst defaults to.
 - No Typst package imports inside math expressions.
 - No syntax highlighting or editor extensions. The plugin does not touch the CodeMirror editor — it only replaces rendered output.
 - No marketplace listing / multi-user support.
@@ -153,7 +152,7 @@ typst-math-wasm/
 The WASM crate:
 
 1. Implements the Typst `World` trait with minimal requirements:
-   - **Fonts:** Bundled via `typst_assets::fonts()` (the standard math fonts that ship with Typst). No system font access needed — math rendering only needs a math-capable font (New Computer Modern is included).
+   - **Fonts:** No bundled Typst fonts are needed. The HTML target emits semantic MathML rather than laying out glyphs, so the browser selects and measures the math font. The plugin CSS intentionally reuses Obsidian's MathJax font stack to keep the visual style native.
    - **Source:** A single virtual `.typ` file that gets replaced each call.
    - **No packages:** Math-only, no imports.
    - **No file I/O:** Everything is in-memory.
@@ -189,11 +188,10 @@ concern, not a "revisit if it becomes a problem" one:
   encountered. Before WASM is ready, return a placeholder (raw source text
   styled with a "loading" CSS class). Once WASM initializes, re-render all
   placeholders.
-- **`wasm-opt` disabled:** explicitly disabled in `Cargo.toml` due to
-  bulk-memory compatibility issues. The slightly larger file size is
-  accepted for now — revisit once binary size is actually profiled, since a
+- **`wasm-opt`:** enabled with `-Oz` and the required WebAssembly feature flags
+  in `Cargo.toml`. Revisit the flags after profiling the binary, since a
   smaller starting binary (via a stripped math-only dependency tree) may
-  change whether this trade-off is still worth it.
+  change the optimization trade-offs.
 - **WASM module caching:** once compiled by the browser, the module is
   cached by V8's code cache. Subsequent loads are near-instant — this
   matters most on desktop; mobile Obsidian's WebView caching behavior is
@@ -256,7 +254,8 @@ typst-math/
 ├── styles.css                       # MathML CSS overrides (from Typst's EQUATION_CSS_STYLES)
 ├── src/
 │   ├── main.ts                      # Plugin entry: MathJax override, Custom Element definition
-│   └── compiler.ts                  # WASM loader, init, compile(source, display) -> string
+│   ├── compiler.ts                  # WASM loader, init, compile(source, display) -> string
+│   └── settings.ts                  # Settings defaults, normalization, and UI
 ├── ARCHITECTURE.md                  # this file
 └── dist/                            # build output
     ├── main.js
@@ -274,17 +273,18 @@ crates/typst-math-wasm/              # WASM crate
     └── typst_math_wasm.d.ts
 ```
 
-### 5.1 `src/main.ts` — Plugin entry (~80-100 lines)
+### 5.1 `src/main.ts` — Plugin entry (~120-150 lines)
 
 Responsibilities:
 
 1. On `onload()`:
-   1. Call `loadMathJax()` and `renderMath('', false)` for side-effects.
-   2. Save reference to original `window.MathJax.tex2chtml`.
-   3. Install our override that returns `<mjx-container>` synchronously wrapping a `<typst-math>` Custom Element, with `data-source`/`data-display` attributes set (§3.2).
-   4. Trigger WASM initialization in the background.
+   1. Load and normalize persisted settings, apply the inline/block font-size CSS variables, and register the settings tab.
+   2. Call `loadMathJax()` and `renderMath('', false)` for side-effects.
+   3. Save reference to original `window.MathJax.tex2chtml`.
+   4. Install our override that returns `<mjx-container>` synchronously wrapping a `<typst-math>` Custom Element, with `data-source`/`data-display` attributes set (§3.2).
+   5. Leave WASM uninitialized; the first connected math element triggers initialization through `compiler.compile()`.
 2. On `onunload()`:
-   1. Restore original `tex2chtml`.
+   1. Restore the previous CSS variable values and original `tex2chtml`.
    2. Dispose WASM resources.
 
 ### 5.2 `src/compiler.ts` — WASM compiler wrapper (~60-80 lines)
@@ -330,18 +330,18 @@ Internally:
 Implements the `World` trait:
 
 - `library()` → `Library` with `Feature::Html` enabled.
-- `book()` → `FontBook` populated from `typst_assets::fonts()`.
+- `book()` → Empty `FontBook`; HTML MathML output delegates font selection and metrics to the browser and its Obsidian-compatible CSS font stack.
 - `main()` → The single virtual file ID.
 - `source(id)` → The current math document source.
-- `file(id)` → Font data bytes.
-- `font(index)` → Font from the pre-loaded font list.
+- `file(id)` → Not found; this math-only world has no external files.
+- `font(index)` → `None`; the HTML MathML path does not resolve Typst fonts.
 - `today(offset)` → Current date (unused for math, but required by trait).
 
 No package resolution. No file I/O. No network access.
 
 ### 5.5 `styles.css` — MathML CSS overrides
 
-Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correct browser rendering of MathML to match Typst's layout engine. Approximately 40-50 lines of CSS.
+Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correct browser rendering of MathML to match Typst's layout engine. It also applies the persisted `--typst-math-inline-font-size` and `--typst-math-block-font-size` variables, defaulting to 18px inline and 20px block when unset. Approximately 40-50 lines of CSS.
 
 ---
 
@@ -370,7 +370,7 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 1. First math expression triggers lazy WASM load.
 2. Read `.wasm` file binary from the vault via `plugin.app.vault.adapter.readBinary`.
 3. `WebAssembly.compile` and instantiate via the `wasm-bindgen` init function.
-4. WASM module initializes `World` (loads bundled fonts from `typst_assets`).
+4. WASM module initializes `World` with an empty font book; the browser owns MathML font selection.
 5. Mark compiler as ready.
 6. Re-render all elements with class `typst-math-loading`.
 
@@ -391,10 +391,11 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 | WASM fails to load (corrupt file, unsupported platform)               | Log error to console. Leave MathJax override in place but show raw source with error styling. Do not crash the plugin.                                     |
 | Typst compilation error (invalid math syntax)                         | Show raw source text with `typst-math-error` class and set the error message as the element's `title` attribute (visible on hover).                        |
 | Empty math expression (`$$`)                                          | Return empty `<mjx-container>` — same behavior as MathJax with empty input.                                                                                |
-| Very long/complex expression                                          | Let WASM take however long it needs. No timeout. The async pattern means the UI isn't blocked.                                                             |
+| Very long/complex expression                                          | Compile synchronously on the main thread for now. Move compilation to a Web Worker if profiling shows UI impact.                                             |
 | Expression contains Typst features beyond math (`#set`, `#let`, etc.) | These will work if they're valid Typst — the full compiler runs. This is acceptable; don't artificially restrict it.                                       |
 | MathJax CSS still loaded (from Obsidian's default)                    | Harmless. MathJax styles target `mjx-*` internal elements which we don't generate. Our MathML `<math>` elements use separate CSS.                          |
 | Plugin disabled/unloaded mid-session                                  | `onunload()` restores original `tex2chtml`. Any already-rendered MathML stays in the DOM until the page refreshes. New math expressions revert to MathJax. |
+| Invalid or missing font-size settings                                | Normalize each value to the 8–48px range in 1px increments; missing or legacy percentage values use the 18px/20px defaults.                              |
 | Multiple vaults / windows                                             | Each Obsidian window has its own `window.MathJax` global. The override applies per-window, which is correct.                                               |
 | Typst version bump changes MathML output shape or CSS needs (§1.1)    | Treated as a breaking change requiring manual re-validation (build-order phase 6), not something to auto-update past without checking.                     |
 
@@ -413,18 +414,15 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 ### 8.2 Rust / WASM side
 
 - Built separately with `wasm-pack build --target web --release` inside the `typst-math-wasm` directory.
-- Output goes to `typst-math-wasm/pkg/`, which is committed to the repo (see §5's trade-off note).
+- Output goes to `typst-math-wasm/pkg/`, which is generated locally and intentionally not committed. A clean checkout must run the WASM build before TypeScript checks or tests.
 - Cargo profile: `[profile.release]` with `lto = true`, `codegen-units = 1`, `opt-level = "s"` (optimize for size), `strip = true`.
 - Dependencies, pinned via **crates.io semver**, not git tags:
   ```toml
   typst = "=0.15.0"
   typst-html = "=0.15.0"
-  typst-assets = { version = "=0.15.0", features = ["fonts"] }
   wasm-bindgen = "..."
-  serde = "..."
-  serde-wasm-bindgen = "..."
   ```
-  `typst-html` and `typst-assets` are published normally on crates.io — pinning to a git tag instead would force cloning the full `typst` monorepo on every build for no reproducibility benefit, and would only be justified if a fix is needed that hasn't shipped in a release yet.
+  `typst-html` is published normally on crates.io — pinning to a git tag instead would force cloning the full `typst` monorepo on every build for no reproducibility benefit, and would only be justified if a fix is needed that hasn't shipped in a release yet.
 
 ### 8.3 Build order
 
@@ -446,13 +444,14 @@ Each phase is independently testable.
 4. **Error handling:** Typst compilation errors displayed inline. Test with intentionally malformed Typst math.
 5. **Embed support:** Implement the `<typst-math>` custom element's `connectedCallback` re-render path, driven entirely by its own `data-source`/`data-display` attributes (§3.2, §6.3) — no `MarkdownPostProcessor` involved. Test by embedding a note containing math via `![[note]]` and opening it before WASM has finished initializing, confirming the embedded copy re-renders independently of the source note's element.
 6. **CSS styles:** Add Typst's `EQUATION_CSS_STYLES` to `styles.css`. Compare rendering of fractions, accents, and matrices against Typst's own HTML output to verify visual correctness. Re-run this comparison on every future Typst version bump, per §1.1.
-7. **Result cache:** `Map<string, string>` in `compiler.ts` to avoid re-compiling identical expressions. Measure before/after with a note containing 50+ math expressions.
+7. **Settings UI:** Register the plugin settings tab with separate inline and block pixel font-size sliders. Persist values with `loadData()`/`saveData()` and apply them through CSS variables without requiring a restart or manual CSS installation.
+8. **Result cache:** `Map<string, string>` in `compiler.ts` to avoid re-compiling identical expressions. Measure before/after with a note containing 50+ math expressions.
 
 ---
 
 ## 10. Explicitly Deferred / Open Questions
 
 - **Web Worker:** Running the WASM compiler in a Web Worker (off main thread) could improve UI responsiveness for complex expressions. `obsidian-typst-mate` uses a Web Worker + Comlink for its SVG pipeline, so the pattern is well-understood if profiling shows main-thread jank is a real problem here too — deferred until then, since this plugin's math-only, cached workload is lighter than a full-document Typst compiler.
-- **Font customization:** Using a different math font (e.g., STIX Two Math). Would require bundling additional font files in the WASM or loading them from the system. Not needed for personal use.
+- **Font customization:** The current CSS intentionally follows Obsidian's MathJax font stack. If that stack changes or a different visual style is wanted, update the CSS; font selection still belongs in the browser layer, not the Typst WASM `World`.
 - **Syntax highlighting in editor:** Typst math syntax differs from LaTeX. Obsidian's editor highlights `$...$` content as LaTeX, which is misleading. A CodeMirror extension could provide proper Typst math highlighting, but this is a separate concern and significant complexity.
 - **Typst version pinning and re-validation:** Covered in §1.1 and §7 — the WASM is built against Typst 0.15.0 exactly. Future Typst versions may change MathML output shape or the CSS needed to correct it. Pin the version, and treat every bump as requiring the visual-comparison step in build-order phase 6 before adopting it, not just a version number change.

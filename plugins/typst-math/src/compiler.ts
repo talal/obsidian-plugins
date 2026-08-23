@@ -30,6 +30,7 @@ export class TypstCompiler {
 	}
 
 	public async compile(source: string, display: boolean, plugin: Plugin): Promise<string> {
+		// Initialization is intentionally deferred until a math element needs it.
 		if (!this.compiler) {
 			await this.init(plugin);
 		}

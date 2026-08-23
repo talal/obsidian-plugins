@@ -34,8 +34,9 @@ function extractMath(markdown: string) {
 describe('TypstCompiler', () => {
 	let compiler: TypstCompiler;
 	let mockPlugin: any;
+	let wasmReads = 0;
 
-	beforeAll(async () => {
+	beforeAll(() => {
 		compiler = new TypstCompiler();
 
 		mockPlugin = {
@@ -46,6 +47,7 @@ describe('TypstCompiler', () => {
 				vault: {
 					adapter: {
 						readBinary: async (filePath: string) => {
+							wasmReads++;
 							// Resolve relative to the package root
 							const absolutePath = path.resolve(__dirname, '..', filePath);
 							const buffer = await fs.promises.readFile(absolutePath);
@@ -56,8 +58,18 @@ describe('TypstCompiler', () => {
 				},
 			},
 		};
+	});
 
-		await compiler.init(mockPlugin);
+	it('loads WASM lazily on the first compilation', async () => {
+		const lazyCompiler = new TypstCompiler();
+		expect(lazyCompiler.isReady()).toBe(false);
+		expect(wasmReads).toBe(0);
+
+		const result = await lazyCompiler.compile('x', false, mockPlugin);
+
+		expect(result).toContain('<math');
+		expect(lazyCompiler.isReady()).toBe(true);
+		expect(wasmReads).toBe(1);
 	});
 
 	const VALID_FIXTURES = ['valid-inline.md', 'valid-block-matrices.md', 'valid-block-cases.md'];

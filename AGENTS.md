@@ -57,17 +57,6 @@ Use workspace-wide checks when a change crosses boundaries or before finalizing 
 - Prefer targeted tests during iteration; broaden validation when the change warrants it.
 - Report checks that could not run because required dependencies or platform capabilities are unavailable.
 
-### Token-efficient verification
-
-- Do not dump verbose successful build or test output into the conversation.
-- For potentially verbose commands, capture full output under `.agents/scratch/` and report only: command, exit status, duration, test/build summary, and relevant warnings or failure excerpts.
-- On failure, inspect the first relevant/root error with limited surrounding context; expand only as needed.
-- On success, briefly scan for warnings before reporting; don't assume a passing exit code means the log is clean.
-- Do not read full successful logs unless exact evidence is required.
-- For long-running commands, avoid polling repeatedly. Inspect a small tail only when needed to diagnose a hang, timeout, or lack of progress.
-- Read only the relevant portions of long documentation and do not reload the same documentation unnecessarily.
-- Treat `.agents/scratch/` as disposable, gitignored, and not to be overwritten mid-session; use timestamped or run-specific filenames.
-
 ## Plugin Development
 
 ### Architecture & Lifecycle
