@@ -5,7 +5,7 @@
 
 ## Plugins
 
-| Name                             | Description                                                                 |
-| -------------------------------- | --------------------------------------------------------------------------- |
-| [Formatter](plugins/formatter)   | Format notes using a fast Rust-based formatter on file save.                |
-| [Typst Math](plugins/typst-math) | Render Typst math via MathML, i.e. use Typst Math syntax instead of MathJax |
+| Name                             | Description                                     |
+| -------------------------------- | ----------------------------------------------- |
+| [Formatter](plugins/formatter)   | Format notes using a fast Rust-based formatter. |
+| [Typst Math](plugins/typst-math) | Write math using Typst instead of LaTeX.        |
