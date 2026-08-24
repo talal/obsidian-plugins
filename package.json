@@ -9,6 +9,9 @@
 		"build": "vp run -r build",
 		"check": "vp check",
 		"check:fix": "vp check --fix",
+		"check:types": "vp check --no-fmt --no-lint",
+		"fmt": "vp fmt",
+		"lint": "vp lint",
 		"test": "vp run -r test"
 	},
 	"devDependencies": {

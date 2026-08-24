@@ -29,22 +29,9 @@ install-typst-math:
     cp plugins/typst-math/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
 
 # run test suites for all plugins and crates
-[group("test")]
-test-all:
+test:
     cargo test --workspace
     npm run test
-
-# run test suite for formatter
-[group("test")]
-test-formatter:
-    cargo test -p formatter-core -p formatter-cli -p formatter-wasm
-    npm run test -w formatter
-
-# test typst-math plugin and Wasm
-[group("test")]
-test-typst-math:
-    cargo test -p typst-math-wasm
-    npm run test -w typst-math
 
 # run static analysis, formatting, type checks, and cargo clippy checks
 check:

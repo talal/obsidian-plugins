@@ -2,12 +2,12 @@
 
 Instructions for coding agents working in this repository.
 
-These are personal, unpublished Obsidian plugins. Optimize for simplicity, maintainability, performance, and minimal code surface rather than backwards compatibility unless the task says otherwise.
+These are personal, unpublished Obsidian plugins. Optimize for correctness, maintainability, performance, and a small code surface rather than backwards compatibility unless the task says otherwise.
 
 ## Directory structure
 
 - `plugins/` contains the TypeScript Obsidian plugins.
-- `crates/` contains shared/native/WASM Rust components.
+- `crates/` contains Rust and WASM components shared by plugins.
 - Read a plugin's `ARCHITECTURE.md` before making architectural or cross-component changes.
 - Reference documentation may be available under the gitignored `docs/` directory.
 
@@ -24,17 +24,17 @@ These are personal, unpublished Obsidian plugins. Optimize for simplicity, maint
 - Write self-documenting code: clear names, obvious structure, minimal comments.
 - Keep comments focused on non-obvious reasoning rather than narrating code; code says _what_, comments say _why_.
 - Add or update tests for meaningful behavior changes. Bug fixes should normally include regression coverage.
+- Fuzz parsers, render boundaries, and user-text handling when the code accepts arbitrary text.
 - Use structural tools such as `ast-grep` when syntax-aware search or transformation is useful; otherwise use the simplest appropriate search/editing tool.
-- Use fuzz testing for crates parsing untrusted file content or user text.
 
 ## Safety
 
 - Do not create commits, push, or modify Git state unless explicitly asked.
 - Do not install tools globally.
-- Do not run `just install-*` recipes unless explicitly asked; they modify the user's vault or home directory.
+- Do not run `just install-*` recipes unless explicitly asked; they modify the user's vault directory.
 - Put generated plans, reports, logs, and other temporary artifacts under `.agents/scratch/`.
 - Current plugins target both desktop and mobile. Do not introduce Node.js or Electron runtime dependencies unless deliberately changing that requirement.
-- Do not add telemetry, remote code execution, or transmission of vault contents unless explicitly required by the task.
+- Do not add telemetry, remote code execution, or transmission of vault contents.
 
 ## Commands
 
@@ -42,12 +42,15 @@ The development environment already exposes repository-local and Nix-provided to
 
 Prefer targeted commands while iterating:
 
+- Plugin quality gate (format, lint, type check): `npm run check -w <plugin>`
 - Plugin build: `npm run build -w <plugin>`
-- Plugin check: `npm run check -w <plugin>`
 - Plugin tests: `npm run test -w <plugin>`
+- Plugin code formatting: `npm run fmt -w <plugin>`
+- Plugin linting: `npm run lint -w <plugin>`
+- Plugin type checking only: `npm run check:types -w <plugin>`
 - Rust tests: `cargo test -p <crate>`
 - Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
-- Rust formatting: `cargo fmt --all`
+- Rust formatting: `cargo fmt -p <crate>`
 
 Use workspace-wide checks when a change crosses boundaries or before finalizing when proportionate.
 
@@ -100,14 +103,3 @@ Use workspace-wide checks when a change crosses boundaries or before finalizing 
 
 - Avoid Node.js or Electron APIs unless `isDesktopOnly` is explicitly set to `true` in `manifest.json`.
 - Keep memory and storage usage lightweight to accommodate mobile constraints.
-
-## Manual Vault Testing
-
-To test plugins in Obsidian:
-
-1. Build the target plugin: `vp run build` (and WASM if applicable: `wasm-pack build crates/<crate> --target web`).
-2. Copy files from `plugins/<plugin>/dist/` (`main.js`, `manifest.json`, `styles.css` if present, `.wasm` if present) to:
-   ```
-   <Vault>/.obsidian/plugins/<plugin-id>/
-   ```
-3. Reload plugins / Obsidian and enable the plugin in **Settings → Community plugins**.

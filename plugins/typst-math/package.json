@@ -10,7 +10,9 @@
 		"build": "npm run build:wasm && vp build",
 		"build:wasm": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('typst_math_wasm_bg.wasm', import.meta.url)/'typst_math_wasm_bg.wasm'/g\" pkg/typst_math_wasm.js",
 		"check": "vp check",
-		"check:fix": "vp check --fix",
+		"check:types": "vp check --no-fmt --no-lint",
+		"fmt": "vp fmt",
+		"lint": "vp lint",
 		"test": "vp test"
 	}
 }
