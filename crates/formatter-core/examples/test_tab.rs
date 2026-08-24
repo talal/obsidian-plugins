@@ -2,13 +2,7 @@ use dprint_plugin_markdown::configuration::ConfigurationBuilder;
 use dprint_plugin_markdown::format_text;
 
 fn main() {
-    let global_config = dprint_core::configuration::GlobalConfiguration {
-        indent_width: Some(4),
-        line_width: Some(100),
-        ..Default::default()
-    };
-    let mut config = ConfigurationBuilder::new();
-    config.global_config(global_config);
+    let config = ConfigurationBuilder::new();
     let config = config.build();
 
     let res1 = format_text("~~~\0`-?", &config, |_, _, _| Ok(None))

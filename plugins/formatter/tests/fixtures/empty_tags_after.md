@@ -1,8 +1,8 @@
 ---
+tags:
+title: "Empty Tags"
 created: 2026-01-05
 published:
-title: Empty Tags
-tags:
 ---
 
 # Empty Tags

@@ -9,7 +9,7 @@ One formatting engine, two front ends, zero drift between them:
 - **`formatter-cli`** — a command-line tool (`formatter-cli [PATHS]...`) for formatting vault files from a terminal or script. With no paths, it formats stdin.
 - **`formatter-wasm` + Obsidian plugin** — the same engine compiled to WebAssembly, wrapped by a thin TypeScript plugin that formats the current note through an Obsidian command.
 
-Both are consumers of a single **`formatter-core`** crate. To minimize custom code surface, the core logic relies on `dprint-plugin-markdown` configured strictly with a 4-space indent rule.
+Both are consumers of a single **`formatter-core`** crate. To match Obsidian's four-space indentation, the core delegates Markdown formatting to `dprint-plugin-markdown` with its PythonMarkdown list indentation mode.
 
 ### Explicit non-goals
 
@@ -55,12 +55,4 @@ formatter/                              # cargo workspace root
 
 ### 3.1 Architecture
 
-The engine delegates markdown formatting to `dprint-plugin-markdown`, which strictly respects line width and indentation settings. To prevent `dprint` from mangling Obsidian-specific syntax, the engine performs a pre-processing step:
-
-- **Protection**: We locate regions that should be left completely untouched, such as:
-  - `` ``` ... ``` `` fenced code blocks (handled by core to bypass exotic whitespace normalizer)
-  - `%% ... %%` Obsidian comments (handled by dprint)
-  - `$$ ... $$` math blocks (handled by dprint)
-- **Frontmatter Sorting**: Existing YAML frontmatter is formatted and sorted, with `created` forced to the top and `aliases` next, followed by everything else, and `tags` at the bottom. The formatter never adds frontmatter.
-
-These protections ensure that `dprint` processes the core Markdown structure without destroying Obsidian's non-standard extensions.
+The engine passes the complete Markdown document to `dprint-plugin-markdown` without preprocessing. dprint owns line-ending normalization, Markdown syntax, list indentation, fenced code blocks, comments, math, and other extensions it recognizes. YAML metadata is passed through unchanged; the formatter does not add, sort, parse, or rewrite frontmatter.

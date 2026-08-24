@@ -1,18 +1,15 @@
 ---
-created: 2026-01-04
+title: "Project Alpha"
+next: "[[Project Beta]]"
+tags: ["rust","cli","markdown"]
 aliases:
   - Alpha
   - ProjAlpha
+previous: "[[Project Zero]]"
 start: 2026-01-01
 end: 2026-12-31
-title: Project Alpha
 zzz: Last alphabetical
-previous: '[[Project Zero]]'
-next: '[[Project Beta]]'
-tags:
-  - rust
-  - cli
-  - markdown
+created: 2026-01-04
 ---
 
 # Project Alpha
@@ -39,8 +36,8 @@ and continues here.
 - Be fast
 - Be minimal
 - Be opinionated
-    - nested goal one
-    - nested goal two
+- nested goal one
+- nested goal two
 
 1. First goal
 2. Second goal
@@ -51,8 +48,8 @@ and continues here.
 - [ ] write parser
 - [x] write formatter
 - [ ] write tests
-    - [ ] sub-task under tests
-    - [x] another sub-task
+- [ ] sub-task under tests
+- [x] another sub-task
 
 ## Notes
 
@@ -99,10 +96,13 @@ fn main() {
 [[Design Doc#Heading Name]]
 
 ---
-***
-___
+
+---
+
+---
 
 [^1]: This is a footnote definition.
+
 [^note2]: A second footnote, defined out of order.
 
 ## Edge Cases
@@ -128,15 +128,3 @@ $$
 $$
 
 Inline math: $x = y^2$.
-
-## Anki-Sync Edge Cases
-
-This is a regular card :: with an answer <!--anki:123-->
-Another one ::: bidirectional
-
-%% card start deck=Math::Algebra %%
-Front block
----
-
-Back block
-%% card end %%

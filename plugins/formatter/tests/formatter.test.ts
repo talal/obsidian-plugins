@@ -33,7 +33,7 @@ describe('Prettier Formatter', () => {
 		expect(formatted).toBe(afterContent);
 	});
 
-	it('removes tags key if it is empty/null', async () => {
+	it('preserves existing frontmatter without adding metadata', async () => {
 		const beforeContent = fs.readFileSync(path.join(FIXTURES_DIR, 'empty_tags_before.md'), 'utf-8');
 		const formatted = await formatMarkdown(beforeContent);
 		const afterPath = path.join(FIXTURES_DIR, 'empty_tags_after.md');
@@ -41,7 +41,7 @@ describe('Prettier Formatter', () => {
 		expect(formatted).toBe(afterContent);
 	});
 
-	it('formats list continuation lines with 2 spaces instead of 4', async () => {
+	it("uses dprint's PythonMarkdown list indentation", async () => {
 		const beforeContent = fs.readFileSync(path.join(FIXTURES_DIR, 'wrap_before.md'), 'utf-8');
 		const formatted = await formatMarkdown(beforeContent);
 		const afterPath = path.join(FIXTURES_DIR, 'wrap_after.md');

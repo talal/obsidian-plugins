@@ -1,11 +1,11 @@
 ---
 title: "Project Alpha"
-next: [[Project Beta]]
+next: "[[Project Beta]]"
 tags: ["rust","cli","markdown"]
 aliases:
   - Alpha
   - ProjAlpha
-previous: [[Project Zero]]
+previous: "[[Project Zero]]"
 start: 2026-01-01
 end: 2026-12-31
 zzz: Last alphabetical
@@ -127,15 +127,3 @@ $$
 $$
 
 Inline math: $x = y^2$.
-
-## Anki-Sync Edge Cases
-
-This is a regular card :: with an answer <!--anki:123-->
-Another one ::: bidirectional
-
-%% card start deck=Math::Algebra %%
-Front block
----
-Back block
-%% card end %%
-
