@@ -15,7 +15,9 @@
 		"test": "vp run -r test"
 	},
 	"devDependencies": {
+		"@playwright/cli": "^0.1.18",
 		"@types/node": "^24.1.0",
+		"chrome-devtools-mcp": "^1.8.0",
 		"obsidian": "latest",
 		"typescript": "^7.0.2",
 		"vite-plus": "latest"

@@ -67,7 +67,8 @@ describe('TypstCompiler', () => {
 
 		const result = await lazyCompiler.compile('x', false, mockPlugin);
 
-		expect(result).toContain('<math');
+		expect(result.mathml).toContain('<math');
+		expect(result.css).toContain('mtable');
 		expect(lazyCompiler.isReady()).toBe(true);
 		expect(wasmReads).toBe(1);
 	});
@@ -87,8 +88,8 @@ describe('TypstCompiler', () => {
 			for (const eq of equations) {
 				const result = await compiler.compile(eq.source, eq.display, mockPlugin);
 				// MathML should contain a <math> tag
-				expect(result).toContain('<math');
-				expect(result).toContain('</math>');
+				expect(result.mathml).toContain('<math');
+				expect(result.mathml).toContain('</math>');
 			}
 		});
 	}

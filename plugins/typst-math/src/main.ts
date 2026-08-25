@@ -6,7 +6,7 @@ import type { TypstMathSettings } from './settings';
 declare global {
 	interface Window {
 		MathJax: any;
-		typstMathPlugin: TypstMathPlugin;
+		typstMathPlugin?: TypstMathPlugin;
 	}
 }
 
@@ -24,13 +24,14 @@ class TypstMathElement extends HTMLElement {
 		if (!plugin) return;
 
 		try {
-			const mathml = await plugin.compiler.compile(source, display, plugin);
-			this.innerHTML = mathml;
+			const result = await plugin.compiler.compile(source, display, plugin);
+			this.innerHTML = result.mathml;
+			plugin.applyEquationStylesheet(result.css);
 			this.className = '';
 			this.removeAttribute('title');
 		} catch (e: any) {
 			this.textContent = source;
-			this.title = e.message;
+			this.title = e?.message ?? String(e);
 			this.className = 'typst-math-error';
 		}
 	}
@@ -42,6 +43,9 @@ if (typeof customElements !== 'undefined' && !customElements.get('typst-math')) 
 
 export default class TypstMathPlugin extends Plugin {
 	private originalTex2chtml: any;
+	private unloaded = false;
+	private equationStyleEl: HTMLStyleElement | null = null;
+	private appliedEquationCss: string | null = null;
 	private previousCssVariables: { inline: string; block: string } | null = null;
 	public compiler: TypstCompiler = new TypstCompiler();
 	public settings!: TypstMathSettings;
@@ -52,36 +56,56 @@ export default class TypstMathPlugin extends Plugin {
 		this.applySettings();
 		this.addSettingTab(new TypstMathSettingTab(this.app, this));
 
-		this.app.workspace.onLayoutReady(async () => {
-			// Ensure MathJax is loaded
-			await loadMathJax();
-			if (!window.MathJax) return;
+		this.app.workspace.onLayoutReady(() => void this.installMathJaxOverride());
+	}
 
-			// Trigger side-effects (loads CSS)
-			renderMath('', false);
+	private async installMathJaxOverride(): Promise<void> {
+		await loadMathJax();
 
-			this.originalTex2chtml = window.MathJax.tex2chtml;
+		// The plugin may have been disabled while MathJax was loading; installing
+		// after onunload would leave an override that nothing can restore.
+		if (this.unloaded || !window.MathJax) return;
 
-			window.MathJax.tex2chtml = (source: string, opts: { display?: boolean }) => {
-				const container = document.createElement('mjx-container');
-				container.className = 'Mathjax';
-				container.setAttribute('jax', 'CHTML');
+		// Trigger side-effects (loads CSS)
+		renderMath('', false);
 
-				const el = document.createElement('typst-math');
-				el.setAttribute('source', source);
-				if (opts.display) {
-					el.setAttribute('display', '');
-				}
+		this.originalTex2chtml = window.MathJax.tex2chtml;
 
-				if (!this.compiler.isReady()) {
-					el.textContent = source;
-					el.className = 'typst-math-loading';
-				}
+		window.MathJax.tex2chtml = (source: string, opts: { display?: boolean }) => {
+			const container = document.createElement('mjx-container');
+			container.className = 'Mathjax';
+			container.setAttribute('jax', 'CHTML');
 
-				container.appendChild(el);
-				return container;
-			};
-		});
+			const el = document.createElement('typst-math');
+			el.setAttribute('source', source);
+			if (opts.display) {
+				el.setAttribute('display', '');
+			}
+
+			if (!this.compiler.isReady()) {
+				el.textContent = source;
+				el.className = 'typst-math-loading';
+			}
+
+			container.appendChild(el);
+			return container;
+		};
+	}
+
+	/**
+	 * Injects Typst's own MathML stylesheet, extracted from the compiled
+	 * document at render time so it always matches the compiler version.
+	 */
+	applyEquationStylesheet(css: string | null): void {
+		if (!css || css === this.appliedEquationCss) return;
+
+		if (!this.equationStyleEl) {
+			this.equationStyleEl = document.createElement('style');
+			this.equationStyleEl.dataset.plugin = 'typst-math';
+			document.head.appendChild(this.equationStyleEl);
+		}
+		this.equationStyleEl.textContent = css;
+		this.appliedEquationCss = css;
 	}
 
 	async loadSettings(): Promise<void> {
@@ -129,12 +153,14 @@ export default class TypstMathPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.unloaded = true;
 		this.restoreCssVariables();
+		this.equationStyleEl?.remove();
+		this.equationStyleEl = null;
+		this.appliedEquationCss = null;
 		if (window.MathJax && this.originalTex2chtml) {
 			window.MathJax.tex2chtml = this.originalTex2chtml;
 		}
-		// Clean up global to avoid memory leaks
-		// @ts-ignore
 		delete window.typstMathPlugin;
 	}
 }

@@ -36,9 +36,11 @@ footnote:
   mode, since it produces visually-wrong-but-not-crashing output rather than
   a hard error.
 
-Mitigation: pin the exact Typst patch version (§8.2), and re-run the visual
-comparison in build-order phase 6 (§9) on every version bump before
-adopting it, not just on first implementation.
+Mitigation: pin the exact Typst patch version (§8.2). The companion stylesheet is
+no longer hand-copied — it is extracted from the compiled document at render
+time (§4.6), so CSS and MathML always come from the same compiler build. A
+version bump still warrants a visual spot-check (build-order phase 6, §9), but
+the version-pairing hazard itself is gone.
 
 ---
 
@@ -111,13 +113,13 @@ Instead of relying on a `MarkdownPostProcessor`, we define a custom element `<ty
 
 ```html
 <mjx-container class="Mathjax" jax="CHTML">
-	<typst-math data-source="x^2 + y^2" data-display="false">x^2 + y^2</typst-math>
+	<typst-math source="x^2 + y^2" display>x^2 + y^2</typst-math>
 </mjx-container>
 ```
 
 Element attributes survive `cloneNode()`, which is what makes this work:
 when Obsidian clones the container into an embed, the cloned
-`<typst-math>` element carries `data-source`/`data-display` with it, its
+`<typst-math>` element carries `source`/`display` with it, its
 `connectedCallback` fires on insertion into the new document, and it
 re-renders itself using the now-loaded WASM compiler — reading state off
 its own attributes rather than depending on any reference to the original
@@ -231,16 +233,18 @@ Items marked ⚠️ emit a warning during export and render only their base cont
 
 ### 4.6 MathML CSS styles
 
-Typst generates a companion CSS stylesheet (`EQUATION_CSS_STYLES` in `mathml.rs`) that overrides the browser's MathML Core User Agent stylesheet for correct rendering. This includes rules for:
+Typst emits a companion stylesheet alongside the MathML — the same
+`EQUATION_CSS_STYLES` content that used to be hand-copied into `styles.css`
+— injected as `<style>` elements in the compiled document's `<head>`. It
+corrects browser rendering of MathML Core (alignment on `mtd`, table
+`math-style`/`math-depth`/`math-shift` corrections, multiline row gaps,
+fraction spacing, accent font features, script positioning).
 
-- Alignment (`justify-items`, `text-align` on `mtd`)
-- Tables (`math-style`, `math-depth`, `math-shift` corrections)
-- Multi-line equations (row gap, padding)
-- Fractions (`margin-inline` instead of `padding-inline`)
-- Accents (`font-feature-settings: "dtls"`)
-- Script positioning (`math-shift: compact` for bottom attachments)
-
-These CSS rules must be injected into the document. The plugin injects them once via a `<style>` element on initialization. Per §1.1, this stylesheet is a drift risk in its own right — it's paired to a specific Typst version's MathML output shape, not guaranteed stable across releases.
+The plugin extracts this stylesheet from each compilation result
+(`CompiledMath.css`) and injects it via a plugin-owned `<style>` element,
+updating only when Typst's sheet actually changes. Because CSS and MathML
+come from the same compiler build, they cannot drift apart across Typst
+version bumps (§1.1).
 
 ---
 
@@ -251,7 +255,7 @@ typst-math/
 ├── manifest.json
 ├── package.json
 ├── vite.config.ts
-├── styles.css                       # MathML CSS overrides (from Typst's EQUATION_CSS_STYLES)
+├── styles.css                       # render-state styling, font stack, size variables
 ├── src/
 │   ├── main.ts                      # Plugin entry: MathJax override, Custom Element definition
 │   ├── compiler.ts                  # WASM loader, init, compile(source, display) -> string
@@ -279,22 +283,22 @@ Responsibilities:
 
 1. On `onload()`:
    1. Load and normalize persisted settings, apply the inline/block font-size CSS variables, and register the settings tab.
-   2. Call `loadMathJax()` and `renderMath('', false)` for side-effects.
-   3. Save reference to original `window.MathJax.tex2chtml`.
-   4. Install our override that returns `<mjx-container>` synchronously wrapping a `<typst-math>` Custom Element, with `data-source`/`data-display` attributes set (§3.2).
-   5. Leave WASM uninitialized; the first connected math element triggers initialization through `compiler.compile()`.
+   2. After layout is ready: call `loadMathJax()` and `renderMath('', false)` for side-effects, then patch `window.MathJax.tex2chtml`. An `unloaded` flag guards against installing the override after the plugin was disabled mid-load.
+   3. The override returns `<mjx-container>` synchronously wrapping a `<typst-math>` Custom Element with `source`/`display` attributes (§3.2).
+   4. Leave WASM uninitialized; the first connected math element triggers initialization through `compiler.compile()`, which awaits it.
 2. On `onunload()`:
    1. Restore the previous CSS variable values and original `tex2chtml`.
-   2. Dispose WASM resources.
+   2. Remove the injected equation-stylesheet `<style>` element.
+   3. Dispose WASM resources.
 
 ### 5.2 `src/compiler.ts` — WASM compiler wrapper (~60-80 lines)
 
 Responsibilities:
 
-1. Lazy-load and instantiate the WASM module on first call.
-2. Expose `compile(source: string, display: boolean, plugin: Plugin): Promise<string>`.
+1. Lazy-load and instantiate the WASM module on first call; a failed load resets its promise so the next math element retries instead of caching the failure for the session.
+2. Expose `compile(source: string, display: boolean, plugin: Plugin): Promise<CompileResult>` where `CompileResult = { mathml: string; css: string | null }` (`css` is Typst's own equation stylesheet, §4.6).
 3. Manage the initialized/loading/error state.
-4. Maintain a result cache (`Map<string, string>` keyed on `source + display` → MathML output) to skip recompilation for repeated expressions.
+4. Maintain a result cache (`Map<string, CompileResult>` keyed on `source + display`) to skip recompilation for repeated expressions, plus a single-copy accessor for the latest stylesheet used by the style-element injector in `main.ts`.
 
 ### 5.3 `../typst-math-wasm/src/lib.rs` — WASM entry (~100-150 lines)
 
@@ -321,9 +325,10 @@ Internally:
 1. Wraps source in `$...$` or `$ ... $`.
 2. Updates the virtual source file on the `World`.
 3. Calls `typst::compile::<HtmlDocument>(&world)`.
-4. Calls `typst_html::html(&document, &options)`.
-5. Extracts `<math>` element from the HTML string via string search (find `<math ...` … `</math>`, no DOM parser needed in Rust).
-6. Returns the MathML string or the first compilation error message.
+4. Finds the first `<math>` element by tag identity walking the structured HTML DOM.
+5. Serializes only that subtree via `html_in_bundle` and strips the doctype prefix.
+6. Extracts Typst's own equation stylesheet from the document `<head>`.
+7. Returns `CompiledMath { mathml, css }`, or all compilation diagnostics (messages + hints) as multi-line text.
 
 ### 5.4 `../typst-math-wasm/src/world.rs` — Minimal World (~80-100 lines)
 
@@ -339,9 +344,9 @@ Implements the `World` trait:
 
 No package resolution. No file I/O. No network access.
 
-### 5.5 `styles.css` — MathML CSS overrides
+### 5.5 `styles.css` — render-state styling
 
-Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correct browser rendering of MathML to match Typst's layout engine. It also applies the persisted `--typst-math-inline-font-size` and `--typst-math-block-font-size` variables, defaulting to 18px inline and 20px block when unset. Approximately 40-50 lines of CSS.
+Contains only plugin-owned rules: loading/error state styles, the MathJax font stack applied to rendered MathML, and the persisted `--typst-math-inline-font-size` and `--typst-math-block-font-size` variables, defaulting to 18px inline and 20px block when unset. The MathML UA-override rules are not kept here — they arrive from Typst dynamically (§4.6).
 
 ---
 
@@ -352,17 +357,16 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 1. Obsidian parses markdown, finds `$...$` or `$$...$$`.
 2. Obsidian calls `window.MathJax.tex2chtml(source, { display })`.
 3. Our override:
-   1. Creates `<mjx-container class="Mathjax" jax="CHTML">` wrapping a `<typst-math data-source="..." data-display="...">`.
+   1. Creates `<mjx-container class="Mathjax" jax="CHTML">` wrapping a `<typst-math source="..." display>`.
    2. If WASM not ready:
       - Set the element's text content to `source`.
       - Add class `typst-math-loading`.
-      - Track element for re-render once WASM loads.
-      - Return container.
+      - Return container. The element renders itself asynchronously regardless; `compile()` awaits initialization internally, so no placeholder registry is needed.
    3. If WASM ready:
       - Return container immediately.
       - Fire async: `compiler.compile(source, display)`.
-        - On success: `container.innerHTML = mathml`.
-        - On error: `container.textContent = source`, `container.title = errorMessage`, add class `typst-math-error`.
+        - On success: set `innerHTML = mathml` and forward Typst's stylesheet to the style-element injector (§4.6).
+        - On error: `container.textContent = source`, `container.title = diagnostics`, add class `typst-math-error`.
 4. Browser renders the `<math>` element via native MathML Core.
 
 ### 6.2 WASM initialization
@@ -371,12 +375,11 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 2. Read `.wasm` file binary from the vault via `plugin.app.vault.adapter.readBinary`.
 3. `WebAssembly.compile` and instantiate via the `wasm-bindgen` init function.
 4. WASM module initializes `World` with an empty font book; the browser owns MathML font selection.
-5. Mark compiler as ready.
-6. Re-render all elements with class `typst-math-loading`.
+5. Mark compiler as ready. Elements created before readiness re-render themselves: their pending `compile()` call resolves as soon as initialization completes.
 
 ### 6.3 Embedded notes
 
-1. Obsidian clones the rendered DOM from the original note (including the `<mjx-container>` and its `<typst-math>` child, `data-source`/`data-display` attributes included — see §3.2).
+1. Obsidian clones the rendered DOM from the original note (including the `<mjx-container>` and its `<typst-math>` child, `source`/`display` attributes included — see §3.2).
 2. The cloned `<typst-math>` element is inserted into the new DOM.
 3. The browser automatically fires `connectedCallback` on the `<typst-math>` element.
 4. The element reads `data-source`/`data-display` off itself and calls the now-ready WASM compiler to re-render, with no dependency on the original element or any outer plugin state.
@@ -387,16 +390,16 @@ Contains the CSS rules from Typst's `EQUATION_CSS_STYLES` constant. These correc
 
 | Case                                                                  | Decision                                                                                                                                                   |
 | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WASM not loaded yet when math is encountered                          | Show raw source text as placeholder with `typst-math-loading` class; re-render all placeholders once WASM initializes.                                     |
-| WASM fails to load (corrupt file, unsupported platform)               | Log error to console. Leave MathJax override in place but show raw source with error styling. Do not crash the plugin.                                     |
-| Typst compilation error (invalid math syntax)                         | Show raw source text with `typst-math-error` class and set the error message as the element's `title` attribute (visible on hover).                        |
+| WASM not loaded yet when math is encountered                          | Show raw source text as placeholder with `typst-math-loading` class; the element's own `compile()` awaits initialization, so it re-renders itself when ready. |
+| WASM fails to load (corrupt file, unsupported platform)               | Log error to console, show raw source with error styling. The failed init promise resets, so the next expression retries. Do not crash the plugin.          |
+| Typst compilation error (invalid math syntax)                         | Show raw source text with `typst-math-error` class and set all diagnostics (messages + hints) as the element's multi-line `title` (visible on hover).       |
 | Empty math expression (`$$`)                                          | Return empty `<mjx-container>` — same behavior as MathJax with empty input.                                                                                |
 | Very long/complex expression                                          | Compile synchronously on the main thread for now. Move compilation to a Web Worker if profiling shows UI impact.                                             |
 | Expression contains Typst features beyond math (`#set`, `#let`, etc.) | These will work if they're valid Typst — the full compiler runs. This is acceptable; don't artificially restrict it.                                       |
 | MathJax CSS still loaded (from Obsidian's default)                    | Harmless. MathJax styles target `mjx-*` internal elements which we don't generate. Our MathML `<math>` elements use separate CSS.                          |
-| Plugin disabled/unloaded mid-session                                  | `onunload()` restores original `tex2chtml`. Any already-rendered MathML stays in the DOM until the page refreshes. New math expressions revert to MathJax. |
+| Plugin disabled/unloaded mid-session                                  | `onunload()` restores original `tex2chtml`, removes the equation-stylesheet `<style>` element, and an `unloaded` flag prevents a pending install from re-patching after unload. Already-rendered MathML stays in the DOM until refresh. |
 | Invalid or missing font-size settings                                | Normalize each value to the 8–48px range in 1px increments; missing or legacy percentage values use the 18px/20px defaults.                              |
-| Multiple vaults / windows                                             | Each Obsidian window has its own `window.MathJax` global. The override applies per-window, which is correct.                                               |
+| Multiple vaults / windows                                             | Each Obsidian window has its own `window.MathJax` global, but only the main window is patched; popout coverage is **not yet verified** — a popout rendering through its own MathJax falls back to stock LaTeX output. Verify manually before relying on popouts.                              |
 | Typst version bump changes MathML output shape or CSS needs (§1.1)    | Treated as a breaking change requiring manual re-validation (build-order phase 6), not something to auto-update past without checking.                     |
 
 ---
@@ -443,7 +446,7 @@ Each phase is independently testable.
 3. **Async loading:** Implement the placeholder pattern (show raw source while WASM loads, re-render when ready). Test by opening a note with math before WASM has finished initializing.
 4. **Error handling:** Typst compilation errors displayed inline. Test with intentionally malformed Typst math.
 5. **Embed support:** Implement the `<typst-math>` custom element's `connectedCallback` re-render path, driven entirely by its own `data-source`/`data-display` attributes (§3.2, §6.3) — no `MarkdownPostProcessor` involved. Test by embedding a note containing math via `![[note]]` and opening it before WASM has finished initializing, confirming the embedded copy re-renders independently of the source note's element.
-6. **CSS styles:** Add Typst's `EQUATION_CSS_STYLES` to `styles.css`. Compare rendering of fractions, accents, and matrices against Typst's own HTML output to verify visual correctness. Re-run this comparison on every future Typst version bump, per §1.1.
+6. **CSS styles:** Typst's equation stylesheet arrives automatically with each compile result and is injected dynamically (§4.6), so no vendored copy exists to maintain. Still spot-check rendering of fractions, accents, and matrices against Typst's own HTML output after every future Typst version bump, per §1.1.
 7. **Settings UI:** Register the plugin settings tab with separate inline and block pixel font-size sliders. Persist values with `loadData()`/`saveData()` and apply them through CSS variables without requiring a restart or manual CSS installation.
 8. **Result cache:** `Map<string, string>` in `compiler.ts` to avoid re-compiling identical expressions. Measure before/after with a note containing 50+ math expressions.
 

@@ -1,7 +1,6 @@
-use chrono::{Datelike, Timelike, Utc};
 use std::sync::Mutex;
 use typst::{
-    Library, LibraryExt, World,
+    Feature, Features, Library, LibraryExt, World,
     diag::{FileError, FileResult},
     foundations::{Bytes, Datetime, Duration},
     syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
@@ -19,7 +18,7 @@ pub struct MathWorld {
 impl MathWorld {
     pub fn new() -> Self {
         let library = Library::builder()
-            .with_features(typst::Features::all())
+            .with_features([Feature::Html].into_iter().collect::<Features>())
             .build();
 
         let main = FileId::new(RootedPath::new(
@@ -74,15 +73,7 @@ impl World for MathWorld {
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
-        let now = Utc::now();
-        let naive = now.naive_local();
-        Datetime::from_ymd_hms(
-            naive.year(),
-            naive.month() as u8,
-            naive.day() as u8,
-            naive.hour() as u8,
-            naive.minute() as u8,
-            naive.second() as u8,
-        )
+        // Math-only documents never observe the current date.
+        None
     }
 }

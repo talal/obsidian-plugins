@@ -23,8 +23,20 @@ export function normalizeFontSize(value: unknown, fallback: number): number {
 	return steppedValue;
 }
 
+function debounce(fn: () => void, waitMs: number): () => void {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	return () => {
+		clearTimeout(timeout);
+		timeout = setTimeout(fn, waitMs);
+	};
+}
+
 export class TypstMathSettingTab extends PluginSettingTab {
 	plugin: TypstMathPlugin;
+
+	// Slider drags fire onChange per tick; persist trailing-debounced while the
+	// CSS variables apply instantly.
+	private persistDebounced = debounce(() => void this.plugin.saveSettings(), 500);
 
 	constructor(app: App, plugin: TypstMathPlugin) {
 		super(app, plugin);
@@ -44,13 +56,13 @@ export class TypstMathSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(FONT_SIZE_MIN, FONT_SIZE_MAX, FONT_SIZE_STEP)
 					.setValue(this.plugin.settings.inlineFontSize)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.inlineFontSize = normalizeFontSize(
 							value,
 							DEFAULT_SETTINGS.inlineFontSize,
 						);
 						this.plugin.applySettings();
-						await this.plugin.saveSettings();
+						this.persistDebounced();
 					}),
 			);
 
@@ -61,13 +73,13 @@ export class TypstMathSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(FONT_SIZE_MIN, FONT_SIZE_MAX, FONT_SIZE_STEP)
 					.setValue(this.plugin.settings.blockFontSize)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.blockFontSize = normalizeFontSize(
 							value,
 							DEFAULT_SETTINGS.blockFontSize,
 						);
 						this.plugin.applySettings();
-						await this.plugin.saveSettings();
+						this.persistDebounced();
 					}),
 			);
 	}

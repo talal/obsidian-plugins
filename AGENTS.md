@@ -40,6 +40,8 @@ These are personal, unpublished Obsidian plugins. Optimize for correctness, main
 
 The development environment already exposes repository-local and Nix-provided tools in `PATH`. Do not use `npx` or `nix develop --command`.
 
+Do not run `playwright install` or attempt to download browser binaries; Playwright browsers are already installed and configured by the Nix development shell (`pkgs.playwright-driver.browsers` and `PLAYWRIGHT_BROWSERS_PATH` in `flake.nix`).
+
 Prefer targeted commands while iterating:
 
 - Plugin quality gate (format, lint, type check): `npm run check -w <plugin>`
@@ -51,6 +53,8 @@ Prefer targeted commands while iterating:
 - Rust tests: `cargo test -p <crate>`
 - Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
 - Rust formatting: `cargo fmt -p <crate>`
+
+Typst Math plugin also has fuzzing support: `cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0`
 
 Use workspace-wide checks when a change crosses boundaries or before finalizing when proportionate.
 

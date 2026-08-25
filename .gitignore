@@ -1,6 +1,8 @@
-!.agents/
 !AGENTS.md
+!.agents/
 .agents/scratch/
+.playwright-cli/
+.playwright/
 docs/
 
 # Obsidian

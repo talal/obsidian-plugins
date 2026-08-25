@@ -7,10 +7,6 @@ alias fmt := check-fix
 default:
     @just --list
 
-# install all plugins and components
-[group("install")]
-install-all: install-formatter install-typst-math
-
 # install formatter plugin and CLI
 [group("install")]
 install-formatter:
@@ -28,6 +24,10 @@ install-typst-math:
     mkdir -p {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
     cp plugins/typst-math/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
 
+# run fuzzing across the repository
+fuzz:
+    cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
+
 # run test suites for all plugins and crates
 test:
     cargo test --workspace
@@ -39,7 +39,7 @@ check:
     cargo clippy --workspace --all-targets -- -D warnings
     npm run check
 
-# auto-fix format and lint issues across all files
+# fix formatting and lint issues across the repository
 check-fix:
     cargo fmt --all
     cargo clippy --fix --workspace --allow-no-vcs
