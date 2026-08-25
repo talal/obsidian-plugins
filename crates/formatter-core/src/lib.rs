@@ -16,6 +16,10 @@ pub fn format(input: &str) -> Result<String, FormatError> {
     let mut config = ConfigurationBuilder::new();
     config.list_indent_kind(dprint_plugin_markdown::configuration::ListIndentKind::PythonMarkdown);
     let config = config.build();
+    // dprint can panic on pathological input (see fuzz corpus). catch_unwind turns a
+    // panic into a per-input error so the CLI keeps formatting remaining files.
+    // Requires the `unwind` panic strategy (dev/test, and the `cli` release profile);
+    // WASM always aborts, where a panic traps the instance instead.
     let formatted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         format_text(input, &config, |_, _, _| Ok(None))
     }))

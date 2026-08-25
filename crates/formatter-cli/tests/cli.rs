@@ -36,6 +36,38 @@ fn formats_paths_without_a_subcommand() {
 }
 
 #[test]
+fn a_panicking_file_does_not_abort_the_batch() {
+    let bad = temporary_path("panic");
+    let good = temporary_path("batch");
+    fs::write(&bad, "$\t}\n").expect("write panicking fixture");
+    fs::write(&good, "# Heading\n\n-   item\n").expect("write fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_formatter-cli"))
+        .arg(&bad)
+        .arg(&good)
+        .output()
+        .expect("run obsdfmt");
+
+    let bad_after = fs::read_to_string(&bad);
+    let good_after = fs::read_to_string(&good);
+    let _ = fs::remove_file(&bad);
+    let _ = fs::remove_file(&good);
+
+    assert!(
+        !output.status.success(),
+        "batch should report the failed file"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Error formatting"),
+        "stderr should name the failing file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The panicking file stays untouched and later files are still formatted.
+    assert_eq!(bad_after.expect("read bad file"), "$\t}\n");
+    assert_eq!(good_after.expect("read good file"), "# Heading\n\n- item\n");
+}
+
+#[test]
 fn missing_paths_fail_and_report_on_stderr() {
     let path = temporary_path("missing");
 

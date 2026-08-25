@@ -17,9 +17,9 @@ install-formatter:
     npm run build -w formatter
     mkdir -p {{ obsidian_vault_dir }}/.obsidian/plugins/formatter/
     cp plugins/formatter/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/formatter/
-    cargo build --release -p formatter-cli
+    cargo build --profile cli -p formatter-cli
     mkdir -p ~/.local/bin
-    cp target/release/formatter-cli ~/.local/bin/obsdfmt
+    cp target/cli/formatter-cli ~/.local/bin/obsdfmt
 
 # install typst-math plugin
 [group("install")]

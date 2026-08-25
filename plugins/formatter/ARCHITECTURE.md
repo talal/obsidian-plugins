@@ -45,8 +45,7 @@ formatter/                              # cargo workspace root
     ├── vite.config.ts
     └── src/
         ├── main.ts                     # command and plugin lifecycle
-        ├── formatter.ts                # loads .wasm, calls format_markdown
-        └── logger.ts                   # error logging
+        └── formatter.ts                # lazy-loads .wasm, calls format_markdown
 ```
 
 ---
@@ -56,3 +55,13 @@ formatter/                              # cargo workspace root
 ### 3.1 Architecture
 
 The engine passes the complete Markdown document to `dprint-plugin-markdown` without preprocessing. dprint owns line-ending normalization, Markdown syntax, list indentation, fenced code blocks, comments, math, and other extensions it recognizes. YAML metadata is passed through unchanged; the formatter does not add, sort, parse, or rewrite frontmatter.
+
+### 3.2 Panic containment
+
+dprint can panic on pathological input (found by fuzzing). `formatter-core::format` wraps formatting in `catch_unwind` so a panic becomes a per-input error instead of escaping. That requires the `unwind` panic strategy: dev/test profiles unwind by default, and the CLI ships with the dedicated `cli` release profile (`panic = "unwind"` in the root `Cargo.toml`) so one bad file fails without aborting the rest of the batch. The WASM target always aborts, so a panic there traps the instance and surfaces to the plugin as a rejected promise — shown as an error Notice.
+
+### 3.3 Plugin behavior notes
+
+- WASM initialization is deferred to the first command invocation; startup stays light. A failed load can be retried on the next invocation.
+- Errors go to the console and an Obsidian notice only; no log files are written.
+- After formatting, the cursor is restored by mapping its character offset through the formatted text (not a line-count heuristic), and scroll position is preserved.

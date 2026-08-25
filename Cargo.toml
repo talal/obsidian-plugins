@@ -18,3 +18,9 @@ lto = true # Enable Link Time Optimization (LTO)
 codegen-units = 1 # Reduce parallel code generation units to increase optimization
 panic = 'abort' # Abort on panic
 strip = true # Strip symbols from binary
+
+# formatter-cli ships with unwind panics so formatter-core's catch_unwind can
+# report a panicking file as an error instead of aborting the whole batch.
+[profile.cli]
+inherits = "release"
+panic = "unwind"

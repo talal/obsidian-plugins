@@ -1,80 +1,74 @@
-import { Editor, Plugin, Notice } from 'obsidian';
+import { Editor, Notice, Plugin } from 'obsidian';
 
-import { formatMarkdown, initFormatterWasm } from './formatter';
+import { formatMarkdown } from './formatter';
 
-import { Logger } from './logger';
+interface CursorPosition {
+	line: number;
+	ch: number;
+}
+
+function getCursorOffset(text: string, { line, ch }: CursorPosition): number {
+	const lines = text.split('\n');
+	let offset = 0;
+	for (let i = 0; i < line && i < lines.length; i++) {
+		offset += (lines[i]?.length ?? 0) + 1;
+	}
+	return offset + Math.min(ch, lines[line]?.length ?? 0);
+}
+
+function offsetToCursor(text: string, offset: number): CursorPosition {
+	let line = 0;
+	let lineStart = 0;
+	while (true) {
+		const newline = text.indexOf('\n', lineStart);
+		if (newline === -1 || newline >= offset) break;
+		line++;
+		lineStart = newline + 1;
+	}
+	return { line, ch: offset - lineStart };
+}
 
 export default class RustFormatterPlugin extends Plugin {
-	logger!: Logger;
 	isFormatting = false;
-	lastFormatTime = 0;
 
 	async onload() {
-		this.logger = new Logger(this.app, this, 'Rust Formatter');
-
-		await initFormatterWasm(this);
-
 		this.addCommand({
 			id: 'format-current-note',
 			name: 'Format current note',
-			editorCallback: async (editor: Editor) => {
-				await this.formatActiveNote(editor);
-			},
+			editorCallback: (editor: Editor) => this.formatActiveNote(editor),
 		});
 	}
 
 	async formatActiveNote(editor: Editor) {
-		// isFormatting is instance-level, so concurrent commands across split panes will skip.
 		if (this.isFormatting) return;
-
-		const now = Date.now();
-		if (now - this.lastFormatTime < 500) {
-			return;
-		}
-		this.lastFormatTime = now;
 		this.isFormatting = true;
 
 		try {
 			const originalText = editor.getValue();
-			if (!originalText.trim()) {
-				return;
-			}
+			if (!originalText.trim()) return;
 
-			const cursor = editor.getCursor();
 			const scrollInfo = editor.getScrollInfo();
+			const cursorOffset = getCursorOffset(originalText, editor.getCursor());
 
-			const formattedText = await this.runFormatter(originalText);
-			if (formattedText === originalText) {
-				return;
-			}
-
-			const originalLines = originalText.split('\n').length;
-			const formattedLines = formattedText.split('\n').length;
-			const lineDiff = formattedLines - originalLines;
+			// WASM initialization is deferred to the first invocation.
+			const formattedText = await formatMarkdown(originalText, this);
+			if (formattedText === originalText) return;
 
 			const lastLine = editor.lastLine();
-			const lastLineLength = editor.getLine(lastLine).length;
 			editor.replaceRange(
 				formattedText,
 				{ line: 0, ch: 0 },
-				{ line: lastLine, ch: lastLineLength },
+				{ line: lastLine, ch: editor.getLine(lastLine).length },
 			);
 
-			if (lineDiff !== 0 && cursor.line > 0) {
-				cursor.line += lineDiff;
-			}
-			editor.setCursor(cursor);
+			editor.setCursor(offsetToCursor(formattedText, cursorOffset));
 			editor.scrollTo(scrollInfo.left, scrollInfo.top);
-		} catch (error: any) {
-			void this.logger.logError('Rust formatting failed', error);
+		} catch (error) {
+			console.error('Rust Formatter: formatting failed', error);
 			const message = error instanceof Error ? error.message : String(error);
 			new Notice(`Rust Formatter failed: ${message}`);
 		} finally {
 			this.isFormatting = false;
 		}
-	}
-
-	async runFormatter(text: string): Promise<string> {
-		return await formatMarkdown(text);
 	}
 }

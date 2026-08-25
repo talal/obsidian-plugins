@@ -1,31 +1,22 @@
+import type { Plugin } from 'obsidian';
+
 import initWasm, { format_markdown } from '../../../crates/formatter-wasm/pkg/formatter_wasm.js';
 
-let wasmInited = false;
 let initPromise: Promise<void> | null = null;
 
-export async function initFormatterWasm(plugin: any): Promise<void> {
-	if (wasmInited) return;
-	if (initPromise) return initPromise;
-
-	initPromise = (async () => {
-		try {
+export async function formatMarkdown(text: string, plugin: Plugin): Promise<string> {
+	if (!initPromise) {
+		initPromise = (async () => {
 			const wasmPath = `${plugin.manifest.dir}/formatter_wasm_bg.wasm`;
 			const buffer = await plugin.app.vault.adapter.readBinary(wasmPath);
 			await initWasm({ module_or_path: await WebAssembly.compile(buffer) });
-			wasmInited = true;
-		} catch (e) {
-			console.error('Failed to initialize Formatter WASM', e);
-			throw e;
-		}
-	})();
-
-	return initPromise;
-}
-
-export async function formatMarkdown(text: string): Promise<string> {
-	if (!wasmInited) {
-		throw new Error('Formatter WASM not initialized');
+		})();
+		// Allow a retry after a failed load instead of caching the rejection.
+		initPromise.catch(() => {
+			initPromise = null;
+		});
 	}
 
+	await initPromise;
 	return format_markdown(text);
 }
