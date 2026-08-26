@@ -34,32 +34,57 @@ impl Compiler {
 
     #[wasm_bindgen]
     pub fn compile_math(&self, source: &str, display: bool) -> Result<CompiledMath, String> {
+        // Edge whitespace is visually meaningless in math and would otherwise
+        // feed Typst's block-promotion heuristic in inline mode.
+        let source = source.trim();
         let typst_source = if display {
-            format!("$ {} $", source)
+            // The set rule pins display mode even for empty or broken-up
+            // sources, where Typst's `block: auto` would emit an inline root.
+            format!("#set math.equation(block: true)\n$ {} $", source)
         } else {
             format!("${}$", source)
         };
         self.world.set_source(typst_source);
 
-        let warned = typst::compile::<HtmlDocument>(&self.world);
-        let document = warned
-            .output
-            .map_err(|errors| format_diagnostics(&errors))?;
+        let result = (|| {
+            let warned = typst::compile::<HtmlDocument>(&self.world);
+            let document = warned
+                .output
+                .map_err(|errors| format_diagnostics(&errors))?;
+            let element = first_math_element(document.root_node())
+                .ok_or_else(|| "Failed to extract MathML from HTML output".to_string())?;
+            if let Some(foreign_tag) = first_foreign_tag(element) {
+                return Err(format!(
+                    "embedded non-math content ({foreign_tag}) is not supported"
+                ));
+            }
+            let resolver = LateLinkResolver::new(None, document.introspector().as_ref());
+            let html = html_in_bundle(element, &HtmlOptions::default(), resolver.track()).map_err(
+                |error| format!("HTML serialization failed: {}", format_diagnostics(&error)),
+            )?;
 
-        let element = first_math_element(document.root_node())
-            .ok_or_else(|| "Failed to extract MathML from HTML output".to_string())?;
-        let resolver = LateLinkResolver::new(None, document.introspector().as_ref());
-        let html = html_in_bundle(element, &HtmlOptions::default(), resolver.track()).map_err(
-            |error| format!("HTML serialization failed: {}", format_diagnostics(&error)),
-        )?;
+            let mut mathml = html
+                .strip_prefix(BUNDLE_DOCTYPE)
+                .unwrap_or(&html)
+                .to_string();
+            if display && mathml.starts_with("<math>") {
+                // Typst promotes equations to block via parse-time delimiter
+                // whitespace, so empty or broken-up sources yield a bare root.
+                // The plugin contract promises display mode, so pin the attribute.
+                let root = "<math>".len();
+                mathml.replace_range(..root, "<math display=\"block\">");
+            }
+            let css = head_style_sheet(document.root());
 
-        let mathml = html
-            .strip_prefix(BUNDLE_DOCTYPE)
-            .unwrap_or(&html)
-            .to_string();
-        let css = head_style_sheet(document.root());
+            Ok(CompiledMath { mathml, css })
+        })();
 
-        Ok(CompiledMath { mathml, css })
+        // Memoization misses on every call (engine state participates in the
+        // cache key), so entries accumulate per render and grow memory without
+        // bound. Renders are single-shot; drop the cache to stay flat.
+        typst::comemo::evict(0);
+
+        result
     }
 }
 
@@ -83,6 +108,21 @@ impl CompiledMath {
     pub fn css(&self) -> Option<String> {
         self.css.clone()
     }
+}
+
+/// Returns the tag of the first non-MathML element in the subtree, if any.
+///
+/// Embedded `#code` values serialize as styled HTML islands rather than
+/// MathML; they are rejected upstream instead of failing later validation.
+fn first_foreign_tag(element: &HtmlElement) -> Option<String> {
+    if !tag::mathml::is_mathml(element.tag) {
+        return Some(element.tag.resolve().to_string());
+    }
+    element.children.iter().find_map(|child| match child {
+        HtmlNode::Element(nested) => first_foreign_tag(nested),
+        HtmlNode::Frame(_) => Some(String::from("frame")),
+        _ => None,
+    })
 }
 
 /// Returns the first MathML root in document order.
@@ -171,6 +211,32 @@ mod tests {
         let compiled = compiler.compile_math("x + y", true).unwrap();
 
         assert!(compiled.mathml.starts_with("<math display=\"block\">"));
+    }
+
+    #[test]
+    fn pins_display_mode_for_degenerate_sources() {
+        let compiler = Compiler::new();
+
+        for source in ["", " ", "a$b$c"] {
+            let compiled = compiler.compile_math(source, true).unwrap();
+            assert!(
+                compiled.mathml.starts_with("<math display=\"block\">"),
+                "source {source:?}: {}",
+                compiled.mathml
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_embedded_non_math_content() {
+        let compiler = Compiler::new();
+
+        let error = compiler.compile_math("#true", false).unwrap_err();
+        assert!(error.contains("non-math content"));
+
+        // Content-producing expressions remain valid MathML.
+        let compiled = compiler.compile_math(r#"#text("m/s")"#, false).unwrap();
+        assert!(compiled.mathml.contains("<mtext>"));
     }
 
     #[test]
@@ -310,5 +376,48 @@ mod tests {
             vec![element("head", vec![element("style", vec![])])],
         );
         assert_eq!(head_style_sheet(as_element(&empty_style)), None);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod leak_probe {
+    use super::*;
+
+    fn rss_kb() -> u64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .map(|content| {
+                content
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|resident| resident.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    * 4
+            })
+            .unwrap_or(0)
+    }
+
+    /// Long-running Linux-only regression guard (~70s): memo-cache eviction
+    /// must keep memory flat across repeated compiles. Run explicitly via
+    /// `cargo test -p typst-math-wasm --release -- --ignored`.
+    #[test]
+    #[ignore = "long-running soak; run via cargo test -p typst-math-wasm --release -- --ignored"]
+    fn repeated_compiles_do_not_grow_memory() {
+        let compiler = Compiler::new();
+        // Warm-up pass so one-time initialization is not mistaken for growth.
+        for _ in 0..100 {
+            let _ = compiler.compile_math("#true", true);
+        }
+        let mut baseline = rss_kb();
+        for round in 0..6 {
+            for _ in 0..10_000 {
+                let _ = compiler.compile_math("#true", true);
+            }
+            let current = rss_kb();
+            let delta = current - baseline;
+            println!("round {}: rss={current}kB delta={delta}kB", round + 1);
+            // Eviction keeps the memo cache flat; allow allocator jitter only.
+            assert!(delta < 4096, "memory grew {delta}kB across 10k compiles");
+            baseline = current;
+        }
     }
 }

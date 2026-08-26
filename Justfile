@@ -26,7 +26,10 @@ install-typst-math:
 
 # run fuzzing across the repository
 fuzz:
-    cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
+    cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run format --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
+    cd crates/typst-math-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run compile_math --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
+    npm run fuzz -w typst-math
+    cargo test -p typst-math-wasm --release -- --ignored
 
 # run test suites for all plugins and crates
 test:

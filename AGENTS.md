@@ -53,8 +53,12 @@ Prefer targeted commands while iterating:
 - Rust tests: `cargo test -p <crate>`
 - Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
 - Rust formatting: `cargo fmt -p <crate>`
+- Rust fuzzing (run from the crate's `fuzz/` directory): `cd crates/<crate>/fuzz && ASAN_OPTIONS=detect_leaks=0 cargo fuzz run <target> --release -- -max_total_time=120 -detect_leaks=0` (see `cd crates/<crate>/fuzz && cargo fuzz list` for target list)
 
-Typst Math plugin also has fuzzing support: `cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0`
+Typst Math plugin has additional fuzz campaigns:
+
+- WASM artifact smoke campaign: `npm run fuzz -w typst-math`
+- Memory-bound soak (~70 s): `cargo test -p typst-math-wasm --release -- --ignored`
 
 Use workspace-wide checks when a change crosses boundaries or before finalizing when proportionate.
 

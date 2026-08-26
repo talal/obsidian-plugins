@@ -1,12 +1,8 @@
 [package]
-name = "formatter-core-fuzz"
+name = "typst-math-wasm-fuzz"
 version = "0.0.0"
-edition = "2024"
 publish = false
-
-[profile.release]
-debug-assertions = false
-debug = true
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -14,12 +10,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.formatter-core]
+[dependencies.typst-math-wasm]
 path = ".."
 
 [[bin]]
-name = "format"
-path = "fuzz_targets/format.rs"
+name = "compile_math"
+path = "fuzz_targets/compile_math.rs"
 test = false
 doc = false
 bench = false
