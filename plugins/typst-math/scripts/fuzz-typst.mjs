@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
 import * as fc from 'fast-check';
+
 import init, { Compiler } from '../../../crates/typst-math-wasm/pkg/typst_math_wasm.js';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));

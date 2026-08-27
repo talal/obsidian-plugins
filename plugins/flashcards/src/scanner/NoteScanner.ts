@@ -1,4 +1,5 @@
 import { parseFrontMatterTags, type App, type CachedMetadata, type TFile } from 'obsidian';
+
 import type { DatabaseManager } from '../db/DatabaseManager.js';
 import type { ObsidianSectionHint } from '../types.js';
 import { WasmBridge } from '../wasm.js';

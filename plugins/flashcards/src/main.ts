@@ -1,4 +1,5 @@
 import { type Editor, MarkdownView, Notice, Plugin } from 'obsidian';
+
 import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
 import { FlashcardsSettingTab } from './settings.js';

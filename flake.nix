@@ -34,7 +34,6 @@
 
         # Rust + WASM
         rustToolchain
-        lld
         wasm-pack
         cargo-fuzz
 

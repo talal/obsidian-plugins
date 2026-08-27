@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite-plus';
+
 import { obsidianExternal } from '../../vite.shared.ts';
 
 export default defineConfig({
@@ -56,8 +58,8 @@ export default defineConfig({
 	},
 	fmt: {
 		ignorePatterns: ['dist/**', 'tests/fixtures/**', '*.md', '*.toml'],
-		semi: true,
 		singleQuote: true,
+		sortImports: true,
 		useTabs: true,
 	},
 });

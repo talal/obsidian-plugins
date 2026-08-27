@@ -1,5 +1,6 @@
 import { App, Modal, TFile } from 'obsidian';
 import { mount, unmount } from 'svelte';
+
 import type FlashcardsPlugin from '../main.js';
 import type { FsrsParams, ReviewItem, SchedulingCard } from '../types.js';
 import {

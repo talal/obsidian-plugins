@@ -1,4 +1,5 @@
 import { Plugin } from 'obsidian';
+
 import init, { Compiler } from '../../../crates/typst-math-wasm/pkg/typst_math_wasm.js';
 
 /** A successful compilation: MathML plus Typst's own equation stylesheet. */

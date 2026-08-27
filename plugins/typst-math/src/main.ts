@@ -1,4 +1,5 @@
 import { Plugin, loadMathJax, renderMath } from 'obsidian';
+
 import { TypstCompiler } from './compiler';
 import { DEFAULT_SETTINGS, normalizeFontSize, TypstMathSettingTab } from './settings';
 import type { TypstMathSettings } from './settings';

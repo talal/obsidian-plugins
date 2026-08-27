@@ -1,4 +1,5 @@
 import { type App, Notice, PluginSettingTab, Setting } from 'obsidian';
+
 import type FlashcardsPlugin from './main.js';
 import type { FsrsParams } from './types.js';
 import { DEFAULT_RELEARNING_STEPS, parseStudySteps } from './utils/studySteps.js';

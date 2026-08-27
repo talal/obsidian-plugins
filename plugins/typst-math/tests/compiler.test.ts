@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { TypstCompiler } from '../src/compiler';
 import * as fs from 'fs';
 import * as path from 'path';
+
+import { describe, it, expect, beforeAll } from 'vitest';
+
+import { TypstCompiler } from '../src/compiler';
 
 // Helper to extract math from markdown
 // Returns an array of { source: string, display: boolean }

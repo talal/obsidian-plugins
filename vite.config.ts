@@ -16,8 +16,8 @@ export default defineConfig({
 			'skills-lock.json',
 			'tests/fixtures/**',
 		],
-		semi: true,
 		singleQuote: true,
+		sortImports: true,
 		useTabs: true,
 	},
 });

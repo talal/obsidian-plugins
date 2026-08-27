@@ -1,5 +1,6 @@
 import type { App, PluginManifest } from 'obsidian';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
+
 import initWasm, {
 	calculate_schedule,
 	init,

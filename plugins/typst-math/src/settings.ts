@@ -1,4 +1,5 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
+
 import type TypstMathPlugin from './main';
 
 export interface TypstMathSettings {

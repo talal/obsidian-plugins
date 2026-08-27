@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+
 import type { Plugin } from 'obsidian';
+import { describe, it, expect } from 'vitest';
+
 import { formatMarkdown } from '../src/formatter';
 
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');

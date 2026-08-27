@@ -1,5 +1,6 @@
 import type { App, PluginManifest } from 'obsidian';
 import type { Database } from 'sql.js';
+
 import type {
 	DashboardStats,
 	ParsedBlock,

@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll } from 'vitest';
 import initSqlJs, { type SqlJsStatic } from 'sql.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+
 import {
 	DatabaseManager,
 	getStudyDayCutoff,

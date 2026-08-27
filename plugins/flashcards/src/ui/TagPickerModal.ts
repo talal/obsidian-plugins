@@ -1,9 +1,10 @@
 import { App, Modal, Notice } from 'obsidian';
 import { mount, unmount } from 'svelte';
+
 import type FlashcardsPlugin from '../main.js';
 import { matchCardTags } from '../utils/dashboardFilter.js';
-import { ReviewModal } from './ReviewModal.js';
 import TagPickerModalComponent from './components/TagPickerModal.svelte';
+import { ReviewModal } from './ReviewModal.js';
 
 export class TagPickerModal extends Modal {
 	private component: ReturnType<typeof TagPickerModalComponent> | undefined;

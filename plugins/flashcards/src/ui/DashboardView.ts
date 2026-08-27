@@ -1,11 +1,12 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import { mount, unmount } from 'svelte';
+
+import { getStudyDayCutoff } from '../db/DatabaseManager.js';
 import type FlashcardsPlugin from '../main.js';
 import type { ReviewItem } from '../types.js';
-import { getStudyDayCutoff } from '../db/DatabaseManager.js';
+import DashboardViewComponent from './components/DashboardView.svelte';
 import { ReviewModal } from './ReviewModal.js';
 import { TagPickerModal } from './TagPickerModal.js';
-import DashboardViewComponent from './components/DashboardView.svelte';
 
 export const FLASHCARDS_DASHBOARD_VIEW_TYPE = 'flashcards-dashboard-view';
 
