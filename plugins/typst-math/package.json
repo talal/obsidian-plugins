@@ -1,8 +1,7 @@
 {
 	"name": "typst-math",
 	"version": "0.1.0",
-	"description": "Render Typst math via MathML in Obsidian",
-	"keywords": [],
+	"description": "Typst Math syntax plugin for Obsidian",
 	"license": "0BSD",
 	"type": "module",
 	"main": "dist/main.js",

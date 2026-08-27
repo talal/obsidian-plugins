@@ -8,8 +8,12 @@ These are personal, unpublished Obsidian plugins. Optimize for correctness, main
 
 - `plugins/` contains the TypeScript Obsidian plugins.
 - `crates/` contains Rust and WASM components shared by plugins.
+- `docs/` contains local reference documentation:
+  - `docs/obsidian-api/`: Official Obsidian TypeScript definitions (`obsidian.d.ts`, `publish.d.ts`, `canvas.d.ts`).
+  - `docs/obsidian-developer-docs/`: Official Obsidian developer documentation and guides.
+  - `docs/obsidian-sample-plugin/`: Official Obsidian sample plugin reference implementation.
 - Read a plugin's `ARCHITECTURE.md` before making architectural or cross-component changes.
-- Reference documentation may be available under the gitignored `docs/` directory.
+- Keep each plugin's `ARCHITECTURE.md` up-to-date whenever introducing architectural changes, new components, schema updates, or modifying design decisions.
 
 ## Core principles
 
@@ -72,6 +76,7 @@ Use workspace-wide checks when a change crosses boundaries or before finalizing 
 
 ### Architecture & Lifecycle
 
+- **Keep `ARCHITECTURE.md` up-to-date**: Update the plugin's `ARCHITECTURE.md` whenever adding features, changing component responsibilities, updating data schemas, or modifying design decisions.
 - **Organize code across multiple files**: Split functionality into separate modules rather than placing everything in `main.ts`.
 - **Minimal `main.ts`**: Keep `main.ts` small and focused strictly on the plugin lifecycle (`onload`, `onunload`, registering commands/events). Delegate feature logic to dedicated modules (`settings.ts`, `commands/`, `ui/`, `utils/`, `types.ts`).
 - **File size limit**: If any file exceeds ~200-300 lines, break it into smaller, focused modules.
@@ -98,6 +103,13 @@ Use workspace-wide checks when a change crosses boundaries or before finalizing 
 - **No remote code execution**: Never fetch and `eval` remote scripts or execute dynamic remote code.
 - **Vault containment**: Never access, read, or write files outside the user's vault.
 - **Privacy**: Never collect or transmit vault contents, note titles, or personal data unless essential to the feature and explicitly consented to by the user.
+
+### User Interface & Styling
+
+- **Prefer native Obsidian components and classes**: Do not create custom CSS classes, custom UI wrappers, or bespoke HTML structures when official Obsidian components and utility classes exist. Always reference `docs/obsidian-developer-docs/` (e.g. `Reference/CSS variables/Components/`, `Plugins/User interface/`).
+- **Use foundational CSS variables**: Style UI elements using Obsidian's foundational CSS variables (`Reference/CSS variables/Foundations/` for borders, colors, layers, radiuses, spacing, typography) rather than hardcoded pixel values or custom colors.
+- **No unnecessary fallbacks**: Use standard CSS variables directly (e.g. `var(--font-ui-medium)` instead of `var(--font-ui-medium, 15px)`).
+- **Native modal patterns**: Use `Modal.setTitle()`, `.setting-item-description`, `.search-input-container`, `.modal-button-container`, and `.mod-cta` rather than inventing custom modal headers or wrapper elements.
 
 ### UX & Copy Guidelines
 

@@ -24,8 +24,16 @@ install-typst-math:
     mkdir -p {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
     cp plugins/typst-math/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
 
+# install flashcards plugin
+[group("install")]
+install-flashcards:
+    npm run build -w flashcards
+    mkdir -p {{ obsidian_vault_dir }}/.obsidian/plugins/flashcards/
+    cp plugins/flashcards/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/flashcards/
+
 # run fuzzing across the repository
 fuzz:
+    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run parse seeds/parse --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
     cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run format --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
     cd crates/typst-math-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run compile_math --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
     npm run fuzz -w typst-math

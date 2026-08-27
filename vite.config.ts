@@ -8,7 +8,14 @@ export default defineConfig({
 		},
 	},
 	fmt: {
-		ignorePatterns: ['.agents/**', 'dist/**', 'tests/fixtures/**', '*.md', '*.toml'],
+		ignorePatterns: [
+			'*.md',
+			'*.toml',
+			'.agents/**',
+			'dist/**',
+			'skills-lock.json',
+			'tests/fixtures/**',
+		],
 		semi: true,
 		singleQuote: true,
 		useTabs: true,

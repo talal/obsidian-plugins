@@ -7,5 +7,6 @@
 
 | Name                             | Description                                     |
 | -------------------------------- | ----------------------------------------------- |
+| [Flashcards](plugins/flashcards) | Spaced repetition flashcards powered by FSRS-6. |
 | [Formatter](plugins/formatter)   | Format notes using a fast Rust-based formatter. |
 | [Typst Math](plugins/typst-math) | Write math using Typst instead of LaTeX.        |

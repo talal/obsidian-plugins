@@ -39,14 +39,15 @@
         cargo-fuzz
 
         # Tools
-        ast-grep
-        bun
-        codegraph
+        ast-grep # for coding agents
+        bun # for scripts
+        codegraph # for coding agents
         just
-        playwright-driver.browsers
-        python314
+        playwright-driver.browsers # for debugging
+        python314 # for scripts
         ripgrep
         skills
+        sqlite
       ];
 
       shellHook = ''

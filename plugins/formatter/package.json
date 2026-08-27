@@ -1,8 +1,7 @@
 {
 	"name": "formatter",
 	"version": "0.1.0",
-	"description": "Formatter plugin for Obsidian",
-	"keywords": [],
+	"description": "Markdown formatting plugin for Obsidian",
 	"license": "0BSD",
 	"type": "module",
 	"main": "dist/main.js",

@@ -2,8 +2,8 @@
 	"id": "typst-math",
 	"name": "Typst Math",
 	"version": "0.1.0",
-	"minAppVersion": "1.0.0",
-	"description": "Render Typst math via MathML.",
+	"minAppVersion": "1.13.0",
+	"description": "Write math using Typst instead of LaTeX.",
 	"author": "Talal",
 	"isDesktopOnly": false
 }

@@ -1,0 +1,9 @@
+{
+	"id": "flashcards",
+	"name": "Flashcards",
+	"version": "0.1.0",
+	"minAppVersion": "1.13.0",
+	"description": "Spaced repetition flashcards powered by FSRS-6.",
+	"author": "Talal",
+	"isDesktopOnly": false
+}

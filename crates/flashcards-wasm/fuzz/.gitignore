@@ -1,0 +1,9 @@
+target
+corpus
+artifacts
+coverage
+
+# Keep curated regression seeds while allowing libFuzzer to grow this corpus
+# in place during local runs.
+seeds/parse/*
+!seeds/parse/*.md

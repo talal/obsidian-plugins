@@ -1,6 +1,6 @@
 # Typst Math Plugin — Architecture
 
-**Status:** Personal plugin, not published. Optimize for simplicity and minimal code surface. Obsidian plugin only — no CLI, no shared workspace with other tools. The plugin exposes separate inline and block math font-size settings.
+**Status:** Personal plugin, not published. Optimize for simplicity and minimal code surface.
 
 ## 1. Purpose & Scope
 
@@ -388,19 +388,19 @@ Contains only plugin-owned rules: loading/error state styles, the MathJax font s
 
 ## 7. Edge Cases & Decisions
 
-| Case                                                                  | Decision                                                                                                                                                   |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WASM not loaded yet when math is encountered                          | Show raw source text as placeholder with `typst-math-loading` class; the element's own `compile()` awaits initialization, so it re-renders itself when ready. |
-| WASM fails to load (corrupt file, unsupported platform)               | Log error to console, show raw source with error styling. The failed init promise resets, so the next expression retries. Do not crash the plugin.          |
-| Typst compilation error (invalid math syntax)                         | Show raw source text with `typst-math-error` class and set all diagnostics (messages + hints) as the element's multi-line `title` (visible on hover).       |
-| Empty math expression (`$$`)                                          | Return empty `<mjx-container>` — same behavior as MathJax with empty input.                                                                                |
-| Very long/complex expression                                          | Compile synchronously on the main thread for now. Move compilation to a Web Worker if profiling shows UI impact.                                             |
-| Expression contains Typst features beyond math (`#set`, `#let`, etc.) | These will work if they're valid Typst — the full compiler runs. This is acceptable; don't artificially restrict it.                                       |
-| MathJax CSS still loaded (from Obsidian's default)                    | Harmless. MathJax styles target `mjx-*` internal elements which we don't generate. Our MathML `<math>` elements use separate CSS.                          |
-| Plugin disabled/unloaded mid-session                                  | `onunload()` restores original `tex2chtml`, removes the equation-stylesheet `<style>` element, and an `unloaded` flag prevents a pending install from re-patching after unload. Already-rendered MathML stays in the DOM until refresh. |
-| Invalid or missing font-size settings                                | Normalize each value to the 8–48px range in 1px increments; missing or legacy percentage values use the 18px/20px defaults.                              |
-| Multiple vaults / windows                                             | Each Obsidian window has its own `window.MathJax` global, but only the main window is patched; popout coverage is **not yet verified** — a popout rendering through its own MathJax falls back to stock LaTeX output. Verify manually before relying on popouts.                              |
-| Typst version bump changes MathML output shape or CSS needs (§1.1)    | Treated as a breaking change requiring manual re-validation (build-order phase 6), not something to auto-update past without checking.                     |
+| Case                                                                  | Decision                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WASM not loaded yet when math is encountered                          | Show raw source text as placeholder with `typst-math-loading` class; the element's own `compile()` awaits initialization, so it re-renders itself when ready.                                                                                                    |
+| WASM fails to load (corrupt file, unsupported platform)               | Log error to console, show raw source with error styling. The failed init promise resets, so the next expression retries. Do not crash the plugin.                                                                                                               |
+| Typst compilation error (invalid math syntax)                         | Show raw source text with `typst-math-error` class and set all diagnostics (messages + hints) as the element's multi-line `title` (visible on hover).                                                                                                            |
+| Empty math expression (`$$`)                                          | Return empty `<mjx-container>` — same behavior as MathJax with empty input.                                                                                                                                                                                      |
+| Very long/complex expression                                          | Compile synchronously on the main thread for now. Move compilation to a Web Worker if profiling shows UI impact.                                                                                                                                                 |
+| Expression contains Typst features beyond math (`#set`, `#let`, etc.) | These will work if they're valid Typst — the full compiler runs. This is acceptable; don't artificially restrict it.                                                                                                                                             |
+| MathJax CSS still loaded (from Obsidian's default)                    | Harmless. MathJax styles target `mjx-*` internal elements which we don't generate. Our MathML `<math>` elements use separate CSS.                                                                                                                                |
+| Plugin disabled/unloaded mid-session                                  | `onunload()` restores original `tex2chtml`, removes the equation-stylesheet `<style>` element, and an `unloaded` flag prevents a pending install from re-patching after unload. Already-rendered MathML stays in the DOM until refresh.                          |
+| Invalid or missing font-size settings                                 | Normalize each value to the 8–48px range in 1px increments; missing or legacy percentage values use the 18px/20px defaults.                                                                                                                                      |
+| Multiple vaults / windows                                             | Each Obsidian window has its own `window.MathJax` global, but only the main window is patched; popout coverage is **not yet verified** — a popout rendering through its own MathJax falls back to stock LaTeX output. Verify manually before relying on popouts. |
+| Typst version bump changes MathML output shape or CSS needs (§1.1)    | Treated as a breaking change requiring manual re-validation (build-order phase 6), not something to auto-update past without checking.                                                                                                                           |
 
 ---
 
