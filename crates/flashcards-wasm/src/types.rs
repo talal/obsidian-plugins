@@ -1,33 +1,30 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CardType {
-    InlineForward,
-    InlineBoth,
+pub enum CardBlockType {
+    Inline,
     Block,
     Cloze,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CardDirection {
-    Forward,
-    Reverse,
-    Both,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParsedBlock {
-    pub block_id: String,
-    pub card_type: CardType,
-    pub direction: CardDirection,
-    pub front_raw: String,
-    pub back_raw: String,
+    pub id: String,
+    pub block_type: CardBlockType,
+    pub reversible: bool,
+    pub front: String,
+    pub back: String,
     pub tags: Vec<String>,
     pub content_hash: String,
     pub line_start: usize,
     pub line_end: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DocumentSyncResult {
+    pub updated_content: Option<String>,
+    pub blocks: Vec<ParsedBlock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,13 +36,80 @@ pub enum Rating {
     Easy = 4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     New = 0,
     Learning = 1,
     Review = 2,
     Relearning = 3,
+}
+
+impl Serialize for State {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            State::New => serializer.serialize_str("new"),
+            State::Learning => serializer.serialize_str("learning"),
+            State::Review => serializer.serialize_str("review"),
+            State::Relearning => serializer.serialize_str("relearning"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for State {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StateVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StateVisitor {
+            type Value = State;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a state integer (0..=3) or string ('new', 'learning', 'review', 'relearning')",
+                )
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<State, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    0 => Ok(State::New),
+                    1 => Ok(State::Learning),
+                    2 => Ok(State::Review),
+                    3 => Ok(State::Relearning),
+                    _ => Err(E::custom(format!("invalid state integer: {value}"))),
+                }
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<State, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_i64(value as i64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<State, E>
+            where
+                E: serde::de::Error,
+            {
+                match value.to_ascii_lowercase().as_str() {
+                    "new" | "0" => Ok(State::New),
+                    "learning" | "1" => Ok(State::Learning),
+                    "review" | "2" => Ok(State::Review),
+                    "relearning" | "3" => Ok(State::Relearning),
+                    _ => Err(E::custom(format!("invalid state string: {value}"))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(StateVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -115,7 +179,8 @@ pub struct SchedulingCard {
     pub relearning_step: u32,
     pub state: State,
     pub last_review: Option<i64>, // Epoch ms
-    pub due: i64,                 // Epoch ms
+    #[serde(alias = "due_at")]
+    pub due: i64, // Epoch ms
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

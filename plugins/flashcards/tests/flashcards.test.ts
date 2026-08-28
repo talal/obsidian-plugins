@@ -1,30 +1,48 @@
-import initSqlJs, { type SqlJsStatic } from 'sql.js';
-import { describe, it, expect, beforeAll } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 
+import initSqlJs, { type SqlJsStatic } from 'sql.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+
+import initWasm from '../../../crates/flashcards-wasm/pkg/flashcards_wasm.js';
 import {
 	DatabaseManager,
 	getStudyDayCutoff,
 	getStudyDayKey,
 	getStudyDayStart,
 } from '../src/db/DatabaseManager.ts';
+import SCHEMA_SQL from '../src/db/schema.sql?raw';
 import {
-	deduplicateBlockIds,
-	generateBlockId,
-	resolveNoteIdCollision,
-	stampBlockId,
-} from '../src/scanner/identity.ts';
-import { DEFAULT_SETTINGS, type ParsedBlock } from '../src/types.ts';
+	computeSha256,
+	isValidSqliteHeader,
+	packSnapshot,
+	unpackAndVerifySnapshot,
+} from '../src/db/snapshot.ts';
+import {
+	DEFAULT_SETTINGS,
+	type FsrsParams,
+	type ParsedBlock,
+	type ReviewItem,
+	type ReviewRecord,
+	type SchedulingCard,
+	type SessionRecord,
+} from '../src/types.ts';
+import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardCards.ts';
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
+import { ReviewSessionCache } from '../src/utils/ReviewSessionCache.ts';
+import { formatLocalDate, shiftLocalDateKey } from '../src/utils/studyDay.ts';
 import {
 	DEFAULT_LEARNING_STEPS,
 	DEFAULT_RELEARNING_STEPS,
 	parseStudySteps,
 } from '../src/utils/studySteps.ts';
+import { computeTagDeckStats } from '../src/utils/tagStats.ts';
+import { toggleCardTodoInMarkdown } from '../src/utils/todoTag.ts';
+import { WasmBridge } from '../src/wasm.ts';
 
 describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 	it('calculates start and cutoff for evening reviews (e.g. 21:00)', () => {
-		// 9:00 PM on May 15
 		const testTime = new Date(2026, 4, 15, 21, 0, 0, 0);
 		const startMs = getStudyDayStart(4, testTime);
 		const cutoffMs = getStudyDayCutoff(4, testTime);
@@ -40,7 +58,6 @@ describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 	});
 
 	it('calculates start and cutoff for late-night reviews before rollover (e.g. 02:30 AM)', () => {
-		// 2:30 AM on May 16 (belongs to May 15 study day)
 		const testTime = new Date(2026, 4, 16, 2, 30, 0, 0);
 		const startMs = getStudyDayStart(4, testTime);
 		const cutoffMs = getStudyDayCutoff(4, testTime);
@@ -56,7 +73,6 @@ describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 	});
 
 	it('calculates start and cutoff right after rollover (e.g. 04:01 AM)', () => {
-		// 4:01 AM on May 16 (belongs to May 16 study day)
 		const testTime = new Date(2026, 4, 16, 4, 1, 0, 0);
 		const startMs = getStudyDayStart(4, testTime);
 		const cutoffMs = getStudyDayCutoff(4, testTime);
@@ -159,118 +175,214 @@ describe('Dashboard Search & Tag Filter Logic', () => {
 			},
 		];
 
-		// #art should match Art History (#art, #art/renaissance) but NOT Cardiology (#heart)
 		const artMatches = cards.filter((c) => filterDashboardCard(c, '#art'));
 		expect(artMatches).toHaveLength(1);
 		expect(artMatches[0]?.noteTitle).toBe('Art History');
 
-		// #art/renaissance matches Art History
 		const subtagMatches = cards.filter((c) => filterDashboardCard(c, '#art/renaissance'));
 		expect(subtagMatches).toHaveLength(1);
 		expect(subtagMatches[0]?.noteTitle).toBe('Art History');
 	});
+});
 
-	it('handles non-English (Arabic / Urdu) filenames, notes, and search queries', () => {
-		const cards = [
-			{
-				noteTitle: 'پنجابی دا ذخیرہ الفاظ',
-				notePath: 'Notes/پنجابی دا ذخیرہ الفاظ.md',
-				front: 'پانی',
-				back: 'Water',
-				tags: ['پنجابی', 'ذخیرہ'],
+describe('Dual-Slot Persistence Protocol (cards.a.db / cards.b.db)', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+		WasmBridge.initForTest(SQL);
+
+		const wasmPath = path.resolve(
+			__dirname,
+			'../../../crates/flashcards-wasm/pkg/flashcards_wasm_bg.wasm',
+		);
+		const wasmBuffer = fs.readFileSync(wasmPath);
+		await initWasm({ module_or_path: wasmBuffer });
+	});
+
+	it('packs and unpacks 48-byte header with SHA-256 checksum verification', async () => {
+		const rawDb = new SQL.Database();
+		rawDb.run(SCHEMA_SQL);
+		const payload = rawDb.export();
+		expect(isValidSqliteHeader(payload)).toBe(true);
+
+		const sha256 = await computeSha256(payload);
+		const generation = 42n;
+
+		const packed = packSnapshot(payload, generation, sha256);
+		expect(packed.length).toBe(48 + payload.length);
+
+		const unpacked = await unpackAndVerifySnapshot(packed);
+		expect(unpacked).not.toBeNull();
+		expect(unpacked?.generation).toBe(42n);
+		expect(unpacked?.payloadLength).toBe(payload.length);
+		expect(unpacked?.payload).toEqual(payload);
+	});
+
+	it('rejects corrupt snapshots (tampered payload or invalid magic)', async () => {
+		const rawDb = new SQL.Database();
+		rawDb.run(SCHEMA_SQL);
+		const payload = rawDb.export();
+		const sha256 = await computeSha256(payload);
+		const packed = packSnapshot(payload, 1n, sha256);
+
+		// Case 1: Corrupted byte in payload
+		const tamperedPayload = new Uint8Array(packed);
+		tamperedPayload[60] = (tamperedPayload[60] ?? 0) ^ 0xff;
+		expect(await unpackAndVerifySnapshot(tamperedPayload)).toBeNull();
+
+		// Case 2: Invalid Magic bytes
+		const badMagic = new Uint8Array(packed);
+		badMagic[0] = 0x00;
+		expect(await unpackAndVerifySnapshot(badMagic)).toBeNull();
+
+		// Case 3: Truncated buffer
+		const truncated = packed.subarray(0, 30);
+		expect(await unpackAndVerifySnapshot(truncated)).toBeNull();
+	});
+
+	it('recovers from higher generation slot on startup and handles corrupted sibling slot', async () => {
+		const rawDb = new SQL.Database();
+		rawDb.run(SCHEMA_SQL);
+		const payload = rawDb.export();
+		const sha = await computeSha256(payload);
+
+		const slotABytes = packSnapshot(payload, 10n, sha);
+		const slotBBytes = packSnapshot(payload, 11n, sha);
+
+		// Mock file system with both slots valid: should choose Slot B (gen 11 > gen 10)
+		const mockStorage: Record<string, Uint8Array> = {
+			'.obsidian/plugins/flashcards/cards.a.db': slotABytes,
+			'.obsidian/plugins/flashcards/cards.b.db': slotBBytes,
+		};
+
+		const mockApp = {
+			vault: {
+				adapter: {
+					exists: async (p: string) => p in mockStorage,
+					readBinary: async (p: string) => mockStorage[p]?.buffer ?? new ArrayBuffer(0),
+					writeBinary: async (p: string, b: ArrayBuffer) => {
+						mockStorage[p] = new Uint8Array(b);
+					},
+					remove: async (p: string) => {
+						delete mockStorage[p];
+					},
+				},
 			},
-			{
-				noteTitle: 'English Note',
-				notePath: 'Notes/English.md',
-				front: 'Hello',
-				back: 'World',
-				tags: ['english'],
+		} as any;
+
+		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
+		await dbManager.init();
+
+		const active = dbManager.getActiveSlot();
+		expect(active.slot).toBe('b');
+		expect(active.generation).toBe(11n);
+
+		// Now simulate corrupting Slot B on disk: should recover cleanly from intact Slot A
+		const corruptedSlotB = new Uint8Array(slotBBytes);
+		const byteVal = corruptedSlotB[50] ?? 0;
+		corruptedSlotB[50] = byteVal ^ 0xff;
+		mockStorage['.obsidian/plugins/flashcards/cards.b.db'] = corruptedSlotB;
+
+		const dbManagerRecovery = new DatabaseManager(mockApp, {
+			dir: '.obsidian/plugins/flashcards',
+		} as any);
+		await dbManagerRecovery.init();
+
+		const recoveredActive = dbManagerRecovery.getActiveSlot();
+		expect(recoveredActive.slot).toBe('a');
+		expect(recoveredActive.generation).toBe(10n);
+	});
+
+	it('alternates slots and increments 64-bit BigInt generation on consecutive persists', async () => {
+		const mockStorage: Record<string, Uint8Array> = {};
+		const mockApp = {
+			vault: {
+				adapter: {
+					exists: async (p: string) => p in mockStorage,
+					readBinary: async (p: string) => mockStorage[p]?.buffer ?? new ArrayBuffer(0),
+					writeBinary: async (p: string, b: ArrayBuffer) => {
+						mockStorage[p] = new Uint8Array(b);
+					},
+					remove: async (p: string) => {
+						delete mockStorage[p];
+					},
+				},
 			},
-		];
+		} as any;
 
-		const matchByUrduTag = cards.filter((c) => filterDashboardCard(c, '#پنجابی'));
-		expect(matchByUrduTag).toHaveLength(1);
-		expect(matchByUrduTag[0]?.noteTitle).toBe('پنجابی دا ذخیرہ الفاظ');
+		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
+		await dbManager.init();
 
-		const matchByUrduText = cards.filter((c) => filterDashboardCard(c, 'پانی'));
-		expect(matchByUrduText).toHaveLength(1);
-		expect(matchByUrduText[0]?.front).toBe('پانی');
+		// Initial state (empty DB): Slot A, Generation 0
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 0n });
+
+		// 1st persist -> Writes to Slot B, Gen 1
+		await dbManager.persist();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
+		expect(mockStorage['.obsidian/plugins/flashcards/cards.b.db']).toBeDefined();
+
+		// 2nd persist -> Writes to Slot A, Gen 2
+		await dbManager.persist();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 2n });
+		expect(mockStorage['.obsidian/plugins/flashcards/cards.a.db']).toBeDefined();
+
+		// 3rd persist -> Writes to Slot B, Gen 3
+		await dbManager.persist();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 3n });
+
+		// 4th persist -> Writes to Slot A, Gen 4
+		await dbManager.persist();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 4n });
+	});
+
+	it('handles read-back verification failure without advancing slot or generation', async () => {
+		const mockStorage: Record<string, Uint8Array> = {};
+		let corruptReadBack = false;
+
+		const mockApp = {
+			vault: {
+				adapter: {
+					exists: async (p: string) => p in mockStorage,
+					readBinary: async (p: string) => {
+						const buf = mockStorage[p];
+						if (!buf) return new ArrayBuffer(0);
+						if (corruptReadBack) {
+							// Return corrupted data on read-back
+							const corrupted = new Uint8Array(buf);
+							corrupted[10] = (corrupted[10] ?? 0) ^ 0xff;
+							return corrupted.buffer;
+						}
+						return buf.buffer;
+					},
+					writeBinary: async (p: string, b: ArrayBuffer) => {
+						mockStorage[p] = new Uint8Array(b);
+					},
+					remove: async (p: string) => {
+						delete mockStorage[p];
+					},
+				},
+			},
+		} as any;
+
+		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
+		await dbManager.init();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 0n });
+
+		// Normal persist -> moves to Slot B, Gen 1
+		await dbManager.persist();
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
+
+		// Trigger read-back corruption
+		corruptReadBack = true;
+		await expect(dbManager.persist()).rejects.toThrow(/Dual-slot read-back verification failed/);
+
+		// Must NOT have advanced generation or switched slot
+		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
 	});
 });
 
-describe('Collision Detection & Self-Healing Identity Logic (Production Modules)', () => {
-	it('generates 6-character hex block IDs', () => {
-		const id = generateBlockId();
-		expect(id).toMatch(/^[0-9a-f]{6}$/);
-	});
-
-	it('detects duplicate note UUID across distinct file paths in the same scan', () => {
-		const noteAUuid = 'df51ff8d-c34b-4137-b72d-2127ff9c56bd';
-		const registeredNoteIds = new Map<string, string>([[noteAUuid, 'Note A.md']]);
-
-		const res = resolveNoteIdCollision({
-			noteId: noteAUuid,
-			filePath: 'Note B.md',
-			conflictingPathInVault: registeredNoteIds.get(noteAUuid),
-		});
-
-		expect(res.idCollisionFixed).toBe(true);
-		expect(res.noteId).toBeUndefined();
-	});
-
-	it('distinguishes note rename from duplicate collision on disk', () => {
-		const noteUuid = 'df51ff8d-c34b-4137-b72d-2127ff9c56bd';
-
-		// Case 1: Rename (Old path does not exist on disk)
-		const renameRes = resolveNoteIdCollision({
-			noteId: noteUuid,
-			filePath: 'Note New.md',
-			conflictingPathInDb: 'Note Old.md',
-			oldFileExistsOnDisk: false,
-		});
-		expect(renameRes.idCollisionFixed).toBe(false);
-		expect(renameRes.noteId).toBe(noteUuid);
-
-		// Case 2: Duplicate file on disk (Old path still exists on disk)
-		const duplicateRes = resolveNoteIdCollision({
-			noteId: noteUuid,
-			filePath: 'Note New.md',
-			conflictingPathInDb: 'Note Old.md',
-			oldFileExistsOnDisk: true,
-		});
-		expect(duplicateRes.idCollisionFixed).toBe(true);
-		expect(duplicateRes.noteId).toBeUndefined();
-	});
-
-	it('detects duplicate block IDs inside the same note and flags them for regeneration', () => {
-		const blocks = [
-			{ block_id: '8a1b2c', card_type: 'single', line_start: 5 },
-			{ block_id: '8a1b2c', card_type: 'single', line_start: 10 },
-			{ block_id: 'c9f4d1', card_type: 'single', line_start: 15 },
-		];
-
-		const { duplicateBlocksFixed } = deduplicateBlockIds(blocks);
-		expect(duplicateBlocksFixed).toBe(1);
-		expect(blocks[0]?.block_id).toBe('8a1b2c');
-		expect(blocks[1]?.block_id).toBe('');
-		expect(blocks[2]?.block_id).toBe('c9f4d1');
-	});
-
-	it('correctly stamps block ID onto block and inline markdown lines', () => {
-		expect(stampBlockId('%% card-start %%', 'block', 'abcdef')).toBe('%% card-start id=abcdef %%');
-		expect(stampBlockId('%% card-start id=old123 %%', 'block', 'abcdef')).toBe(
-			'%% card-start id=abcdef %%',
-		);
-		expect(stampBlockId('Question :: Answer', 'inline_forward', 'abcdef')).toBe(
-			'Question :: Answer ^abcdef',
-		);
-		expect(stampBlockId('Question :: Answer ^old123', 'inline_forward', 'abcdef')).toBe(
-			'Question :: Answer ^abcdef',
-		);
-	});
-});
-
-describe('DatabaseManager SQLite Pipeline Integration', () => {
+describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 	let SQL: SqlJsStatic;
 
 	beforeAll(async () => {
@@ -283,40 +395,50 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 		return { db, rawDb };
 	}
 
-	it('creates and updates note blocks and directional review items', () => {
+	it('creates and updates forward, bidirectional, and cloze cards correctly', () => {
 		const { db } = createFreshDb();
-		const noteId = 'note-uuid-1';
-		db.upsertNote(noteId, 'Notes/Biology.md', Date.now());
+		const filePath = 'Notes/Biology.md';
 
 		const parsedBlocks: ParsedBlock[] = [
 			{
-				block_id: 'blk001',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Mitochondria function?',
-				back_raw: 'Powerhouse of the cell',
+				id: 'blk001',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Mitochondria function?',
+				back: 'Powerhouse of the cell',
 				tags: ['biology', 'cells'],
 				content_hash: 'hash-001',
 				line_start: 1,
 				line_end: 1,
 			},
 			{
-				block_id: 'blk002',
-				card_type: 'block',
-				direction: 'both',
-				front_raw: 'DNA',
-				back_raw: 'Deoxyribonucleic acid',
+				id: 'blk002',
+				block_type: 'block',
+				reversible: true,
+				front: 'DNA',
+				back: 'Deoxyribonucleic acid',
 				tags: ['biology', 'genetics'],
 				content_hash: 'hash-002',
 				line_start: 3,
 				line_end: 7,
 			},
+			{
+				id: 'blk003',
+				block_type: 'cloze',
+				reversible: false,
+				front: 'The human body has {{206}} bones.',
+				back: '',
+				tags: ['anatomy'],
+				content_hash: 'hash-003',
+				line_start: 9,
+				line_end: 9,
+			},
 		];
 
-		db.syncNoteBlocks(noteId, parsedBlocks);
+		db.syncNoteBlocks(filePath, parsedBlocks);
 
 		const cards = db.getAllCards();
-		expect(cards).toHaveLength(3); // 1 forward + 2 (forward & reverse for both)
+		expect(cards).toHaveLength(4); // 1 forward + 2 (forward & reverse for DNA) + 1 cloze
 
 		const mitoItem = cards.find((c) => c.blockId === 'blk001');
 		expect(mitoItem).toBeDefined();
@@ -329,21 +451,49 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 		expect(dnaReverse).toBeDefined();
 		expect(dnaReverse?.front).toBe('Deoxyribonucleic acid');
 		expect(dnaReverse?.back).toBe('DNA');
+
+		const clozeItem = cards.find((c) => c.blockId === 'blk003');
+		expect(clozeItem).toBeDefined();
+		expect(clozeItem?.direction).toBeNull();
+		expect(clozeItem?.blockType).toBe('cloze');
 	});
 
-	it('prunes obsolete directional items when card direction changes from both to forward', () => {
+	it('enforces cloze direction trigger constraint at database level', () => {
+		const { rawDb } = createFreshDb();
+
+		// Insert cloze block
+		rawDb.run(`
+			INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, content_hash, updated_at)
+			VALUES ('cloze1', 'Note.md', 'cloze', 0, 'Question {{cloze}}', '', 'tags', 'hash', 1000);
+		`);
+
+		// Inserting cloze card with non-null direction MUST abort via trigger
+		expect(() => {
+			rawDb.run(`
+				INSERT INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, learning_step, relearning_step)
+				VALUES ('cloze1', 'forward', 0, 1000, 0, 0, 0, 0, 0, 0);
+			`);
+		}).toThrow(/Cloze cards must have NULL direction/);
+
+		// Inserting cloze card with NULL direction succeeds
+		rawDb.run(`
+			INSERT INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, learning_step, relearning_step)
+			VALUES ('cloze1', NULL, 0, 1000, 0, 0, 0, 0, 0, 0);
+		`);
+	});
+
+	it('prunes obsolete directional items when card direction changes from bidirectional to forward', () => {
 		const { db } = createFreshDb();
-		const noteId = 'note-uuid-2';
-		db.upsertNote(noteId, 'Notes/Chemistry.md', Date.now());
+		const filePath = 'Notes/Chemistry.md';
 
 		// Initially bidirectional
-		db.syncNoteBlocks(noteId, [
+		db.syncNoteBlocks(filePath, [
 			{
-				block_id: 'chem01',
-				card_type: 'block',
-				direction: 'both',
-				front_raw: 'NaCl',
-				back_raw: 'Sodium Chloride',
+				id: 'chem01',
+				block_type: 'block',
+				reversible: true,
+				front: 'NaCl',
+				back: 'Sodium Chloride',
 				tags: ['chemistry'],
 				content_hash: 'hash-chem-1',
 				line_start: 1,
@@ -352,14 +502,14 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 		]);
 		expect(db.getAllCards()).toHaveLength(2);
 
-		// User edits header to direction=forward
-		db.syncNoteBlocks(noteId, [
+		// User edits card to reversible=false (forward only)
+		db.syncNoteBlocks(filePath, [
 			{
-				block_id: 'chem01',
-				card_type: 'block',
-				direction: 'forward',
-				front_raw: 'NaCl',
-				back_raw: 'Sodium Chloride',
+				id: 'chem01',
+				block_type: 'block',
+				reversible: false,
+				front: 'NaCl',
+				back: 'Sodium Chloride',
 				tags: ['chemistry'],
 				content_hash: 'hash-chem-2',
 				line_start: 1,
@@ -372,17 +522,16 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 		expect(remainingCards[0]?.direction).toBe('forward');
 	});
 
-	it('records review logs and updates card metrics accurately', () => {
+	it('commits review session in single batch transaction and updates statistics', async () => {
 		const { db } = createFreshDb();
-		const noteId = 'note-uuid-3';
-		db.upsertNote(noteId, 'Notes/History.md', Date.now());
-		db.syncNoteBlocks(noteId, [
+		const filePath = 'Notes/History.md';
+		db.syncNoteBlocks(filePath, [
 			{
-				block_id: 'hist01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Year WW2 ended?',
-				back_raw: '1945',
+				id: 'hist01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Year WW2 ended?',
+				back: '1945',
 				tags: ['history'],
 				content_hash: 'hash-hist-1',
 				line_start: 1,
@@ -390,95 +539,71 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 			},
 		]);
 
-		const cards = db.getAllCards();
-		const card = cards[0]!;
+		const card = db.getAllCards()[0]!;
 		expect(card.state).toBe('new');
 		expect(card.reps).toBe(0);
-		expect(card.lapses).toBe(0);
 
-		const sessionId = db.createSession('history');
 		const now = Date.now();
 		const nextDue = now + 24 * 60 * 60 * 1000;
 
-		db.recordReview(
-			card.id,
-			3, // Rating::Good
-			'review',
-			nextDue,
-			2.5, // stability
-			4.0, // difficulty
-			1, // newReps
-			0, // newLapses
-			0,
-			0,
-			sessionId,
-		);
-		db.finishSession(sessionId, 1, 0, 1);
+		const session: SessionRecord = {
+			started_at: now - 60000,
+			ended_at: now,
+			card_count: 1,
+			forgot_count: 0,
+			remembered_count: 1,
+		};
 
-		const updatedCards = db.getAllCards();
-		const updated = updatedCards[0]!;
+		const reviews: ReviewRecord[] = [
+			{
+				card_id: card.cardId,
+				rating: 3, // Good
+				state: 2, // Review
+				due_at: nextDue,
+				stability: 2.5,
+				difficulty: 4.0,
+				reviewed_at: now,
+			},
+		];
+
+		const cardUpdates = [
+			{
+				id: card.cardId,
+				state: 2,
+				due_at: nextDue,
+				stability: 2.5,
+				difficulty: 4.0,
+				reps: 1,
+				lapses: 0,
+				last_review: now,
+				learning_step: 0,
+				relearning_step: 0,
+			},
+		];
+
+		await db.commitSession(session, reviews, cardUpdates);
+
+		const updated = db.getAllCards()[0]!;
 		expect(updated.state).toBe('review');
 		expect(updated.reps).toBe(1);
-		expect(updated.lapses).toBe(0);
-		expect(updated.stability).toBe(2.5);
-		expect(updated.difficulty).toBe(4.0);
-		expect(updated.due).toBe(nextDue);
-	});
-
-	it('computes dashboard stats including streak and retention', () => {
-		const { db } = createFreshDb();
-		const noteId = 'note-uuid-4';
-		db.upsertNote(noteId, 'Notes/Physics.md', Date.now());
-		db.syncNoteBlocks(noteId, [
-			{
-				block_id: 'phys01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Speed of light?',
-				back_raw: '3x10^8 m/s',
-				tags: ['physics'],
-				content_hash: 'hash-phys-1',
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		const card = db.getAllCards()[0]!;
-		const sessionId = db.createSession('physics');
-
-		db.recordReview(
-			card.id,
-			3, // Good
-			'review',
-			Date.now() + 86400000,
-			2.5,
-			4.0,
-			1,
-			0,
-			0,
-			0,
-			sessionId,
-		);
-		db.finishSession(sessionId, 1, 0, 1);
+		expect(updated.dueAt).toBe(nextDue);
 
 		const stats = db.getDashboardStats(4);
-		expect(stats.totalCards).toBe(1);
 		expect(stats.studiedToday).toBe(1);
-		expect(stats.studyStreak).toBe(1);
 		expect(stats.dailyRetention).toBe(100);
+		expect(stats.studyStreak).toBe(1);
 	});
 
-	it('preserves review logs for optimizer and computes delta_t via LAG window function', () => {
-		const { db, rawDb } = createFreshDb();
-		const noteId = 'note-uuid-5';
-		db.upsertNote(noteId, 'Notes/Math.md', Date.now());
-		db.syncNoteBlocks(noteId, [
+	it('computes review logs with window delta_t for FSRS weight optimizer', async () => {
+		const { db } = createFreshDb();
+		const filePath = 'Notes/Math.md';
+		db.syncNoteBlocks(filePath, [
 			{
-				block_id: 'math01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Derivative of sin(x)?',
-				back_raw: 'cos(x)',
+				id: 'math01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Derivative of sin(x)?',
+				back: 'cos(x)',
 				tags: ['math'],
 				content_hash: 'hash-math-1',
 				line_start: 1,
@@ -487,286 +612,1391 @@ describe('DatabaseManager SQLite Pipeline Integration', () => {
 		]);
 
 		const card = db.getAllCards()[0]!;
-		const sessionId = db.createSession('math');
-
 		const t0 = 1700000000000;
-		const t1 = t0 + 86400000; // 1 day later
-		const t2 = t1 + 3 * 86400000; // 3 days later
+		const t1 = t0 + 86400000; // 1 day
+		const t2 = t1 + 3 * 86400000; // 3 days
 
-		// Simulate review logs insertion
-		db.recordReview(card.id, 3, 'learning', t1, 1.0, 5.0, 1, 0, 0, 0, sessionId);
-		// Update review_time directly to match t0
-		rawDb.run('UPDATE review_logs SET review_time = ? WHERE id = 1', [t0]);
+		await db.commitSession(
+			{ started_at: t0, ended_at: t0, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 1,
+					due_at: t1,
+					stability: 1.0,
+					difficulty: 5.0,
+					reviewed_at: t0,
+				},
+			],
+			[
+				{
+					id: card.cardId,
+					state: 1,
+					due_at: t1,
+					stability: 1.0,
+					difficulty: 5.0,
+					reps: 1,
+					lapses: 0,
+					last_review: t0,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
 
-		db.recordReview(card.id, 3, 'review', t2, 2.5, 4.5, 2, 0, 0, 0, sessionId);
-		rawDb.run('UPDATE review_logs SET review_time = ? WHERE id = 2', [t1]);
+		await db.commitSession(
+			{ started_at: t1, ended_at: t1, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: t2,
+					stability: 2.5,
+					difficulty: 4.5,
+					reviewed_at: t1,
+				},
+			],
+			[
+				{
+					id: card.cardId,
+					state: 2,
+					due_at: t2,
+					stability: 2.5,
+					difficulty: 4.5,
+					reps: 2,
+					lapses: 0,
+					last_review: t1,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
 
-		db.recordReview(card.id, 4, 'review', t2 + 86400000, 6.0, 4.0, 3, 0, 0, 0, sessionId);
-		rawDb.run('UPDATE review_logs SET review_time = ? WHERE id = 3', [t2]);
+		await db.commitSession(
+			{ started_at: t2, ended_at: t2, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: card.cardId,
+					rating: 4,
+					state: 2,
+					due_at: t2 + 86400000 * 5,
+					stability: 6.0,
+					difficulty: 4.0,
+					reviewed_at: t2,
+				},
+			],
+			[
+				{
+					id: card.cardId,
+					state: 2,
+					due_at: t2 + 86400000 * 5,
+					stability: 6.0,
+					difficulty: 4.0,
+					reps: 3,
+					lapses: 0,
+					last_review: t2,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
 
 		const optLogs = db.getReviewLogsForOptimization();
 		expect(optLogs).toHaveLength(3);
-		expect(optLogs[0]?.delta_t).toBe(0); // first review delta_t is 0
-		expect(optLogs[1]?.delta_t).toBe(1); // 1 day delta
-		expect(optLogs[2]?.delta_t).toBe(3); // 3 days delta
+		expect(optLogs[0]?.delta_t).toBe(0);
+		expect(optLogs[1]?.delta_t).toBe(1);
+		expect(optLogs[2]?.delta_t).toBe(3);
+	});
+});
+
+describe('NoteScanner Single-Pass Synchronization', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+		WasmBridge.initForTest(SQL);
 	});
 
-	it('prunes deleted notes and cascade prunes blocks and review items', () => {
-		const { db } = createFreshDb();
-		db.upsertNote('note-1', 'Notes/Keep.md', Date.now());
-		db.upsertNote('note-2', 'Notes/Delete.md', Date.now());
+	function createMockVault(files: Record<string, string>) {
+		const storage = new Map<string, string>(Object.entries(files));
+		const mockVault = {
+			cachedRead: async (file: any) => storage.get(file.path) ?? '',
+			modify: async (file: any, data: string) => {
+				storage.set(file.path, data);
+			},
+			getMarkdownFiles: () =>
+				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: Date.now() } })),
+			adapter: {
+				exists: async () => false,
+				readBinary: async () => new Uint8Array(),
+				writeBinary: async () => {},
+				remove: async () => {},
+			},
+		};
+		const mockMetadataCache = {
+			getFileCache: (file: any) => {
+				const content = storage.get(file.path) ?? '';
+				const tags: { tag: string }[] = [];
+				for (const match of content.matchAll(/#([a-zA-Z0-9_\-/]+)/g)) {
+					const t = match[0];
+					if (t) tags.push({ tag: t });
+				}
+				return { tags, frontmatter: null, sections: [] };
+			},
+		};
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: mockMetadataCache,
+		} as any;
 
-		db.syncNoteBlocks('note-1', [
+		return { mockApp, storage };
+	}
+
+	it('generates missing IDs in single pass and writes back updated markdown', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const initialMarkdown =
+			'# Biology\n\nWhat is the mitochondria? :: Powerhouse of the cell\n\nDNA ::: Deoxyribonucleic acid\n';
+		const { mockApp, storage } = createMockVault({ 'Notes/Bio.md': initialMarkdown });
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		const blocks = await scanner.syncFile({ path: 'Notes/Bio.md' } as any);
+		expect(blocks).toHaveLength(2);
+
+		const updatedContent = storage.get('Notes/Bio.md')!;
+		expect(updatedContent).toContain('^');
+		expect(blocks[0]?.id).toMatch(/^[0-9a-z]{6}$/);
+		expect(blocks[1]?.id).toMatch(/^[0-9a-z]{6}$/);
+
+		const cards = db.getAllCards();
+		expect(cards).toHaveLength(3); // 1 forward + 2 bidirectional (forward & reverse)
+	});
+
+	it('handles note rename without resetting card metrics', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const initialMarkdown = 'Question :: Answer ^abc123\n';
+		const { mockApp } = createMockVault({ 'Notes/Old.md': initialMarkdown });
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		await scanner.syncFile({ path: 'Notes/Old.md' } as any);
+		expect(db.getAllCards()).toHaveLength(1);
+
+		// Perform review
+		const card = db.getAllCards()[0]!;
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: 2000,
+					stability: 2.0,
+					difficulty: 5.0,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: card.cardId,
+					state: 2,
+					due_at: 2000,
+					stability: 2.0,
+					difficulty: 5.0,
+					reps: 1,
+					lapses: 0,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// Rename note
+		await scanner.renameFile('Notes/Old.md', 'Notes/New.md');
+
+		const cardsAfterRename = db.getAllCards();
+		expect(cardsAfterRename).toHaveLength(1);
+		expect(cardsAfterRename[0]?.notePath).toBe('Notes/New.md');
+		expect(cardsAfterRename[0]?.reps).toBe(1);
+		expect(cardsAfterRename[0]?.stability).toBe(2.0);
+	});
+});
+
+describe('Settings Defaults & Review Metrics', () => {
+	it('provides default empty settings', () => {
+		expect(DEFAULT_SETTINGS).toEqual({});
+	});
+
+	it('calculates progress and retention accurately', () => {
+		expect(calculateProgress(0, 5, false)).toEqual({
+			currentCardNumber: 1,
+			progressPercent: 20,
+			progressText: '1 / 5',
+		});
+		expect(calculateProgress(4, 5, false)).toEqual({
+			currentCardNumber: 5,
+			progressPercent: 100,
+			progressText: '5 / 5',
+		});
+		expect(calculateProgress(4, 5, true)).toEqual({
+			currentCardNumber: 5,
+			progressPercent: 100,
+			progressText: '5 / 5',
+		});
+		expect(calculateRetention(10, 9)).toBe(90);
+	});
+});
+
+describe('Markdown #todo/card Tag Toggling', () => {
+	it('appends #todo/card to the question line of block cards before the divider', () => {
+		const original = `%% card-start id=k9x2mp %%\nWhat is mitochondria?\n...\nPowerhouse of the cell\n%% card-end %%`;
+		const updated = toggleCardTodoInMarkdown(original, 'k9x2mp', 'block');
+		expect(updated).toBe(
+			`%% card-start id=k9x2mp %%\nWhat is mitochondria? #todo/card\n...\nPowerhouse of the cell\n%% card-end %%`,
+		);
+	});
+
+	it('removes #todo/card from block card without modifying the header or answer', () => {
+		const tagged = `%% card-start id=k9x2mp %%\nWhat is mitochondria? #todo/card\n...\nPowerhouse of the cell\n%% card-end %%`;
+		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'block');
+		expect(untagged).toBe(
+			`%% card-start id=k9x2mp %%\nWhat is mitochondria?\n...\nPowerhouse of the cell\n%% card-end %%`,
+		);
+	});
+
+	it('toggles #todo/card before ^id for inline cards', () => {
+		const original = `Capital of France :: Paris ^k9x2mp`;
+		const tagged = toggleCardTodoInMarkdown(original, 'k9x2mp', 'inline');
+		expect(tagged).toBe(`Capital of France :: Paris #todo/card ^k9x2mp`);
+
+		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'inline');
+		expect(untagged).toBe(`Capital of France :: Paris ^k9x2mp`);
+	});
+
+	it('toggles #todo/card before ^id for cloze cards', () => {
+		const original = `The {{c1::mitochondria}} is powerhouse. ^k9x2mp`;
+		const tagged = toggleCardTodoInMarkdown(original, 'k9x2mp', 'cloze');
+		expect(tagged).toBe(`The {{c1::mitochondria}} is powerhouse. #todo/card ^k9x2mp`);
+
+		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'cloze');
+		expect(untagged).toBe(`The {{c1::mitochondria}} is powerhouse. ^k9x2mp`);
+	});
+});
+
+describe('Date Utilities & Calendar Math', () => {
+	it('formats local dates consistently with zero padding', () => {
+		const testDate = new Date(2026, 0, 5); // Jan 5, 2026
+		expect(formatLocalDate(testDate)).toBe('2026-01-05');
+	});
+
+	it('shifts local date keys across month and year boundaries correctly', () => {
+		// Month boundary (March 1 -> Feb 28 in non-leap year)
+		expect(shiftLocalDateKey('2026-03-01', -1)).toBe('2026-02-28');
+
+		// Year boundary (Jan 1 -> Dec 31 previous year)
+		expect(shiftLocalDateKey('2026-01-01', -1)).toBe('2025-12-31');
+
+		// Leap year shift (Feb 28 + 1 day = Feb 29 in 2024)
+		expect(shiftLocalDateKey('2024-02-28', 1)).toBe('2024-02-29');
+		expect(shiftLocalDateKey('2024-02-29', 1)).toBe('2024-03-01');
+	});
+
+	it('parses study step decimals and mixed valid tokens', () => {
+		expect(parseStudySteps('0.5h 1.5d', DEFAULT_LEARNING_STEPS)).toEqual([
+			30 * 60 * 1000,
+			36 * 60 * 60 * 1000,
+		]);
+		expect(parseStudySteps('10m invalid_step 2d', DEFAULT_LEARNING_STEPS)).toEqual([
+			10 * 60 * 1000,
+			2 * 24 * 60 * 60 * 1000,
+		]);
+	});
+});
+
+describe('DatabaseManager Extended Behaviors', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+	});
+
+	function createFreshDb(): DatabaseManager {
+		const rawDb = new SQL.Database();
+		return DatabaseManager.createInMemory(rawDb);
+	}
+
+	it('retrieves due cards filtered by cutoff and tags', () => {
+		const db = createFreshDb();
+
+		db.syncNoteBlocks('Notes/Lang.md', [
 			{
-				block_id: 'b1',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Q1',
-				back_raw: 'A1',
+				id: 'blk_due_de',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Hund',
+				back: 'Dog',
+				tags: ['german', 'vocab'],
+				content_hash: 'h1',
+				line_start: 1,
+				line_end: 1,
+			},
+			{
+				id: 'blk_due_fr',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Chien',
+				back: 'Dog',
+				tags: ['french', 'vocab'],
+				content_hash: 'h2',
+				line_start: 2,
+				line_end: 2,
+			},
+		]);
+
+		const allDue = db.getDueCards(undefined, 4);
+		expect(allDue).toHaveLength(2);
+
+		const germanDue = db.getDueCards(['german'], 4);
+		expect(germanDue).toHaveLength(1);
+		expect(germanDue[0]?.blockId).toBe('blk_due_de');
+
+		const uniqueTags = db.getUniqueTags();
+		expect(uniqueTags).toEqual(['french', 'german', 'vocab']);
+	});
+
+	it('calculates study streak correctly across multiple days', async () => {
+		const db = createFreshDb();
+		db.syncNoteBlocks('Notes/Streak.md', [
+			{
+				id: 'streak01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q',
+				back: 'A',
+				tags: ['test'],
+				content_hash: 'h_streak',
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+
+		const card = db.getAllCards()[0]!;
+		const now = Date.now();
+		const oneDayMs = 24 * 60 * 60 * 1000;
+
+		// Today review
+		await db.commitSession(
+			{ started_at: now, ended_at: now, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: now + oneDayMs,
+					stability: 2.0,
+					difficulty: 5.0,
+					reviewed_at: now,
+				},
+			],
+			[],
+		);
+
+		// Yesterday review
+		const yesterdayMs = now - oneDayMs;
+		await db.commitSession(
+			{
+				started_at: yesterdayMs,
+				ended_at: yesterdayMs,
+				card_count: 1,
+				forgot_count: 0,
+				remembered_count: 1,
+			},
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: now,
+					stability: 2.0,
+					difficulty: 5.0,
+					reviewed_at: yesterdayMs,
+				},
+			],
+			[],
+		);
+
+		// Day before yesterday review
+		const twoDaysAgoMs = now - 2 * oneDayMs;
+		await db.commitSession(
+			{
+				started_at: twoDaysAgoMs,
+				ended_at: twoDaysAgoMs,
+				card_count: 1,
+				forgot_count: 0,
+				remembered_count: 1,
+			},
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: yesterdayMs,
+					stability: 2.0,
+					difficulty: 5.0,
+					reviewed_at: twoDaysAgoMs,
+				},
+			],
+			[],
+		);
+
+		const stats = db.getDashboardStats(4);
+		expect(stats.studyStreak).toBe(3);
+		expect(stats.studiedToday).toBe(1);
+		expect(stats.dailyRetention).toBe(100);
+	});
+
+	it('runs database optimization and prunes stale deleted note records', async () => {
+		const db = createFreshDb();
+		db.syncNoteBlocks('Notes/Active.md', [
+			{
+				id: 'act01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Active Front',
+				back: 'Active Back',
+				tags: ['active'],
+				content_hash: 'h_act',
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+		db.syncNoteBlocks('Notes/Stale.md', [
+			{
+				id: 'stl01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Stale Front',
+				back: 'Stale Back',
+				tags: ['stale'],
+				content_hash: 'h_stl',
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+
+		expect(db.getAllCards()).toHaveLength(2);
+
+		const res = await db.optimizeDatabase(new Set(['Notes/Active.md']));
+		expect(res.integrityOk).toBe(true);
+		expect(res.prunedBlocks).toBe(1);
+
+		const remaining = db.getAllCards();
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]?.blockId).toBe('act01');
+	});
+
+	it('maps review states and formats humanized timestamps accurately', () => {
+		const db = createFreshDb();
+
+		expect(db.mapState(0)).toBe('new');
+		expect(db.mapState(1)).toBe('learning');
+		expect(db.mapState(2)).toBe('review');
+		expect(db.mapState(3)).toBe('relearning');
+
+		expect(db.unmapState('new')).toBe(0);
+		expect(db.unmapState('learning')).toBe(1);
+		expect(db.unmapState('review')).toBe(2);
+		expect(db.unmapState('relearning')).toBe(3);
+
+		const now = 1700000000000;
+		expect(db.humanizeDue(now - 1000, now)).toBe('Due now');
+		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24, now)).toBe('Tomorrow');
+		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24 * 5, now)).toBe('In 5 days');
+
+		expect(db.humanizeRelative(now - 1000 * 60 * 5, now)).toBe('5m ago');
+		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 2, now)).toBe('2h ago');
+		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 24 * 3, now)).toBe('3d ago');
+	});
+});
+
+describe('NoteScanner Frontmatter & Ignore Handling', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+		WasmBridge.initForTest(SQL);
+	});
+
+	it('skips notes marked with cards-ignore: true in frontmatter', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		const initialMarkdown =
+			'---\ncards-ignore: true\n---\n\nIgnored Question :: Ignored Answer ^ign001\n';
+		const storage = new Map<string, string>([['Notes/Ignored.md', initialMarkdown]]);
+
+		const mockVault = {
+			cachedRead: async (f: any) => storage.get(f.path) ?? '',
+			modify: async (f: any, data: string) => {
+				storage.set(f.path, data);
+			},
+			getMarkdownFiles: () => [{ path: 'Notes/Ignored.md' }],
+			adapter: {
+				exists: async () => false,
+				readBinary: async () => new Uint8Array(),
+				writeBinary: async () => {},
+				remove: async () => {},
+			},
+		};
+
+		const mockMetadataCache = {
+			getFileCache: () => ({
+				tags: [],
+				frontmatter: { 'cards-ignore': true },
+				sections: [],
+			}),
+		};
+
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: mockMetadataCache,
+		} as any;
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		const synced = await scanner.syncFile({ path: 'Notes/Ignored.md' } as any);
+		expect(synced).toHaveLength(0);
+		expect(db.getAllCards()).toHaveLength(0);
+	});
+
+	it('inherits tags defined in frontmatter array and comma-delimited strings', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		const content = 'Question :: Answer ^tag001\n';
+		const storage = new Map<string, string>([['Notes/Tags.md', content]]);
+
+		const mockVault = {
+			cachedRead: async (f: any) => storage.get(f.path) ?? '',
+			modify: async (f: any, data: string) => {
+				storage.set(f.path, data);
+			},
+			getMarkdownFiles: () => [{ path: 'Notes/Tags.md' }],
+			adapter: {
+				exists: async () => false,
+				readBinary: async () => new Uint8Array(),
+				writeBinary: async () => {},
+				remove: async () => {},
+			},
+		};
+
+		const mockMetadataCache = {
+			getFileCache: () => ({
+				tags: [],
+				frontmatter: { tags: ['science', 'biology'] },
+				sections: [],
+			}),
+		};
+
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: mockMetadataCache,
+		} as any;
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		const synced = await scanner.syncFile({ path: 'Notes/Tags.md' } as any);
+		expect(synced).toHaveLength(1);
+		expect(synced[0]?.tags).toContain('science');
+		expect(synced[0]?.tags).toContain('biology');
+	});
+});
+
+describe('WASM FSRS-6 Scheduling & Optimizer Integration', () => {
+	it('schedules new and review cards through WASM bridge with FSRS-6 math', () => {
+		const now = 1700000000000;
+		const newCard: SchedulingCard = {
+			stability: 0,
+			difficulty: 0,
+			reps: 0,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'new',
+			last_review: null,
+			due: now,
+		};
+
+		const params: FsrsParams = {
+			request_retention: 0.9,
+			maximum_interval: 36500,
+			enable_fuzz: false,
+		};
+
+		const scheduleInfo = WasmBridge.calculateSchedule(newCard, params, now);
+		expect(scheduleInfo.next_states).toHaveLength(4);
+
+		// Rating 1 (Again): stays in learning
+		const againState = scheduleInfo.next_states.find((c) => c.rating === 'again');
+		expect(againState).toBeDefined();
+		expect(againState?.card.state).toBe('learning');
+
+		// Rating 3 (Good): advances
+		const goodState = scheduleInfo.next_states.find((c) => c.rating === 'good');
+		expect(goodState).toBeDefined();
+		expect(goodState?.card.stability).toBeGreaterThan(0);
+	});
+
+	it('progresses learning steps on review cards and handles lapses', () => {
+		const now = 1700000000000;
+		const learningCard: SchedulingCard = {
+			stability: 0.5,
+			difficulty: 5.0,
+			reps: 1,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'learning',
+			last_review: now - 600000,
+			due: now,
+		};
+
+		const params: FsrsParams = {
+			request_retention: 0.9,
+			maximum_interval: 36500,
+			learning_steps: [10 * 60 * 1000, 24 * 60 * 60 * 1000],
+		};
+
+		const info = WasmBridge.calculateSchedule(learningCard, params, now);
+		const goodState = info.next_states.find((c) => c.rating === 'good')!;
+		expect(goodState.card.learning_step).toBe(1);
+
+		// Review card lapsing on 'again'
+		const reviewCard: SchedulingCard = {
+			stability: 10.0,
+			difficulty: 4.0,
+			reps: 5,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'review',
+			last_review: now - 86400000 * 10,
+			due: now,
+		};
+
+		const lapseInfo = WasmBridge.calculateSchedule(reviewCard, params, now);
+		const lapsedState = lapseInfo.next_states.find((c) => c.rating === 'again')!;
+		expect(lapsedState.card.state).toBe('relearning');
+		expect(lapsedState.card.lapses).toBe(1);
+	});
+
+	it('optimizes FSRS weights from review logs', () => {
+		const logs = Array.from({ length: 12 }, (_, i) => ({
+			card_id: `card_${i % 3}`,
+			rating: (i % 2 === 0 ? 3 : 1) as number,
+			delta_t: (i + 1) * 1.5,
+		}));
+
+		const weights = WasmBridge.optimizeFsrsWeights({}, logs);
+		expect(weights).toHaveLength(21);
+		for (const w of weights) {
+			expect(typeof w).toBe('number');
+			expect(isNaN(w)).toBe(false);
+		}
+	});
+});
+
+describe('Advanced Metrics & Edge Case Boundaries', () => {
+	it('handles zero total cards, negative indices, and out-of-bound clamps in progress calculation', () => {
+		expect(calculateProgress(0, 0, false)).toEqual({
+			currentCardNumber: 0,
+			progressPercent: 0,
+			progressText: '0 / 0',
+		});
+		expect(calculateProgress(-5, 10, false)).toEqual({
+			currentCardNumber: 1,
+			progressPercent: 10,
+			progressText: '1 / 10',
+		});
+		expect(calculateProgress(99, 10, false)).toEqual({
+			currentCardNumber: 10,
+			progressPercent: 100,
+			progressText: '10 / 10',
+		});
+		expect(calculateRetention(0, 0)).toBe(100);
+		expect(calculateRetention(10, 0)).toBe(0);
+	});
+
+	it('handles complex tag toggling with preexisting tags and multiline questions', () => {
+		const original = `%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n...\nAnswer content\n%% card-end %%`;
+		const tagged = toggleCardTodoInMarkdown(original, 'x89z12', 'block');
+		expect(tagged).toBe(
+			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #todo/card\n...\nAnswer content\n%% card-end %%`,
+		);
+
+		const untagged = toggleCardTodoInMarkdown(tagged, 'x89z12', 'block');
+		expect(untagged).toBe(
+			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n...\nAnswer content\n%% card-end %%`,
+		);
+	});
+
+	it('accurately calculates study streak when gaps exist or user only reviewed yesterday', async () => {
+		const SQL = await initSqlJs();
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		db.syncNoteBlocks('Note.md', [
+			{
+				id: 'blk_s',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q',
+				back: 'A',
+				tags: [],
+				content_hash: 'h',
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+		const card = db.getAllCards()[0]!;
+		const now = Date.now();
+		const oneDay = 24 * 60 * 60 * 1000;
+
+		// Only reviewed 2 days ago (missed yesterday and today) -> streak 0
+		await db.commitSession(
+			{
+				started_at: now - 2 * oneDay,
+				ended_at: now - 2 * oneDay,
+				card_count: 1,
+				forgot_count: 0,
+				remembered_count: 1,
+			},
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: now,
+					stability: 2,
+					difficulty: 5,
+					reviewed_at: now - 2 * oneDay,
+				},
+			],
+			[],
+		);
+		expect(db.getDashboardStats(4).studyStreak).toBe(0);
+
+		// Now add a review yesterday -> streak becomes 1 (pending review today)
+		await db.commitSession(
+			{
+				started_at: now - oneDay,
+				ended_at: now - oneDay,
+				card_count: 1,
+				forgot_count: 0,
+				remembered_count: 1,
+			},
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: now,
+					stability: 2,
+					difficulty: 5,
+					reviewed_at: now - oneDay,
+				},
+			],
+			[],
+		);
+		expect(db.getDashboardStats(4).studyStreak).toBe(2);
+	});
+
+	it('fullScan synchronizes all vault files and prunes deleted notes in one sweep', async () => {
+		const SQL = await initSqlJs();
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		const storage = new Map<string, string>([
+			['Notes/A.md', 'Question A :: Answer A ^aaa001\n'],
+			['Notes/B.md', 'Question B :: Answer B ^bbb002\n'],
+		]);
+
+		const mockVault = {
+			cachedRead: async (f: any) => storage.get(f.path) ?? '',
+			modify: async (f: any, d: string) => storage.set(f.path, d),
+			getMarkdownFiles: () =>
+				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: 1 } })),
+			adapter: {
+				exists: async () => false,
+				readBinary: async () => new Uint8Array(),
+				writeBinary: async () => {},
+				remove: async () => {},
+			},
+		};
+
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: { getFileCache: () => ({ tags: [], frontmatter: null, sections: [] }) },
+		} as any;
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		const fullScanRes = await scanner.fullScan();
+		expect(fullScanRes.filesScanned).toBe(2);
+		expect(fullScanRes.totalBlocks).toBe(2);
+		expect(db.getAllCards()).toHaveLength(2);
+
+		// Now delete Note B from storage and run deleteFile
+		storage.delete('Notes/B.md');
+		await scanner.deleteFile('Notes/B.md');
+		expect(db.getAllCards()).toHaveLength(1);
+		expect(db.getAllCards()[0]?.blockId).toBe('aaa001');
+	});
+
+	it('ensures getDashboardStats excludes orphaned cards not linked to valid blocks', async () => {
+		const SQL = await initSqlJs();
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		// Insert 1 valid block + card
+		db.syncNoteBlocks('Valid.md', [
+			{
+				id: 'val001',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Valid Q',
+				back: 'Valid A',
+				tags: [],
+				content_hash: 'h_val',
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+
+		// Simulate legacy orphaned card inserted directly without matching block
+		rawDb.run('PRAGMA foreign_keys = OFF;');
+		rawDb.run(
+			`INSERT INTO cards (id, block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
+			 VALUES (999, 'orphan_block', 'forward', 0, 0, 0, 0, 0, 0, NULL, 0, 0)`,
+		);
+		rawDb.run('PRAGMA foreign_keys = ON;');
+
+		// getAllCards returns only 1 card (JOIN blocks)
+		expect(db.getAllCards()).toHaveLength(1);
+
+		// getDashboardStats must also return exactly 1 due card and 1 total card (not 2)
+		const stats = db.getDashboardStats(4);
+		expect(stats.totalCards).toBe(1);
+		expect(stats.dueToday).toBe(1);
+		expect(stats.newCards).toBe(1);
+	});
+});
+
+describe('In-Memory Review Session Cache (Hashcards Model)', () => {
+	const sampleItem1: ReviewItem = {
+		cardId: 101,
+		blockId: 'blk101',
+		noteTitle: 'History',
+		notePath: 'Notes/History.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'WW2 End Year',
+		back: '1945',
+		tags: ['history'],
+		state: 'new',
+		stateNum: 0,
+		dueAt: 1000,
+		dueHuman: 'Due now',
+		stability: 0,
+		difficulty: 0,
+		reps: 0,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: null,
+		lastPracticedHuman: 'Never',
+	};
+
+	const sampleItem2: ReviewItem = {
+		cardId: 102,
+		blockId: 'blk102',
+		noteTitle: 'Biology',
+		notePath: 'Notes/Bio.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'Powerhouse of cell',
+		back: 'Mitochondria',
+		tags: ['biology'],
+		state: 'new',
+		stateNum: 0,
+		dueAt: 1000,
+		dueHuman: 'Due now',
+		stability: 0,
+		difficulty: 0,
+		reps: 0,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: null,
+		lastPracticedHuman: 'Never',
+	};
+
+	it('records reviews purely in memory with zero initial database writes', () => {
+		const cache = new ReviewSessionCache(1000);
+		expect(cache.getReviewsCount()).toBe(0);
+
+		const prevState1: SchedulingCard = {
+			stability: 0,
+			difficulty: 0,
+			reps: 0,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'new',
+			last_review: null,
+			due: 1000,
+		};
+
+		const nextState1: SchedulingCard = {
+			stability: 2.5,
+			difficulty: 4.5,
+			reps: 1,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'review',
+			last_review: 2000,
+			due: 3000,
+		};
+
+		cache.recordReview(sampleItem1, prevState1, 'remembered', nextState1, 2, 2000);
+
+		expect(cache.getReviewsCount()).toBe(1);
+		const stats = cache.getStats();
+		expect(stats.studied).toBe(1);
+		expect(stats.remembered).toBe(1);
+		expect(stats.forgot).toBe(0);
+
+		const pending = cache.getPendingData();
+		expect(pending.reviews).toHaveLength(1);
+		expect(pending.cardUpdates).toHaveLength(1);
+		expect(pending.cardUpdates[0]?.id).toBe(101);
+		expect(pending.cardUpdates[0]?.stability).toBe(2.5);
+	});
+
+	it('handles undo by reverting card state and card updates cleanly in memory', () => {
+		const cache = new ReviewSessionCache(1000);
+
+		const prevState1: SchedulingCard = {
+			stability: 0,
+			difficulty: 0,
+			reps: 0,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'new',
+			last_review: null,
+			due: 1000,
+		};
+		const nextState1: SchedulingCard = {
+			stability: 2.5,
+			difficulty: 4.5,
+			reps: 1,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'review',
+			last_review: 2000,
+			due: 3000,
+		};
+
+		const prevState2: SchedulingCard = {
+			stability: 0,
+			difficulty: 0,
+			reps: 0,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'new',
+			last_review: null,
+			due: 1000,
+		};
+		const nextState2: SchedulingCard = {
+			stability: 0,
+			difficulty: 5.0,
+			reps: 1,
+			lapses: 1,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'learning',
+			last_review: 2100,
+			due: 2700,
+		};
+
+		cache.recordReview(sampleItem1, prevState1, 'remembered', nextState1, 2, 2000);
+		cache.recordReview(sampleItem2, prevState2, 'forgot', nextState2, 1, 2100);
+
+		expect(cache.getReviewsCount()).toBe(2);
+		expect(cache.getStats().forgot).toBe(1);
+		expect(cache.getStats().remembered).toBe(1);
+
+		// Undo card 2
+		const undoRes = cache.undo();
+		expect(undoRes).not.toBeNull();
+		expect(undoRes?.item.cardId).toBe(102);
+		expect(undoRes?.previousState.state).toBe('new');
+
+		expect(cache.getReviewsCount()).toBe(1);
+		expect(cache.getStats().forgot).toBe(0);
+		expect(cache.getStats().remembered).toBe(1);
+
+		const pendingAfterUndo = cache.getPendingData();
+		expect(pendingAfterUndo.reviews).toHaveLength(1);
+		expect(pendingAfterUndo.reviews[0]?.card_id).toBe(101);
+		expect(pendingAfterUndo.cardUpdates).toHaveLength(1);
+		expect(pendingAfterUndo.cardUpdates[0]?.id).toBe(101);
+	});
+
+	it('commits batch session atomically to SQLite only at end of session', async () => {
+		const SQL = await initSqlJs();
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		db.syncNoteBlocks('Note.md', [
+			{
+				id: 'blk01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q1',
+				back: 'A1',
 				tags: [],
 				content_hash: 'h1',
 				line_start: 1,
 				line_end: 1,
 			},
-		]);
-		db.syncNoteBlocks('note-2', [
 			{
-				block_id: 'b2',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Q2',
-				back_raw: 'A2',
+				id: 'blk02',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q2',
+				back: 'A2',
 				tags: [],
 				content_hash: 'h2',
-				line_start: 1,
-				line_end: 1,
+				line_start: 2,
+				line_end: 2,
 			},
 		]);
 
-		expect(db.getAllCards()).toHaveLength(2);
+		const cards = db.getAllCards();
+		expect(cards).toHaveLength(2);
+		const c1 = cards[0]!;
+		const c2 = cards[1]!;
 
-		// Only 'Notes/Keep.md' still exists in vault
-		db.pruneDeletedNotes(new Set(['Notes/Keep.md']));
+		const cache = new ReviewSessionCache(1000);
 
-		const remaining = db.getAllCards();
-		expect(remaining).toHaveLength(1);
-		expect(remaining[0]?.notePath).toBe('Notes/Keep.md');
-	});
-
-	it('filters due review items case-insensitively with tag prefixes', () => {
-		const { db } = createFreshDb();
-		const noteId = 'note-tags-1';
-		db.upsertNote(noteId, 'Notes/Languages.md', Date.now());
-
-		db.syncNoteBlocks(noteId, [
+		// Review c1, review c2, undo c2
+		cache.recordReview(
+			c1,
 			{
-				block_id: 'tag01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Hallo',
-				back_raw: 'Hello',
-				tags: ['German', 'Vocab/Level1'],
-				content_hash: 'hash-g1',
-				line_start: 1,
-				line_end: 1,
+				stability: 0,
+				difficulty: 0,
+				reps: 0,
+				lapses: 0,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'new',
+				last_review: null,
+				due: 1000,
 			},
+			'remembered',
 			{
-				block_id: 'tag02',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Bonjour',
-				back_raw: 'Hello',
-				tags: ['French'],
-				content_hash: 'hash-f1',
-				line_start: 3,
-				line_end: 3,
+				stability: 3.0,
+				difficulty: 4.0,
+				reps: 1,
+				lapses: 0,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'review',
+				last_review: 2000,
+				due: 5000,
 			},
-		]);
+			2,
+			2000,
+		);
 
-		// Lowercase filter matches uppercase tag
-		const germanDue = db.getDueReviewItems(['german']);
-		expect(germanDue).toHaveLength(1);
-		expect(germanDue[0]?.blockId).toBe('tag01');
-
-		// Parent tag filter matches hierarchical subtag
-		const vocabDue = db.getDueReviewItems(['#vocab']);
-		expect(vocabDue).toHaveLength(1);
-		expect(vocabDue[0]?.blockId).toBe('tag01');
-
-		// Non-matching tag
-		const spanishDue = db.getDueReviewItems(['spanish']);
-		expect(spanishDue).toHaveLength(0);
-	});
-
-	it('excludes cards from ignored notes and preserves their data for un-ignoring', () => {
-		const { db } = createFreshDb();
-		const noteActive = 'note-active';
-		const noteIgnored = 'note-ignored';
-
-		db.upsertNote(noteActive, 'Notes/Active.md', Date.now(), 0);
-		db.upsertNote(noteIgnored, 'Notes/Ignored.md', Date.now(), 1);
-
-		db.syncNoteBlocks(noteActive, [
+		cache.recordReview(
+			c2,
 			{
-				block_id: 'act01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Active Question',
-				back_raw: 'Active Answer',
-				tags: ['active'],
-				content_hash: 'hash-act',
-				line_start: 1,
-				line_end: 1,
+				stability: 0,
+				difficulty: 0,
+				reps: 0,
+				lapses: 0,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'new',
+				last_review: null,
+				due: 1000,
 			},
-		]);
-
-		db.syncNoteBlocks(noteIgnored, [
+			'forgot',
 			{
-				block_id: 'ign01',
-				card_type: 'inline_forward',
-				direction: 'forward',
-				front_raw: 'Ignored Question',
-				back_raw: 'Ignored Answer',
-				tags: ['ignored-tag'],
-				content_hash: 'hash-ign',
-				line_start: 1,
-				line_end: 1,
+				stability: 0,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 1,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'learning',
+				last_review: 2100,
+				due: 2600,
 			},
-		]);
+			1,
+			2100,
+		);
 
-		// Ignored cards should NOT be returned by getAllCards, getDueReviewItems, or getUniqueTags
-		expect(db.getAllCards()).toHaveLength(1);
-		expect(db.getAllCards()[0]?.blockId).toBe('act01');
-		expect(db.getDueReviewItems()).toHaveLength(1);
-		expect(db.getUniqueTags()).toEqual(['active']);
+		cache.undo();
 
-		const stats = db.getDashboardStats();
-		expect(stats.totalCards).toBe(1);
-		expect(stats.newCards).toBe(1);
+		// Commit session
+		const { session, reviews, cardUpdates } = cache.getPendingData();
+		await db.commitSession(session, reviews, cardUpdates);
 
-		// Un-ignoring the note restores cards to queues with zero data loss
-		db.setNoteIgnoredByPath('Notes/Ignored.md', false);
-		expect(db.getAllCards()).toHaveLength(2);
-		expect(db.getDueReviewItems()).toHaveLength(2);
-		expect(db.getUniqueTags()).toEqual(['active', 'ignored-tag']);
-		expect(db.getDashboardStats().totalCards).toBe(2);
+		// Verify c1 was updated in DB and c2 remained untouched ('new')
+		const cardsAfterCommit = db.getAllCards();
+		const c1After = cardsAfterCommit.find((c) => c.cardId === c1.cardId)!;
+		const c2After = cardsAfterCommit.find((c) => c.cardId === c2.cardId)!;
+
+		expect(c1After.state).toBe('review');
+		expect(c1After.reps).toBe(1);
+		expect(c1After.dueAt).toBe(5000);
+
+		expect(c2After.state).toBe('new');
+		expect(c2After.reps).toBe(0);
 	});
 });
 
-describe('Settings Defaults & Validation', () => {
-	it('provides default empty settings', () => {
-		expect(DEFAULT_SETTINGS).toEqual({});
+describe('Dashboard Block Grouping & Reverse Metrics', () => {
+	const forwardCard: ReviewItem = {
+		cardId: 1,
+		blockId: 'blk_bidi_1',
+		noteTitle: 'Vocabulary',
+		notePath: 'Notes/Vocab.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: true,
+		front: 'Bonjour',
+		back: 'Hello',
+		tags: ['french'],
+		state: 'review',
+		stateNum: 2,
+		dueAt: 1000,
+		dueHuman: 'Due now',
+		stability: 3.0,
+		difficulty: 4.0,
+		reps: 3,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: 500,
+		lastPracticedHuman: '1d ago',
+	};
+
+	const reverseCard: ReviewItem = {
+		cardId: 2,
+		blockId: 'blk_bidi_1',
+		noteTitle: 'Vocabulary',
+		notePath: 'Notes/Vocab.md',
+		direction: 'reverse',
+		blockType: 'inline',
+		reversible: true,
+		front: 'Hello',
+		back: 'Bonjour',
+		tags: ['french'],
+		state: 'learning',
+		stateNum: 1,
+		dueAt: 9000,
+		dueHuman: 'In 5d',
+		stability: 1.0,
+		difficulty: 5.0,
+		reps: 1,
+		lapses: 1,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: 200,
+		lastPracticedHuman: '3d ago',
+	};
+
+	const monoCard: ReviewItem = {
+		cardId: 3,
+		blockId: 'blk_mono_2',
+		noteTitle: 'Geography',
+		notePath: 'Notes/Geo.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'Capital of France',
+		back: 'Paris',
+		tags: ['geo'],
+		state: 'new',
+		stateNum: 0,
+		dueAt: 2000,
+		dueHuman: 'Tomorrow',
+		stability: 0,
+		difficulty: 0,
+		reps: 0,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: null,
+		lastPracticedHuman: 'Never',
+	};
+
+	it('consolidates bidirectional forward and reverse cards into a single block item', () => {
+		const rawCards = [forwardCard, reverseCard, monoCard];
+		const blocks = groupCardsByBlock(rawCards);
+
+		// 3 cards must produce exactly 2 block rows
+		expect(blocks).toHaveLength(2);
+
+		const bidiBlock = blocks.find((b) => b.blockId === 'blk_bidi_1');
+		expect(bidiBlock).toBeDefined();
+		expect(bidiBlock?.reversible).toBe(true);
+		expect(bidiBlock?.front).toBe('Bonjour');
+		expect(bidiBlock?.back).toBe('Hello');
+		expect(bidiBlock?.forward.cardId).toBe(1);
+		expect(bidiBlock?.reverse?.cardId).toBe(2);
+
+		const monoBlock = blocks.find((b) => b.blockId === 'blk_mono_2');
+		expect(monoBlock).toBeDefined();
+		expect(monoBlock?.reversible).toBe(false);
+		expect(monoBlock?.reverse).toBeUndefined();
+	});
+
+	it('filters block items if either forward or reverse card matches due status', () => {
+		const blocks = groupCardsByBlock([forwardCard, reverseCard, monoCard]);
+		const bidiBlock = blocks.find((b) => b.blockId === 'blk_bidi_1')!;
+		const monoBlock = blocks.find((b) => b.blockId === 'blk_mono_2')!;
+
+		// Due cutoff at 1500: bidi forward is due (1000 <= 1500), mono is not (2000 > 1500)
+		expect(filterDashboardBlock(bidiBlock, 'due', 1500, '')).toBe(true);
+		expect(filterDashboardBlock(monoBlock, 'due', 1500, '')).toBe(false);
+
+		// Status 'learning': bidi reverse is learning, mono is new
+		expect(filterDashboardBlock(bidiBlock, 'learning', 1500, '')).toBe(true);
+		expect(filterDashboardBlock(monoBlock, 'learning', 1500, '')).toBe(false);
+
+		// Search filter: query 'Paris' matches only monoBlock
+		expect(filterDashboardBlock(bidiBlock, 'all', 1500, 'Paris')).toBe(false);
+		expect(filterDashboardBlock(monoBlock, 'all', 1500, 'Paris')).toBe(true);
 	});
 });
 
-describe('Review Counter & Progress Calculation Metrics', () => {
-	it('handles empty queue (0 cards) without division by zero', () => {
-		const resActive = calculateProgress(0, 0, false);
-		expect(resActive).toEqual({
-			currentCardNumber: 0,
-			progressPercent: 0,
-			progressText: '0 / 0',
-		});
+describe('Tag Deck Stats Aggregation (Hashcards Model)', () => {
+	const card1: ReviewItem = {
+		cardId: 1,
+		blockId: 'b1',
+		noteTitle: 'Vocab',
+		notePath: 'Vocab.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'Q1',
+		back: 'A1',
+		tags: ['french', 'languages'],
+		state: 'review',
+		stateNum: 2,
+		dueAt: 1000,
+		dueHuman: 'Due now',
+		stability: 2,
+		difficulty: 5,
+		reps: 2,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: 500,
+		lastPracticedHuman: '1d ago',
+	};
 
-		const resFinished = calculateProgress(0, 0, true);
-		expect(resFinished).toEqual({
-			currentCardNumber: 0,
-			progressPercent: 0,
-			progressText: '0 / 0',
-		});
-	});
+	const card2: ReviewItem = {
+		cardId: 2,
+		blockId: 'b2',
+		noteTitle: 'Vocab',
+		notePath: 'Vocab.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'Q2',
+		back: 'A2',
+		tags: ['french'],
+		state: 'new',
+		stateNum: 0,
+		dueAt: 5000,
+		dueHuman: 'Tomorrow',
+		stability: 0,
+		difficulty: 0,
+		reps: 0,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: null,
+		lastPracticedHuman: 'Never',
+	};
 
-	it('calculates single-card queue accurately across lifecycle', () => {
-		// Active card 1
-		const active = calculateProgress(0, 1, false);
-		expect(active).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 0,
-			progressText: '1 / 1',
-		});
+	const card3: ReviewItem = {
+		cardId: 3,
+		blockId: 'b3',
+		noteTitle: 'Geo',
+		notePath: 'Geo.md',
+		direction: 'forward',
+		blockType: 'inline',
+		reversible: false,
+		front: 'Q3',
+		back: 'A3',
+		tags: ['geography'],
+		state: 'review',
+		stateNum: 2,
+		dueAt: 9000,
+		dueHuman: 'In 5d',
+		stability: 5,
+		difficulty: 3,
+		reps: 4,
+		lapses: 0,
+		learningStep: 0,
+		relearningStep: 0,
+		lastReview: 400,
+		lastPracticedHuman: '2d ago',
+	};
 
-		// Session finished
-		const finished = calculateProgress(0, 1, true);
-		expect(finished).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 100,
-			progressText: '1 / 1',
-		});
-	});
+	it('computes total, due, and new cards per tag deck and sorts by due count', () => {
+		const stats = computeTagDeckStats([card1, card2, card3], 2000);
 
-	it('calculates multi-card queue progression and locks to 100% on completion', () => {
-		const total = 7;
+		expect(stats).toHaveLength(3);
 
-		// Card 1
-		expect(calculateProgress(0, total, false)).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 0,
-			progressText: '1 / 7',
-		});
+		// 'french': 2 total, 1 due (card1 at 1000 <= 2000), 1 new (card2)
+		const french = stats.find((s) => s.tag === 'french');
+		expect(french).toEqual({ tag: 'french', total: 2, due: 1, newCards: 1 });
 
-		// Card 2
-		expect(calculateProgress(1, total, false)).toEqual({
-			currentCardNumber: 2,
-			progressPercent: 14,
-			progressText: '2 / 7',
-		});
+		// 'languages': 1 total, 1 due, 0 new
+		const languages = stats.find((s) => s.tag === 'languages');
+		expect(languages).toEqual({ tag: 'languages', total: 1, due: 1, newCards: 0 });
 
-		// Card 4 (midpoint)
-		expect(calculateProgress(3, total, false)).toEqual({
-			currentCardNumber: 4,
-			progressPercent: 43,
-			progressText: '4 / 7',
-		});
+		// 'geography': 1 total, 0 due (9000 > 2000), 0 new
+		const geo = stats.find((s) => s.tag === 'geography');
+		expect(geo).toEqual({ tag: 'geography', total: 1, due: 0, newCards: 0 });
 
-		// Card 7 (last card active)
-		expect(calculateProgress(6, total, false)).toEqual({
-			currentCardNumber: 7,
-			progressPercent: 86,
-			progressText: '7 / 7',
-		});
-
-		// Card 7 completed (session finished) - must stay 7 / 7 and lock to 100%
-		expect(calculateProgress(6, total, true)).toEqual({
-			currentCardNumber: 7,
-			progressPercent: 100,
-			progressText: '7 / 7',
-		});
-	});
-
-	it('clamps out-of-bounds indices safely', () => {
-		// Negative index
-		expect(calculateProgress(-5, 5, false)).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 0,
-			progressText: '1 / 5',
-		});
-
-		// Over-bounds index
-		expect(calculateProgress(99, 5, false)).toEqual({
-			currentCardNumber: 5,
-			progressPercent: 80,
-			progressText: '5 / 5',
-		});
-	});
-
-	it('calculates session retention accurately with robust edge handling', () => {
-		// 0 studied -> default 100%
-		expect(calculateRetention(0, 0)).toBe(100);
-
-		// 1 remembered out of 1 -> 100%
-		expect(calculateRetention(1, 1)).toBe(100);
-
-		// 0 remembered out of 1 -> 0%
-		expect(calculateRetention(1, 0)).toBe(0);
-
-		// 2 remembered out of 3 -> 67%
-		expect(calculateRetention(3, 2)).toBe(67);
-
-		// 9 remembered out of 10 -> 90%
-		expect(calculateRetention(10, 9)).toBe(90);
-
-		// Negative or over-range safety
-		expect(calculateRetention(-1, 5)).toBe(100);
-		expect(calculateRetention(5, 10)).toBe(100);
+		// French and Languages (due: 1) appear before Geography (due: 0)
+		expect(stats[0]!.due).toBe(1);
+		expect(stats[1]!.due).toBe(1);
+		expect(stats[2]!.due).toBe(0);
 	});
 });

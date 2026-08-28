@@ -1,4 +1,4 @@
-import { type Editor, MarkdownView, Notice, Plugin } from 'obsidian';
+import { type Editor, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 
 import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
@@ -41,7 +41,24 @@ export default class FlashcardsPlugin extends Plugin {
 		this.registerView(FLASHCARDS_DASHBOARD_VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
 		this.addSettingTab(new FlashcardsSettingTab(this.app, this));
 
-		// 3. Register Commands
+		// 3. Register Vault File Events
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					void this.scanner.deleteFile(file.path);
+				}
+			}),
+		);
+
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					void this.scanner.renameFile(oldPath, file.path);
+				}
+			}),
+		);
+
+		// 4. Register Commands
 
 		// Command 1: Study all cards
 		this.addCommand({
@@ -49,7 +66,7 @@ export default class FlashcardsPlugin extends Plugin {
 			name: 'Study all cards',
 			callback: () => {
 				const rollover = this.settings.rolloverHour ?? 4;
-				const dueCards = this.db.getDueReviewItems(undefined, rollover);
+				const dueCards = this.db.getDueCards(undefined, rollover);
 				const queue = dueCards.length > 0 ? dueCards : this.db.getAllCards();
 
 				if (queue.length === 0) {
@@ -89,20 +106,9 @@ export default class FlashcardsPlugin extends Plugin {
 					if (!checking) {
 						void (async () => {
 							try {
-								const res = await this.scanner.scanFile(activeView.file!);
-								if (res.ignored) {
-									new Notice(
-										`⚡ Scanned "${activeView.file!.basename}": Note is ignored (cards-ignore: true).`,
-									);
-									this.refreshDashboardIfOpen();
-									return;
-								}
-								let extra = '';
-								if (res.idCollisionFixed) extra += ' (fixed duplicate note ID)';
-								if (res.duplicateBlocksFixed > 0)
-									extra += ` (fixed ${res.duplicateBlocksFixed} duplicate block IDs)`;
+								const blocks = await this.scanner.syncFile(activeView.file!);
 								new Notice(
-									`⚡ Scanned "${activeView.file!.basename}": ${res.blocksFound} flashcards synchronized${extra}.`,
+									`⚡ Scanned "${activeView.file!.basename}": ${blocks.length} flashcards synchronized.`,
 								);
 								this.refreshDashboardIfOpen();
 							} catch (error) {
@@ -126,35 +132,14 @@ export default class FlashcardsPlugin extends Plugin {
 			callback: async () => {
 				new Notice('🔍 Scanning entire vault for flashcards...');
 				try {
-					const res = await this.scanner.scanVault();
-					let extra = '';
-					if (res.idCollisionsFixed > 0)
-						extra += ` (fixed ${res.idCollisionsFixed} duplicate note IDs)`;
-					if (res.duplicateBlocksFixed > 0)
-						extra += ` (fixed ${res.duplicateBlocksFixed} duplicate block IDs)`;
-
-					if (res.failedFiles.length > 0) {
-						const sample = res.failedFiles
-							.slice(0, 3)
-							.map((p) => p.split('/').pop()?.replace(/\.md$/, '') || p)
-							.join(', ');
-						const more =
-							res.failedFiles.length > 3 ? ` and ${res.failedFiles.length - 3} more` : '';
-						new Notice(
-							`⚠️ Vault scan completed with warnings: ${res.totalCards} cards across ${res.notesScanned} notes${extra}.\n❌ Failed to parse ${res.failedFiles.length} notes (${sample}${more}). Check console for details.`,
-							10000,
-						);
-					} else {
-						new Notice(
-							`⚡ Vault scan complete: ${res.totalCards} cards across ${res.notesScanned} notes${extra}.`,
-						);
-					}
+					const res = await this.scanner.fullScan();
+					new Notice(
+						`⚡ Vault scan complete: ${res.totalBlocks} cards across ${res.filesScanned} notes.`,
+					);
 					this.refreshDashboardIfOpen();
 				} catch (error) {
-					console.error('[Flashcards] Vault scan encountered a critical error:', error);
-					new Notice(
-						'❌ Vault scan encountered a critical error. See developer console for details.',
-					);
+					console.error('[Flashcards] Vault scan encountered an error:', error);
+					new Notice('❌ Vault scan encountered an error. See developer console.');
 				}
 			},
 		});
@@ -164,10 +149,9 @@ export default class FlashcardsPlugin extends Plugin {
 			id: 'insert-card-block',
 			name: 'Insert card block',
 			editorCallback: (editor: Editor) => {
-				const id = this.scanner.generateBlockId();
 				const cursor = editor.getCursor();
 				const prefix = cursor.ch !== 0 ? '\n' : '';
-				const template = `${prefix}%% card-start id=${id} %%\n\n...\n\n%% card-end %%\n`;
+				const template = `${prefix}%% card-start %%\n\n...\n\n%% card-end %%\n`;
 				editor.replaceRange(template, cursor);
 				const targetLine = cursor.line + (cursor.ch !== 0 ? 2 : 1);
 				editor.setCursor({ line: targetLine, ch: 0 });
@@ -227,9 +211,7 @@ export default class FlashcardsPlugin extends Plugin {
 				if (!res.integrityOk) {
 					new Notice('⚠️ Database integrity check reported warnings.');
 				} else {
-					new Notice(
-						`✨ Database optimized: ${res.prunedNotes} stale notes, ${res.cleanedBlocks} orphaned blocks, ${res.cleanedItems} items cleaned.`,
-					);
+					new Notice(`✨ Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
 				}
 				this.refreshDashboardIfOpen();
 			},

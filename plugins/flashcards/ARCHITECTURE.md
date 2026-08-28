@@ -1,48 +1,55 @@
 # Flashcards Plugin — Architecture Specification
 
-**Status:** Personal plugin, not published. Optimize for simplicity and minimal code surface.
+**Status:** Current Architecture (v2)
 
 ## 1. Overview & Core Philosophy
 
-The Flashcards plugin enables spaced repetition learning directly within Obsidian notes powered by the official **FSRS-6 (`fsrs-rs`)** engine compiled to WebAssembly.
+The Flashcards plugin enables spaced repetition learning directly within Obsidian notes powered by a **Fat Rust Core** compiled to WebAssembly and a **Thin TypeScript Shell** for the Obsidian UI and storage.
 
 ### Core Principles
-- **Markdown is the canonical source of truth**: Cards are defined directly in notes using clean, intuitive syntax. Notes contain only human-readable content and simple IDs—never timestamps, repetition metrics, or scheduling metadata.
-- **Fast Rust WASM Core (`crates/flashcards-wasm`)**:
-  - Official `fsrs` crate from crates.io (`version 6.6.1`).
-  - On-device **weight optimizer** (trains personalized memory curves on review history in milliseconds).
-  - Source-aware Markdown/card parsing with `pulldown-cmark` offset events, Obsidian section hints, tag extraction, line tracking, and deterministic FNV-1a content hashing.
-- **SQLite Relational Engine (`sql.js`)**:
-  - Portable SQLite database (`cards.db`) with atomic crash-safe file persistence.
-  - Anki-style **04:00 AM Day Rollover** for late-night study queues and daily streak/retention metrics.
-- **Zero-Pollution Persistence (`data.json`)**:
-  - Only explicitly configured overrides are written to `data.json`.
-  - Default values ($R=0.90$, Max Interval $=36500$, 21 FSRS weights, Fuzzing) are resolved natively by the engine.
-- **Resilient identity model**: Moving blocks inside notes, rephrasing questions, or renaming/moving files never resets or breaks a card's review history (`Note UUID -> Block ID`).
-- **Cross-platform compliance**: Fully supports Obsidian Desktop and Mobile (iOS / Android) via self-contained WASM binaries without native Node.js/Electron dependencies.
-- **Native Markdown rendering**: Flashcards are rendered in Svelte 5 during review using Obsidian's native `MarkdownRenderer`, preserving LaTeX math, wikilinks, code blocks, and attachments.
+- **Markdown is the canonical source of truth**: Cards are defined directly in notes using clean, native Obsidian syntax. Notes contain only human-readable content and simple 6-character lowercase base-36 block IDs (`^k9x2mp`)—never timestamps, repetition metrics, frontmatter UUIDs, or scheduling metadata.
+- **Zero Frontmatter Pollution**: Notes never require YAML frontmatter modifications or note UUIDs. The plugin only attaches IDs to flashcard blocks that need them.
+- **Fat Rust Core (`crates/flashcards-wasm`)**:
+  - Official `fsrs` crate from crates.io (`version 6.6.1`) for scheduling and on-device weight optimization.
+  - AST-aware Markdown parser with `pulldown-cmark` offset events (protecting code blocks, math, tables, callouts).
+  - In-Rust 6-character lowercase base-36 ID generation, deduplication, and single-pass note text transformation.
+- **Thin TypeScript Shell (`plugins/flashcards`)**:
+  - Obsidian UI views built in Svelte 5 with native Obsidian CSS design tokens.
+  - In-memory SQLite runtime via `sql.js` for instant queries.
+  - Obsidian vault API bridge (`cachedRead`, `modify`, `writeBinary`).
+- **Two-Tier Relational Model (`blocks` → `cards`)**:
+  - **`blocks` table (Source of Truth)**: Represents the raw extracted markdown blocks from Obsidian notes, keyed directly by their 6-character lowercase base-36 block ID.
+  - **`cards` table (Scheduling & Review Entities)**: Represents the actual study items generated from blocks. A standard block produces 1 card (`direction = 'forward'`), a bidirectional block (`reversible = 1`) produces 2 cards (`'forward'` and `'reverse'`), and a cloze block produces 1 card (`direction = NULL`). Uses SQLite's internal autoincrement ID and links back to `block_id`.
+- **In-Memory Review Cache (Hashcards Model)**:
+  - Active review sessions modify an in-memory session cache. Undoing is an instant memory pop (0 SQL queries), and quitting mid-session discards changes cleanly.
+  - Database writes are batched and committed in a single atomic transaction at the end of the session.
+- **Dual-Slot Recoverable Snapshot Protocol (`cards.a.db` / `cards.b.db`)**:
+  - Alternating slots with 64-bit generation numbers, SHA-256 payload integrity verification, and write-then-read-back confirmation.
+  - Engineered for mobile and Syncthing realities where atomic POSIX `rename` or `fsync` are not guaranteed.
+- **Native Markdown Rendering**:
+  - Review cards render in Svelte 5 via Obsidian's official `MarkdownRenderer`, preserving LaTeX math, wikilinks, code blocks, callouts, and vault image attachments.
 
 ---
 
 ## 2. Card Syntax in Markdown
 
 ### 2.1 Simple Forward Cards (Inline)
-Single-line question and answer separated by `::`:
+Single-line question and answer separated by `::` (with or without spaces) and a trailing 6-character lowercase base-36 block ID. Produces `reversible = false` (1 forward card in `cards`):
 ```markdown
-Capital of Pakistan? :: Islamabad ^37066d
+Capital of Pakistan? :: Islamabad ^k9x2mp
 ```
 
 ### 2.2 Bi-directional Cards (Inline)
-Single-line card separated by `:::`. Generates two independent review items (Forward: $Q \to A$, Reverse: $A \to Q$):
+Single-line card separated by `:::`. Produces `reversible = true` (**one block** in `blocks` and **two independent cards** in `cards`: Forward: Q → A, Reverse: A → Q):
 ```markdown
-Capital of Pakistan? ::: Islamabad ^37066d
+Capital of Pakistan? ::: Islamabad ^k9x2mp
 ```
 
 ### 2.3 Block Cards (Multi-line)
-Wrapped inside Obsidian comment markers `%% ... %%` so metadata is **completely invisible in Reading View and Live Preview**:
+Wrapped inside Obsidian comment markers `%% ... %%` so metadata is completely invisible in Reading View and Live Preview:
 ```markdown
-%% card-start id=37066d direction=both %%
-What are the largest cities of Pakistan?
+%% card-start id=k9x2mp reversible=true %%
+What are the largest cities of Pakistan? #todo/card
 
 ...
 
@@ -52,394 +59,446 @@ What are the largest cities of Pakistan?
 %% card-end %%
 ```
 - **Attributes** (`key=val` on `card-start` line):
-  - `id`: Unique block ID (auto-generated 6-char hex).
-  - `direction`: `forward` (default if omitted), `reverse`, or `both`.
-- **Divider**: A standalone line containing only `...` or `. . .` separates Front (Question) from Back (Answer) symmetrically for both forward and reverse directions.
+  - `id`: Unique 6-character lowercase base-36 block ID (`[0-9a-z]`).
+  - `reversible`: `true` or `false` (default is `false` if omitted).
+- **Divider**: Standalone line with `...` or `. . .` separating Front (Question) from Back (Answer).
 
 ### 2.4 Cloze Deletion Cards
-Uses Obsidian's native `==highlight==` syntax. In MVP (v1), all clozes in a card are revealed simultaneously:
+Uses explicit `{{cloze}}` double curly brace syntax. All clozes in a card are revealed in-place:
 ```markdown
-The capital city of Pakistan is ==Islamabad== ^37066d
+The capital city of Pakistan is {{Islamabad}} ^k9x2mp
 
-The three largest cities of Pakistan are ==Karachi==, ==Lahore==, and ==Faisalabad==. ^a8910b
+The three largest cities of Pakistan are {{Karachi}}, {{Lahore}}, and {{Faisalabad}}. ^w7n3rk
 ```
-- **In-Place Seamless Reveal**: Cloze deletions render the sentence once without repeating the text below or requiring a divider line:
-  - **Question State**: Highlights are masked in-place as `[ ... ]` pills.
+- **Always Non-Reversible**: Cloze blocks strictly require `reversible = false` (`0`), and produce 1 card row with `direction = NULL`.
+- **Why `{{...}}`**: Eliminates collisions with regular note highlights (`==highlight==`), standard across spaced repetition tools (Anki, RemNote), and easily parsed without ambiguity.
+- **In-Place Seamless Reveal**:
+  - **Question State**: Cloze spans are masked in-place as `[ ... ]` pills.
   - **Answer State**: The `[ ... ]` pill unmasks into a highlighted `<mark>` answer directly in-place.
+- **Storage Efficiency**: The full sentence with `{{...}}` is stored in `blocks.front`; `blocks.back` is left as an empty string `""` to avoid database string duplication.
 
-### 2.5 Parser boundaries
+### 2.5 Parser Boundaries & Markdown Protection
+Card syntax is parsed with AST source protection:
+1. `pulldown-cmark` generates an eligibility byte mask over the document.
+2. Inline code spans, fenced code blocks, display math, tables, blockquotes, callouts, raw HTML, and YAML metadata are strictly protected from matching card separators or cloze markers.
+3. Non-card prose in notes is ignored gracefully without causing parser errors or aborting scans.
 
-The scanner treats Markdown syntax and flashcard syntax as two layers over the same source ranges:
+### 2.6 Tag Composition & `#todo/card` Mechanics
+A block's effective tags are the union of its containing note's YAML frontmatter tags and any inline `#tags` found inside the block:
 
-1. Obsidian's `MetadataCache` supplies cached frontmatter, inherited tags, and root-level section ranges to the WASM bridge.
-2. The Rust parser independently runs `pulldown-cmark` with source offsets. This remains the correctness fallback when the cache is unavailable or stale after a file change.
-3. Card syntax is examined only in ordinary Markdown text ranges. Inline code, fenced or indented code, inline/display math, blockquotes, tables, YAML/TOML metadata, footnote definitions, and raw HTML are protected.
-4. `:::` is considered before `::`; `::` inside a valid `==...==` span is not a card separator.
-5. Block-card openers and closers are exact `%% card-start ... %%` and `%% card-end %%` lines. They are checked only after protected lines have been excluded, so examples inside fenced code cannot become cards.
-
-The parser preserves the existing `==...==` cloze syntax. Equality operators in ordinary prose remain intentionally ambiguous; code and math delimiters are the supported way to exclude them.
-
+```markdown
+---
+tags: geography
 ---
 
-## 3. Identity Model & Robust Tracking
+Capital of United States :: Washington ^xyz101
+<!-- Tags: geography -->
 
-A card's global identity is derived from a composite key: **`Note UUID -> Block ID`**.
+Capital of California :: San Francisco #cs ^xyz102
+<!-- Tags: geography, cs -->
 
-```
-Note Frontmatter: id: 550e8400-e29b-41d4-a716-446655440000 (UUID)
-                  │
-                  └── Block ID: 37066d (6-char hex)
-                              │
-                              └── Composite Key: 550e8400-e29b-41d4-a716-446655440000:37066d
-```
+%% card-start id=xyz103 %%
+Why is Silicon Valley called that? #silicon #todo/card
 
-### Why this is resilient:
-1. **File Renames & Folder Moves**: The note's `frontmatter.id` remains constant. Renaming files updates only the relative `notes.path` record in SQLite without touching card schedules.
-2. **Block Reordering & Edits**: Moving a block up or down in a note or fixing typos retains its `block_id`. The card's FSRS memory stability and difficulty remain intact.
-3. **Collision Detection & Self-Healing (Duplicate Note Prevention)**:
-   - If a user duplicates a note file (or copies frontmatter) such that two different notes share the same `id` UUID, `NoteScanner` automatically detects the collision on scan, regenerates a fresh unique UUID for the conflicting note, writes it to the note's frontmatter, and notifies the user.
-   - If a user copy-pastes a block inside a note resulting in duplicate block IDs (e.g. two `^8a1b2c`), `NoteScanner` detects the intra-note duplicate, generates a fresh unique block ID, updates the markdown, and cleanly synchronizes both cards.
-4. **Block ID Generation**: Length-6 lowercase hex `[0-9a-f]` matching Obsidian's native block link generation (`src/scanner/identity.ts:1`):
-   ```ts
-   const genBlockId = (): string =>
-     Array.from({ length: 6 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
-   ```
-5. **Ignored Notes (`cards-ignore`)**: If a note's frontmatter contains `cards-ignore: true` (boolean or string `"true"`), `NoteScanner.ts:38` marks `notes.ignored = 1` and skips parsing. Ignored cards remain in SQLite but are excluded from `getDueReviewItems`, `getAllCards`, `getUniqueTags`, and `getDashboardStats` (`WHERE n.ignored = 0`). Clearing the flag restores the cards with full history; `notes.ignored` is backfilled via `ensureColumn`.
+...
 
----
-
-## 4. SQLite Database Storage
-
-### 4.1 Cross-Platform Engine & Crash-Safe Persistence
-- **Runtime (In-Memory SQLite via sql.js WASM)**:
-  - SQLite runs entirely in memory via `sql.js` WASM bridge.
-  - On startup, Obsidian loads the binary byte buffer from `<vault>/.obsidian/plugins/flashcards/cards.db` and passes it into WASM.
-  - All SQL queries, state transitions, and search filters execute in microseconds in-memory without disk I/O bottlenecks.
-- **Disk Persistence (Crash-Safe Atomic Swap)**:
-  - After card reviews or debounced note synchronizations, `DatabaseManager` exports the serialized database buffer and validates the SQLite header (`SQLite format 3`).
-  - The plugin writes bytes to a temporary sibling file: `<vault>/.obsidian/plugins/flashcards/cards.db.writing`.
-  - Upon verifying write integrity, it swaps `cards.db.writing` $\to$ `cards.db` (via `rename`; falls back to `writeBinary` + `remove` on adapters that do not replace on rename).
-  - If a sudden power loss, mobile suspension, or sync collision interrupts a write, `cards.db` remains 100% intact and uncorrupted. On startup, a valid `cards.db.writing` is promoted even when `cards.db` is also present (covers crash between the two writes); if `cards.db` is missing, the `.writing` file is recovered. Corrupt files fail `PRAGMA integrity_check` and are discarded.
-- **Multi-Device Sync**:
-  - `cards.db` resides in `.obsidian/plugins/flashcards/`.
-  - For cross-device sync (Desktop $\leftrightarrow$ Mobile), users syncing via Obsidian Sync should enable **"Installed community plugins" & "Plugin settings & data"** in Obsidian Sync settings, or include `.obsidian/plugins/flashcards/` in their Git / Syncthing sync rules.
-
-### 4.2 Database Schema
-
-```sql
--- Notes containing flashcards
-CREATE TABLE IF NOT EXISTS notes (
-  note_id TEXT PRIMARY KEY,       -- UUID from note frontmatter
-  path TEXT NOT NULL,             -- Vault-relative path (e.g. 'Notes/Biology.md')
-  mtime INTEGER NOT NULL,         -- Last modified timestamp
-  ignored INTEGER NOT NULL DEFAULT 0  -- 1 when frontmatter `cards-ignore: true`
-);
-
--- Canonical markdown blocks containing card definitions
-CREATE TABLE IF NOT EXISTS blocks (
-  note_id TEXT NOT NULL,          -- References notes(note_id)
-  block_id TEXT NOT NULL,         -- Markdown block ID (e.g. '37066d')
-  block_type TEXT NOT NULL,       -- 'inline_forward', 'inline_both', 'block', 'cloze'
-  direction TEXT NOT NULL,        -- 'forward', 'reverse', 'both'
-  front_raw TEXT NOT NULL,
-  back_raw TEXT NOT NULL,
-  tags TEXT NOT NULL,             -- Space-separated tags inherited from note/block (e.g. 'german vocabulary')
-  content_hash TEXT NOT NULL,     -- FNV-1a 64-bit hex hash to detect edits
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (note_id, block_id),
-  FOREIGN KEY (note_id) REFERENCES notes(note_id) ON DELETE CASCADE
-);
-
--- Individual directional review instances (FSRS scheduling state)
-CREATE TABLE IF NOT EXISTS review_items (
-  id TEXT PRIMARY KEY,            -- e.g. '{note_id}:{block_id}:forward'
-  note_id TEXT NOT NULL,
-  block_id TEXT NOT NULL,
-  direction TEXT NOT NULL,        -- 'forward' or 'reverse'
-  state INTEGER NOT NULL,         -- 0=New, 1=Learning, 2=Review, 3=Relearning
-  due INTEGER NOT NULL,           -- Epoch ms timestamp
-  stability REAL NOT NULL,        -- FSRS memory stability
-  difficulty REAL NOT NULL,       -- FSRS card difficulty
-  reps INTEGER NOT NULL,          -- Total reviews count
-  lapses INTEGER NOT NULL,        -- Total forgot count
-  last_review INTEGER,            -- Epoch ms of last review (or NULL)
-  learning_step INTEGER NOT NULL DEFAULT 0,    -- Current learning phase index
-  relearning_step INTEGER NOT NULL DEFAULT 0,  -- Current relearning phase index
-  FOREIGN KEY (note_id, block_id) REFERENCES blocks(note_id, block_id) ON DELETE CASCADE
-);
-
--- Study sessions tracking active review workflows
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  started_at INTEGER NOT NULL,          -- Epoch ms
-  ended_at INTEGER,                     -- Epoch ms (NULL while active)
-  deck_filter TEXT NOT NULL,            -- 'all' or tags filter (e.g. 'german vocab')
-  cards_studied INTEGER NOT NULL DEFAULT 0,
-  forgot_count INTEGER NOT NULL DEFAULT 0,
-  remembered_count INTEGER NOT NULL DEFAULT 0
-);
-
--- Immutable review logs for undo, analytics, and FSRS optimization
--- Note: Only FK is on sessions; review_item_id is not FK-constrained to allow
--- retention of logs after prune (orphan cleanup via explicit DELETE).
-CREATE TABLE IF NOT EXISTS review_logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,          -- References sessions(session_id)
-  review_item_id TEXT NOT NULL,         -- References review_items(id) (no FK)
-  rating INTEGER NOT NULL,              -- 1=Again/Forgot, 2=Hard, 3=Good/Remembered, 4=Easy
-  state INTEGER NOT NULL,
-  due INTEGER NOT NULL,
-  stability REAL NOT NULL,
-  difficulty REAL NOT NULL,
-  review_time INTEGER NOT NULL,         -- Epoch ms
-  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_blocks_note ON blocks(note_id);
-CREATE INDEX IF NOT EXISTS idx_review_items_due ON review_items(due);
-CREATE INDEX IF NOT EXISTS idx_review_logs_item ON review_logs(review_item_id);
-CREATE INDEX IF NOT EXISTS idx_review_logs_time ON review_logs(review_time);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_path ON notes(path);
-
-PRAGMA user_version = 1;  -- Schema version; PRAGMA foreign_keys = ON enforced at runtime
+Because it's got that Silicon #chips ;)
+%% card-end %%
+<!-- Tags: geography, silicon, todo/card, chips -->
 ```
 
----
-
-## 5. Scheduling & Optimization Engine (`fsrs-rs`)
-
-- **Core Library**: Official Rust `fsrs` crate in `crates/flashcards-wasm`.
-- **Directional Review Split**:
-  - For forward cards: 1 review item (`{note_id}:{block_id}:forward`).
-  - For bi-directional cards: 2 distinct review items (`{note_id}:{block_id}:forward` and `{note_id}:{block_id}:reverse`), each maintaining its own independent stability, difficulty, and review due date.
-- **Rating Actions**:
-  - MVP exposes 2-button grading: **Forgot** (`Again` / Rating 1) and **Remembered** (`Good` / Rating 3). The Rust engine computes all 4 FSRS candidates (`Again`/`Hard`/`Good`/`Easy`) internally, but the UI maps only `Forgot → Again` and `Remembered → Good` (see `src/ui/ReviewModal.ts:92` and `src/ui/components/ReviewStage.svelte:129`).
-  - Underlying FSRS model supports `Hard` (2) and `Easy` (4); extending the UI to 4 buttons requires mapping those candidates without DB migration.
-
-### 5.1 Plugin Settings & FSRS Configuration
-
-Persisted in `<vault>/.obsidian/plugins/flashcards/data.json` and configurable in the Plugin Settings tab:
-
-| Setting | Type | Format / Default | Description |
-| :--- | :--- | :--- | :--- |
-| **Desired retention** | Number (%) | `90` (90%) | Target retention rate ($0.80 - 0.99$, mapped to `request_retention: 0.90`). |
-| **Maximum interval** | Number (days) | `36500` (100 years) | Maximum interval cap in days (mapped to `maximum_interval`). |
-| **Learning steps** | String | `10m 1d` | Space-separated durations for new cards. Units: `m` (minutes), `h` (hours), `d` (days) (e.g. `10m 9h 2d`). |
-| **Relearning steps** | String | `10m` | Space-separated durations after lapsed/forgot cards. Units: `m`, `h`, `d`. |
-| **Weights** | String / Array | `""` (empty by default) | Custom FSRS weight parameters `w`. Empty uses FSRS-6 defaults; populated when optimized. |
-| **Fuzz** | Boolean | `true` | Toggle to apply small random interval variations to prevent card clustering (mapped to `enable_fuzz`). |
-| **Next day starts at** | Number (hours) | `4` (4:00 AM) | Cutoff hour past midnight when cards become due for the next study day (`rolloverHour`). |
-
-#### Settings Actions:
-- **Optimize Weights Button**: Executes the Rust `fsrs-rs` optimizer across historical logs in `review_logs` via WASM, calculating optimal personalized weights in milliseconds without blocking the UI.
-- **Reset to Defaults Button**: Restores all FSRS parameters, retention goals, and step intervals to recommended defaults (clears `data.json`).
-- **Optimize Database Button** (also `Flashcards: Optimize database` command): Runs `PRAGMA integrity_check`, prunes stale `notes` via `validPaths`, deletes orphaned `blocks`/`review_items`, executes `VACUUM` + `PRAGMA optimize`, and persists atomically (see `src/db/DatabaseManager.ts:272`).
+- **Tag Scope**: For block cards, all `#tags` appearing between `%% card-start %%` and `%% card-end %%` (in both front and back) are associated with the block.
+- **`#todo/card` Toggle Mechanics (Hotkey <kbd>T</kbd> during review)**:
+  - **Removal (Toggle Off)**: Searches and removes `#todo/card` wherever it appears in the block's text, normalizing whitespace.
+  - **Addition (Toggle On)**:
+    - **Inline & Cloze Cards**: Appended at the end of the line right before the `^<id>` block identifier (e.g. `Question :: Answer #todo/card ^xyz101`).
+    - **Block Cards**: Appended at the **end of the question line/section** (e.g. `Why is X? #todo/card\n...\nAnswer` or `Q: Why is X? #todo/card\nAnswer`).
+    - **Why Question Placement**: Tags must **never** be placed on the `%% card-start %%` comment line because Obsidian's native tag indexer and global search ignore tags enclosed inside Markdown comment brackets `%%`. Placing it in the visible question ensures it is indexed natively across Obsidian.
 
 ---
 
-## 6. UI Components & Design System (Svelte 5)
+## 3. Identity Model & Lowercase Base-36 Block IDs
 
-All UI views are built with Svelte 5 (using runes) and mounted directly into Obsidian containers (`Modal.contentEl` and `ItemView.contentEl`).
+A card's global identity is derived entirely from its **Block ID**.
 
-### 6.1 Design System & Typography
-The visual design, CSS design tokens, animations, and interaction model provide a modern, minimalist card review experience:
-- Semantic DOM structure and accessible iconography.
-- Smooth CSS theme tokens, transitions, and subtle elevation shadows.
-- Svelte 5 runes reactive state machine, keyboard shortcut handler, and in-place reveal animations.
+```mermaid
+flowchart TD
+    subgraph ReversibleBlock["Reversible Block: Capital of Pakistan? ::: Islamabad ^k9x2mp"]
+        BlockIdA["Block ID: k9x2mp (6-char lowercase base-36)"]
+        BlockRowA["blocks row<br/>id: 'k9x2mp'<br/>reversible: 1"]
+        CardRowA1["cards row 1<br/>direction: 'forward'<br/>block_id: 'k9x2mp'"]
+        CardRowA2["cards row 2<br/>direction: 'reverse'<br/>block_id: 'k9x2mp'"]
+        BlockIdA --> BlockRowA
+        BlockRowA --> CardRowA1
+        BlockRowA --> CardRowA2
+    end
 
----
+    subgraph ClozeBlock["Cloze Block: The capital is {{Islamabad}} ^w7n3rk"]
+        BlockIdB["Block ID: w7n3rk (6-char lowercase base-36)"]
+        BlockRowB["blocks row<br/>id: 'w7n3rk'<br/>reversible: 0"]
+        CardRowB["cards row 3<br/>direction: NULL<br/>block_id: 'w7n3rk'"]
+        BlockIdB --> BlockRowB
+        BlockRowB --> CardRowB
+    end
+```
 
-### 6.2 Review Workspace View / Modal
-Distraction-free, responsive active recall review interface:
-
-1. **Top Header & Breadcrumbs**:
-   - Single top-left close button (`Esc`).
-   - Active deck breadcrumb navigation (`All Cards / Due cards` or `#german #vocab / Due cards`).
-   - Animated circular progress indicator ring + numeric counter (`1 / 5`, `2 / 5`).
-   - Keyboard cheatsheet trigger (`?`).
-
-2. **Flashcard Stage & Reveal Animation**:
-   - Centered floating card with elevation shadows (`box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.08)`), rounded corners (`14px`), and subtle border.
-   - **Card Meta Header**: Note title, `Reverse` badge, `Todo` badge, and humanized due status.
-   - **Front Content**: Centered typography rendered via Obsidian's `MarkdownRenderer`.
-   - **Reveal Divider**: Clean, continuous 1px solid separator line with smooth reveal animation (for standard Q/A & block cards).
-   - **In-Place Cloze**: Cloze cards unmask `[ ... ]` into highlighted answers directly in-place without duplicating sentences.
-   - **Inside-Card Subtle Hint (Desktop)**: Static, minimalist helper text at the bottom of the card (`Press Space to reveal answer` $\to$ `Press Space if remembered, F if forgot`).
-
-3. **Responsive Mobile Action Bar & Touch Navigation**:
-   - **Clamped Bottom Bar (Mobile Only)**: Pinned to the bottom of the screen with thumb-friendly large tap targets (**Show Answer** $\to$ **Forgot** and **Remembered**).
-   - **Screen-Half Tap / Swipe Navigation**: Tapping anywhere on the left half of the screen/workspace (outside the card and buttons) navigates to **Previous Card**; tapping the right half advances to **Next Card / Skip**. Also supports horizontal swipe gestures.
-   - **Desktop Shortcut-Only**: Bottom toolbar is completely omitted on desktop for a distraction-free, keyboard-driven study experience.
-
-4. **Keyboard & Touch Navigation**:
-   - <kbd>Space</kbd>: Reveal Answer $\to$ Mark Remembered (`Good` / Rating 3) after reveal.
-   - <kbd>F</kbd>: Mark Forgot (`Again` / Rating 1) after reveal.
-   - <kbd>↓</kbd> / <kbd>↑</kbd>: Reveal / Hide Answer (zero rating effect).
-   - <kbd>→</kbd> / <kbd>←</kbd> (or Tap Right/Left screen): Next / Previous Card (zero rating effect, no DB write).
-   - <kbd>T</kbd>: Toggle `#todo/card` tag on active card block (`src/ui/ReviewModal.ts:165`).
-   - <kbd>Ctrl+Z</kbd> / <kbd>Cmd+Z</kbd>: Undo last review action within the active session.
-   - <kbd>?</kbd> / <kbd>Shift+/</kbd>: Slide-in shortcuts cheatsheet drawer.
-   - <kbd>Esc</kbd>: Close drawer or modal.
-
-5. **Completion Screen & Notifications**:
-   - Finished state with the Lucide `party-popper` icon and session summary metrics:
-     - **Cards Studied**: Count of reviews completed in the session.
-     - **Session Retention**: Accuracy rate (e.g. `94%` Remembered).
-     - **Session Duration**: Formatted study time (e.g. `3m 42s`).
-   - Toast notification feedback banner for card review and tagging actions.
+### Properties & Benefits:
+1. **6-Character Lowercase Base-36 Space**:
+   - Character set: `[0-9a-z]` (36 lowercase alphanumeric symbols).
+   - Total space: $36^6 = 2,176,782,336$ (~2.17 billion combinations).
+   - An in-memory live `existing_ids` Set check guarantees 100% collision-free generation during note scans.
+2. **Native Obsidian Case-Folding Resolver Immunity**:
+   - While Obsidian's block search/autocomplete UI displays case-distinct blocks, Obsidian's underlying link and embed resolver (`![[note#^anchor]]`) normalizes and folds block anchors case-insensitively.
+   - Enforcing strictly lowercase Base-36 (`[0-9a-z]`) guarantees that every block link and embed in Obsidian resolves unambiguously to the exact card.
+3. **Native Obsidian Aesthetic & Format**:
+   - Matches Obsidian's native 6-character lowercase block-link identifier length and appearance (`^37066d` / `^k9x2mp`).
+4. **No File Mutation Except ID Generation**:
+   - The plugin only writes to a file when a flashcard block is missing a block ID or has a duplicate ID.
+   - Frontmatter is never touched or created.
+5. **Renames & Moves**:
+   - When a note is renamed or moved to another folder, `blocks.file_path` is updated to the new path during the scan without affecting `block_id` or card review schedules.
 
 ---
 
-### 6.3 Flashcards Dashboard View (`ItemView`)
-Dedicated Obsidian workspace tab and view (`flashcards-dashboard-view`) displaying a live inventory table and daily study metrics:
+## 4. SQLite Database Schema (`src/db/schema.sql`)
 
-#### Header Stats Bar (from `sessions`):
-- **Studied Today**: Count of cards studied today.
-- **Daily Retention**: Average retention percentage today.
-- **Study Streak**: Continuous consecutive daily study streak.
+The canonical schema definition is maintained in [`src/db/schema.sql`](src/db/schema.sql) (using SQLite `STRICT` mode).
 
-#### Inventory Columns:
-1. **Note**: Basename of the note. Clickable to open and navigate to the note in the editor.
-2. **Front**: Question text. Clickable to jump directly to the exact block in the note (`note.md#^id`).
-3. **Back**: Answer text. Clickable to jump directly to the exact block in the note.
-4. **Due**: Next due date (humanized: `In 2 days`, `Tomorrow`, `Overdue by 1d`, or `New` if never reviewed).
-5. **Reviews**: Total review count (`reps`).
-6. **Last Practiced**: Humanized relative date (e.g. `2 hours ago`, `Yesterday`, `Never`).
+### 4.1 Relational Structure Overview
 
-#### Dashboard Actions & Features:
-- Real-time search filter across notes, questions, and answers.
-- Status filter pills (**All**, **Due today**, **New**, **Learning**, **Review**).
-- Column sorting (sort by due date, note name, review count, etc.).
-- Primary **Start Review** button in header.
+```mermaid
+erDiagram
+    blocks ||--o{ cards : "1:N (ON DELETE CASCADE)"
+    sessions ||--o{ reviews : "1:N (ON DELETE CASCADE)"
+    cards ||--o{ reviews : "1:N (ON DELETE CASCADE)"
+
+    blocks {
+        TEXT id PK "6-char lowercase base-36"
+        TEXT file_path
+        TEXT block_type "'inline' | 'block' | 'cloze'"
+        INTEGER reversible "0 | 1"
+        TEXT front "Question or Cloze text"
+        TEXT back "Answer text (empty for cloze)"
+        TEXT tags "Comma-separated tags"
+        INTEGER content_hash "FNV-1a hash"
+        INTEGER updated_at "epoch ms"
+    }
+
+    cards {
+        INTEGER id PK "Autoincrement"
+        TEXT block_id FK "REFERENCES blocks(id)"
+        TEXT direction "'forward' | 'reverse' | NULL"
+        INTEGER state "0:New, 1:Learning, 2:Review, 3:Relearning"
+        INTEGER due_at "epoch ms"
+        REAL stability "FSRS stability"
+        REAL difficulty "FSRS difficulty"
+        INTEGER reps "Total reviews"
+        INTEGER lapses "Total lapses"
+        INTEGER last_review "epoch ms"
+        INTEGER learning_step
+        INTEGER relearning_step
+    }
+
+    sessions {
+        INTEGER id PK "Autoincrement"
+        INTEGER started_at "epoch ms"
+        INTEGER ended_at "epoch ms"
+        INTEGER card_count
+        INTEGER forgot_count
+        INTEGER remembered_count
+    }
+
+    reviews {
+        INTEGER id PK "Autoincrement"
+        INTEGER session_id FK "REFERENCES sessions(id)"
+        INTEGER card_id FK "REFERENCES cards(id)"
+        INTEGER rating "1:Again, 2:Hard, 3:Good, 4:Easy"
+        INTEGER state
+        INTEGER due_at "epoch ms"
+        REAL stability
+        REAL difficulty
+        INTEGER reviewed_at "epoch ms"
+    }
+```
+
+### 4.2 Schema Validation Rules & Triggers
+1. **Cloze Blocks**: `CHECK (block_type != 'cloze' OR reversible = 0)` ensures cloze blocks can never be marked reversible.
+2. **Direction Validation Triggers**:
+   - `trg_cards_insert_validate_direction` & `trg_cards_update_validate_direction` enforce:
+     - `cards.direction IS NULL` **if and only if** parent `block_type = 'cloze'`.
+     - `cards.direction IN ('forward', 'reverse')` **if and only if** parent `block_type != 'cloze'`.
+3. **Card Uniqueness**:
+   `CREATE UNIQUE INDEX idx_cards_block_direction ON cards(block_id, ifnull(direction, 'cloze'));` guarantees exactly 1 forward card, 1 reverse card (if reversible), or 1 cloze card per block.
+
+### 4.3 Timestamps (`due_at`, `reviewed_at`, `updated_at`)
+All timestamps are stored as **Epoch Milliseconds (`INTEGER`)** with the `_at` suffix (`due_at`, `reviewed_at`, `started_at`, `ended_at`, `updated_at`):
+- Directly matches JS `Date.now()`, `date.getTime()`, and Rust FSRS `DateTime::from_timestamp_millis()`.
+- Fast Numeric Indexing: Integer comparisons (`WHERE due_at <= ?`) are optimal for B-Tree indexes.
+- Timezone Invariance: Avoids string parsing ambiguities across timezones and Daylight Saving shifts.
 
 ---
 
-## 7. Commands & Synchronization Flow
+## 5. Single-Pass Synchronization Flow
 
-To keep the plugin lightweight and predictable, cards are scanned and synchronized on-demand via explicit commands rather than heavy continuous background watchers.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Obs as Obsidian Vault
+    participant Scanner as NoteScanner (TS)
+    participant WASM as sync_document (Rust WASM)
+    participant DB as SQLite DB (sql.js)
 
-### 7.1 Registered Commands
+    Obs->>Scanner: Note opened / Vault scan triggered
+    Scanner->>Obs: app.vault.cachedRead(file)
+    Obs-->>Scanner: Note markdown content
+    Scanner->>WASM: sync_document(content, existingIds, tags, sectionHints)
+    Note over WASM: AST byte-masking (pulldown-cmark)<br/>Parse cards, clozes & blocks<br/>Generate 6-char Base-36 IDs if missing
+    WASM-->>Scanner: DocumentSyncResult { updated_content, blocks }
+    
+    alt If updated_content != null (IDs generated)
+        Scanner->>Obs: app.vault.modify(file, updated_content)
+    end
+
+    Scanner->>DB: syncNoteBlocks(filePath, blocks)
+    Note over DB: Upsert blocks & reconcile cards in SQLite
+```
+
+### Vault Scan Lifecycle
+1. **Iterate Files via `cachedRead`**: For each markdown file in the vault, read cached content via `app.vault.cachedRead(file)`.
+2. **Pass into Rust WASM (`sync_document`)**: Rust parses cards, masks AST, generates fresh 6-char lowercase base-36 IDs (checking against `existingIds`), and rebuilds the modified Markdown text in Rust.
+3. **File Write (if modified)**: If `updated_content` is present, TypeScript calls `app.vault.modify(file, updated_content)` once.
+4. **Incremental In-Memory DB Update**: Upsert `blocks` and reconcile `cards` into the in-memory SQLite database immediately per file, updating the live `existingIds` Set.
+5. **Final Snapshot Persistence**: Once all files in the vault have completed scanning, execute a single snapshot save to disk via the **Dual-Slot Persistence Protocol**.
+
+---
+
+## 6. Review Workflow & In-Memory Session Cache
+
+Active review sessions maintain an in-memory session cache to provide seamless undo and clean session aborts:
+
+```mermaid
+flowchart TD
+    Start([Start Review Session]) --> LoadCards[Load due cards from in-memory SQLite]
+    LoadCards --> InitState[Initialize in-memory sessionReviews and cardUpdates]
+    InitState --> LoopActive{Active Study Loop}
+
+    subgraph InMemoryLoop["In-Memory Active Session (Zero Disk I/O)"]
+        LoopActive -->|User grades card| GradeCard["Compute next FSRS state via Rust WASM<br/>Push to sessionReviews<br/>Update cardUpdates map & UI item"]
+        LoopActive -->|User undos| UndoCard["Pop last review from sessionReviews<br/>Restore previous card state in memory"]
+        GradeCard --> CheckNext{More cards?}
+        UndoCard --> LoopActive
+        CheckNext -->|Yes| LoopActive
+    end
+
+    CheckNext -->|No / Finished| Commit[Session Finished or Modal Closed]
+    LoopActive -->|User closes modal| Commit
+
+    Commit --> BatchSql["Execute Single SQLite Batch Transaction:<br/>1. INSERT INTO sessions<br/>2. INSERT INTO reviews<br/>3. UPDATE cards for all modified items"]
+    BatchSql --> Snapshot[Trigger Dual-Slot Snapshot Save to Disk]
+    Snapshot --> Done([Session Complete])
+```
+
+---
+
+## 7. Dual-Slot Recoverable Persistence Protocol (`cards.a.db` / `cards.b.db`)
+
+Obsidian mobile and desktop storage adapters do not expose POSIX `fsync` or guaranteed atomic file replacement on `rename`. Rather than assuming atomicity, the plugin uses a **Dual-Slot Alternating Snapshot Protocol**:
+
+### 7.1 Slot Header Structure
+
+Each snapshot file (`cards.a.db` and `cards.b.db`) starts with a fixed 48-byte header:
+
+```mermaid
+flowchart TD
+    subgraph SnapshotHeader["48-Byte Snapshot Header Structure"]
+        direction TB
+        H1["Magic Bytes: 'FCDB' (4 bytes)"]
+        H2["Generation: Monotonically increasing uint64 (8 bytes, Big-Endian)"]
+        H3["SHA-256 Checksum: Hash of SQLite payload (32 bytes)"]
+        H4["Payload Length: uint32 (4 bytes, Big-Endian)"]
+        H5["SQLite Database Binary Payload ('SQLite format 3' ... bytes)"]
+        H1 --- H2 --- H3 --- H4 --- H5
+    end
+```
+
+### 7.2 Write Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DBM as DatabaseManager
+    participant Snap as snapshot.ts
+    participant Vault as Vault Adapter (Disk)
+
+    DBM->>Snap: packSnapshot(dbBytes, nextGeneration)
+    Note over Snap: 1. Calculate SHA-256 of dbBytes<br/>2. Pack 48-byte header + SQLite payload
+    Snap-->>DBM: Uint8Array snapshot
+    DBM->>Vault: writeBinary('cards.b.db', snapshot)
+    DBM->>Vault: readBinary('cards.b.db')
+    Vault-->>DBM: Read-back Uint8Array
+    DBM->>Snap: unpackSnapshot(readBackBytes)
+    Note over Snap: Validate Magic 'FCDB', Generation # & SHA-256 Checksum
+    Snap-->>DBM: Validated Payload
+    Note over DBM: Advance active generation in memory
+```
+
+1. Identify current active slot (e.g. `cards.a.db` with Generation 14).
+2. Export in-memory SQLite buffer (`db.export()`) → payload `Uint8Array`.
+3. Compute SHA-256 of the payload.
+4. Prepare target slot `cards.b.db` with Generation 15 + SHA-256 + payload.
+5. Write target file via `app.vault.adapter.writeBinary('.../cards.b.db', buffer)`.
+6. **Read-Back Verification**:
+   - Read back `cards.b.db` bytes from disk.
+   - Verify Magic Bytes, Generation 15, and SHA-256 checksum match.
+   - Verify SQLite header matches `SQLite format 3`.
+7. Mark Slot B (Gen 15) as the active generation in memory.
+
+### 7.3 Startup Recovery Lifecycle
+1. On plugin `onload()`, attempt to read both `cards.a.db` and `cards.b.db`.
+2. Validate header, generation, and SHA-256 checksum for both files:
+   - **Both Valid**: Load the slot with the **higher generation number** (Gen_B > Gen_A).
+   - **One Corrupt** (e.g. power cut mid-write of slot B): Slot A remains completely intact and valid; automatically load Slot A.
+   - **Neither Valid** (First installation): Initialize a fresh, empty SQLite schema from `schema.sql`.
+
+---
+
+## 8. UI Architecture & Native Obsidian Design System (Svelte 5)
+
+The study interface uses a **focused 3-tier layout** built in Svelte 5 with official Obsidian design tokens:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ [Undo]         Breadcrumb & Slim Progress Line        [End]│ Top Bar
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│   Centered Card Canvas                                     │
+│   ┌────────────────────────────────────────────────────┐   │
+│   │ Note Title                               Reverse   │   │
+│   │ ────────────────────────────────────────────────── │   │
+│   │ Front Question / In-place Cloze                    │   │
+│   │ ────────────────────────────────────────────────── │   │
+│   │ Back Answer (revealed on flip)                     │   │
+│   └────────────────────────────────────────────────────┘   │
+│                                                            │
+├────────────────────────────────────────────────────────────┤
+│ [Back]        [   Forgot   ]    [  Remembered  ]     [Next]│ Bottom Bar
+└────────────────────────────────────────────────────────────┘
+```
+
+### 8.1 Review Modal (3-Tier Canvas Layout)
+1. **Top Header**:
+   - **`[Undo]`**: Reverts previous rating from in-memory session stack (<kbd>Ctrl+Z</kbd> / <kbd>U</kbd>).
+   - **Breadcrumbs & 4px Progress Track**: Minimal deck label with current card counter and thin progress fill.
+   - **`[End]`**: Saves session state and exits modal (<kbd>Esc</kbd>).
+2. **Centered Card Canvas**:
+   - Centered card (`max-width: 760px`) styled with `var(--background-primary)`, `var(--radius-l)`, `var(--shadow-l)`.
+   - High legibility clamp typography (`clamp(1.15rem, 2vw, 1.35rem)`) with `line-height: 1.6`.
+   - In-place cloze unmasking (`.fc-cloze-mask` $\to$ `.fc-cloze-revealed` using `var(--text-accent)`).
+3. **Docked Bottom Action Bar**:
+   - **Queue Navigation**: `[Back]` (<kbd>←</kbd>) and `[Next]` (<kbd>→</kbd>) allow browsing through the queue without altering card scheduling.
+   - **Assessment Actions**:
+     - *Unrevealed*: Dominant `[Show Answer]` (<kbd>Space</kbd> / <kbd>Enter</kbd>).
+     - *Revealed*: `[Forgot]` (Left half, <kbd>F</kbd> / <kbd>1</kbd>) and `[Remembered]` (Right half, `mod-cta`, <kbd>Space</kbd> / <kbd>3</kbd>).
+
+### 8.2 Streamlined Completion Screen
+Displays motivational feedback and session metrics upon finishing all due cards:
+- **Summary**: *"Reviewed X cards in Y seconds."*
+- **Stats Grid**: Cards Studied, Retention Rate (%), Pace (s/card), Total Duration.
+
+### 8.3 Dashboard View (Metric Bar, Token-Based Table & Block Grouping)
+- **Top Overview Metric Bar**: Displays four core operational stats (`Studied today`, `Retention`, `🔥 Streak`, `Total cards`) and quick CTA launch buttons (`Study all (X due)` and `Study deck`).
+- **1:1 Block Row Grouping (`groupCardsByBlock`)**: Consolidates bidirectional cards into a single Markdown block row displaying the primary forward Question and Answer. Independent reverse scheduling metrics sit directly underneath in a muted `⇄` sub-row under **Due**, **Reviews**, and **Last Practiced**.
+- **Interactive Toolbar & Table Filters**: Filter pills (`All`, `Due today`, `New`, `Learning`, `Review`) and real-time search box (`note` text or `#tag`). Filter pill counts accurately reflect matching table rows.
+- **Obsidian Design Tokens**: Strict reliance on native Obsidian table variables (`--table-border-color`, `--table-header-background`, `--table-row-alt-background`, `var(--font-ui-small)`, `var(--font-bold)`).
+
+### 8.4 Tag Picker Modal (Hashcards-Inspired Deck Stats Table)
+- **Compact Deck Statistics Table**: Lists all tag decks with detailed columns for `[Tag]`, `[Due]`, `[New]`, and `[Total]` (`computeTagDeckStats`).
+- **Active Deck Sorting & Visual Contrast**: Automatically sorts active/due decks to the top. Due counts highlight in theme accent color (`var(--text-accent)`), while zero counts are muted in `var(--text-faint)`.
+- **Multi-Deck Queue Assembly**: Checkbox selection and row toggling allow assembling a custom multi-tag study queue, with a dynamic action button indicating total workload (`[ Study selected (X due • Y total) ]`).
+- **Interactive Column Sorting**: All table headers support bidirectional sorting (`Tag`, `Due`, `New`, `Total`).
+
+---
+
+## 9. Registered Commands
 
 | Command Name | Scope | Description |
 | :--- | :--- | :--- |
-| **`Flashcards: Study all cards`** | Global | Launches the practice review queue directly for all cards in the entire vault. |
-| **`Flashcards: Study deck`** | Global | Opens a Tag Picker prompt to select tags (e.g. `german vocab`). Dynamically builds a pseudo-deck on the fly and launches a filtered review session. |
+| **`Flashcards: Study all cards`** | Global | Launches review queue for all due cards across the vault. |
+| **`Flashcards: Study deck`** | Global | Opens Tag Picker prompt to select tags and launches filtered review. |
 | **`Flashcards: Open dashboard`** | Global | Opens the Flashcards Inventory & Scheduling dashboard tab. |
-| **`Flashcards: Scan current note`** | Editor | Scans the active note for cards (`%% card-start %%`, `::`, `:::`, `==...==`), mints missing IDs, inherits note `tags:`, updates SQLite, and shows a summary notice. |
-| **`Flashcards: Scan entire vault`** | Global | Scans all notes across the vault, stamps missing IDs, syncs tags, and updates the entire database. |
-| **`Flashcards: Insert card block`** | Editor | Generates a fresh block ID and inserts `%% card-start id=xyz123 %%` + newline + `...` divider + `%% card-end %%` (`%% card-start id=xyz123 %%\n\n...\n\n%% card-end %%`), placing the cursor on the front-content line between the header and divider. |
-| **`Flashcards: Optimize FSRS weights`** | Global | Runs the `fsrs-rs` optimizer over `review_logs`, updates weights in `data.json`, and notifies the user upon completion. |
-| **`Flashcards: Optimize database`** | Global | Runs database integrity checks, prunes stale notes, cleans orphaned blocks/items, executes `VACUUM`, and optimizes query planner. |
+| **`Flashcards: Scan current note`** | Editor | Scans active note, auto-assigns missing IDs, syncs tags, and updates SQLite. |
+| **`Flashcards: Scan entire vault`** | Global | Scans all notes across the vault, auto-assigns missing IDs, and saves snapshot. |
+| **`Flashcards: Insert card block`** | Editor | Inserts clean `%% card-start %%\n\n...\n\n%% card-end %%` template at cursor. |
+| **`Flashcards: Optimize FSRS weights`** | Global | Runs FSRS-6 optimizer over `reviews`, updates custom weights in settings. |
+| **`Flashcards: Optimize database`** | Global | Runs `PRAGMA integrity_check`, deletes orphaned rows, executes `VACUUM`. |
 
 ---
 
-### 7.2 Pseudo-Decks (Tag-Based Study Sessions)
-- **No Database Overhead**: The database has no explicit "decks" table.
-- **On-the-Fly Assembly**: When the user runs `Flashcards: Study deck`, `TagPickerModal` accepts space-separated tags (e.g. `german english`). `DatabaseManager.getDueReviewItems` filters via `src/utils/dashboardFilter.ts:9` `matchCardTags` (case-insensitive, hierarchical: `vocab` matches `vocab/level1` via `startsWith(tag + '/')`, OR across filters).
-- **Tag Inheritance**: Each `blocks.tags` row inherits tags normalized by Obsidian's `parseFrontMatterTags` from the file cache, plus any inline `#tags` found in the raw line / block header / block inner content (extracted by `parser.rs` `extract_inline_tags`). Example: frontmatter `tags: [german]` + line `... #vocab` → stored as `german vocab`.
+## 10. Plugin Settings (`data.json`) & Configuration
+
+Sparse configuration in `<vault>/.obsidian/plugins/flashcards/data.json` (only user overrides are stored):
+
+| Setting | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Desired retention** | Number (%) | `90` (90%) | Target retention rate (0.80 - 0.99, mapped to `request_retention: 0.90`). |
+| **Maximum interval** | Number (days) | `36500` (100 years) | Maximum interval cap in days. |
+| **Learning steps** | String | `10m 1d` | Space-separated durations for new cards (`m`=minutes, `h`=hours, `d`=days). |
+| **Relearning steps** | String | `10m` | Space-separated durations after lapsed/forgot cards. |
+| **Weights** | String | `""` (empty) | Custom 21 FSRS weights `w`. Empty uses FSRS-6 defaults. |
+| **Interval fuzz** | Boolean | `true` | Toggle small random variations to prevent review clustering. |
+| **Next day starts at** | Number (hours) | `4` (4:00 AM) | Rollover hour past midnight for due queue and daily streak calculations. |
 
 ---
 
-### 7.3 Synchronization Flow
+## 11. Directory Structure
 
-```
-Command Triggered ('Scan current note' / 'Scan entire vault')
-                         │
-                         ▼
-            Check frontmatter `cards-ignore`
-                 ┌─────────┴─────────┐
-         true: Mark│              false│
-         notes.ignored=1             │
-         (skip parse,                ▼
-          exclude from          Check Note Frontmatter ID
-          queues)       ┌───────────┴───────────┐
-                   Has ID│                       │Missing ID & contains cards
-                        │                       │
-                        │              Generate UUID (crypto.randomUUID) and
-                        │              insert into note frontmatter via processFrontMatter
-                        ▼                       ▼
-               Read Obsidian MetadataCache section hints and frontmatter tags
-                         │
-                         ▼
-               Parse Card Blocks via Rust WASM (crates/flashcards-wasm):
-               - One pulldown-cmark offset pass builds protected source ranges
-               - Inline `::` / `:::` + Block `%% card-start %%` + Cloze `==..==`
-               - Code and math spans cannot contribute card delimiters or clozes
-               - Extract trailing ` ^id` or `id=...` and validate 6-char hex
-                         │
-                         ▼
-               Deduplicate & Mint IDs (src/scanner/identity.ts):
-               - `deduplicateBlockIds` blanks second occurrence of duplicate `block_id`
-               - If any `block_id` is empty, generate fresh hex via `generateBlockId()` + `stampBlockId()`
-               - Write updated markdown back to vault (preserves line offsets)
-                         │
-                         ▼
-               Sync to SQLite (`cards.db` via DatabaseManager):
-               - Upsert `notes(path, mtime, ignored=0)` (cleans old path on rename)
-               - Upsert `blocks` with FNV-1a `content_hash` (detect edits)
-               - Generate `review_items` for new directions (state=New, due=now); prune obsolete directions when `direction` changes
-               - Prune deleted blocks (`DELETE FROM blocks WHERE note_id=? AND block_id=?` for missing IDs)
-               - No-op delete of stale `notes` on vault-wide scan (`pruneDeletedNotes`)
-               - Persist atomically: export → `cards.db.writing` (header check) → swap → `cards.db`
-```
-
----
-
-## 8. Directory & Module Layout
-
-### 8.1 Rust WASM Core (`crates/flashcards-wasm/`)
 ```
 crates/flashcards-wasm/
-├── Cargo.toml                    # dependencies: fsrs = "6.6", wasm-bindgen, serde, getrandom, pulldown-cmark
+├── Cargo.toml
 ├── src/
-    ├── lib.rs                    # wasm-bindgen interface & exports
-    ├── types.rs                  # Rust data structures (Card, Rating, State, FsrsParams)
-    ├── fsrs.rs                   # FsrsEngine scheduling bridge using official fsrs crate
-    ├── parser.rs                 # Card orchestration, block directives, tags & FNV-1a content hashes
-    ├── markdown.rs               # pulldown-cmark offset map and protected Markdown ranges
-    ├── syntax.rs                 # Source-aware card separators, clozes, and block IDs
-    └── optimizer.rs              # On-device weight training over review_logs
+│   ├── fsrs.rs          # FSRS-6 core scheduling engine & item calculations
+│   ├── lib.rs           # WebAssembly exports with Fallible<T> / fail()
+│   ├── markdown.rs      # pulldown-cmark AST byte-masking
+│   ├── optimizer.rs     # On-device weight training over review logs
+│   ├── parser.rs        # Single-pass sync_document & block extraction
+│   ├── parser_tests.rs  # Unit tests for parser and transformer
+│   ├── syntax.rs        # Base-36 ID generation & cloze parsing
+│   └── types.rs         # Domain types & Serde serializers
 └── fuzz/
-    ├── Cargo.toml                # cargo-fuzz harness
-    ├── fuzz_targets/parse.rs     # no-panic and ParsedBlock invariant checks
-    └── seeds/parse/              # Curated .md seeds plus ignored generated corpus inputs
-```
+    └── fuzz_targets/parse.rs # libFuzzer target for sync_document
 
-### 8.2 TypeScript & Svelte 5 Plugin (`plugins/flashcards/`)
-```
 plugins/flashcards/
 ├── manifest.json
 ├── package.json
-├── vite.config.ts
-├── styles.css
-├── ARCHITECTURE.md
+├── tsconfig.json
 ├── src/
-│   ├── main.ts                   # Plugin lifecycle: register commands, views, events, init WASM
-│   ├── settings.ts               # Plugin settings & configuration tab (sparse data.json)
-│   ├── wasm.ts                   # WASM binary loader & typed bridge for Rust and sql.js
-│   ├── types.ts                  # Domain models, UI state, card types, FsrsParams
+│   ├── main.ts              # Lightweight plugin lifecycle & commands (<300 lines)
+│   ├── settings.ts          # Settings tab & FSRS optimizer UI
+│   ├── types.ts             # TypeScript interfaces matching schema.sql
+│   ├── wasm.ts              # WASM bridge loader & typed wrappers
 │   ├── db/
-│   │   ├── schema.ts             # SQLite DDL and indexes
-│   │   └── DatabaseManager.ts    # SQLite WASM manager with atomic swaps & 4 AM rollover
+│   │   ├── DatabaseManager.ts # SQLite queries & card reconciliation
+│   │   ├── schema.sql         # Canonical STRICT SQLite schema
+│   │   └── snapshot.ts        # 48-byte header packing & SHA-256 verification
 │   ├── scanner/
-│   │   ├── identity.ts           # Block ID generation, note-ID collision & duplicate-ID healing
-│   │   └── NoteScanner.ts        # Note UUID stamping, block ID minting & markdown sync
-│   ├── utils/
-│   │   ├── studySteps.ts         # Parse `10m 1d` learning/relearning step strings → ms arrays
-│   │   └── dashboardFilter.ts    # Tag matching (hierarchical, case-insensitive) & search filtering
-│   └── ui/
-│       ├── ReviewModal.ts        # Modal review runner
-│       ├── DashboardView.ts      # Dashboard ItemView controller
-│       ├── TagPickerModal.ts     # Deck selector modal
-│       └── components/
-│           ├── ReviewStage.svelte        # Svelte 5 review stage, MarkdownRenderer & shortcuts
-│           ├── DashboardView.svelte      # Dashboard statistics & inventory browser
-│           └── TagPickerModal.svelte     # Tag picker UI component
+│   │   └── NoteScanner.ts     # Single-pass vault & note scanner
+│   ├── ui/
+│   │   ├── DashboardView.ts   # Inventory & stats leaf view
+│   │   ├── ReviewModal.ts     # Review modal shell & in-memory session
+│   │   ├── TagPickerModal.ts  # Deck/tag selector modal
+│   │   └── components/
+│   │       ├── DashboardView.svelte
+│   │       ├── ReviewModal.svelte
+│   │       └── TagPickerModal.svelte
+│   └── utils/
+│       ├── dashboardCards.ts     # Block grouping & reverse metrics consolidation
+│       ├── dashboardFilter.ts    # Tag matching & text search filters
+│       ├── reviewMetrics.ts      # Progress & retention calculations
+│       ├── ReviewSessionCache.ts # In-memory session cache & undo stack
+│       ├── studyDay.ts           # 4:00 AM rollover & streak date calculations
+│       ├── studySteps.ts         # Duration string parsing
+│       ├── tagStats.ts           # Tag deck statistics aggregation
+│       └── todoTag.ts            # #todo/card tag toggling in Markdown
 └── tests/
-    └── flashcards.test.ts        # Study day rollover & boundary unit tests
+    └── flashcards.test.ts        # Vitest unit test suite (51 tests)
 ```
-
-## 9. Parser validation
-
-Parser regressions live beside the Rust parser tests and cover code/math exclusion, block-level protection, malformed block cards, Unicode, and source line tracking. The Rust WASM core fuzz harness (`crates/flashcards-wasm/fuzz`) runs the `parse` target against curated `.md` seeds and grows the seed directory with coverage-guided mutations via `cargo fuzz run parse seeds/parse`. The fuzz target accepts arbitrary valid UTF-8 Markdown, exercises both cache-free and Obsidian-section-hinted parsing, and asserts that parsing never panics and every returned block has valid non-empty fields and line bounds.

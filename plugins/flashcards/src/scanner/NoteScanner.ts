@@ -1,14 +1,26 @@
-import { parseFrontMatterTags, type App, type CachedMetadata, type TFile } from 'obsidian';
+import type { App, CachedMetadata, TFile } from 'obsidian';
 
 import type { DatabaseManager } from '../db/DatabaseManager.js';
-import type { ObsidianSectionHint } from '../types.js';
+import type { ObsidianSectionHint, ParsedBlock } from '../types.js';
 import { WasmBridge } from '../wasm.js';
-import {
-	deduplicateBlockIds,
-	generateBlockId,
-	resolveNoteIdCollision,
-	stampBlockId,
-} from './identity.js';
+
+function parseFrontMatterTags(
+	frontmatter: Record<string, unknown> | null | undefined,
+): string[] | null {
+	if (!frontmatter) return null;
+	const tags = frontmatter.tags ?? frontmatter.tag;
+	if (!tags) return null;
+	if (Array.isArray(tags)) {
+		return tags.map(String).filter(Boolean);
+	}
+	if (typeof tags === 'string') {
+		return tags
+			.split(/[,\s]+/)
+			.map((t) => t.trim())
+			.filter(Boolean);
+	}
+	return null;
+}
 
 function getSectionHints(fileCache: CachedMetadata | null): ObsidianSectionHint[] {
 	return (fileCache?.sections ?? []).map((section) => ({
@@ -18,31 +30,40 @@ function getSectionHints(fileCache: CachedMetadata | null): ObsidianSectionHint[
 	}));
 }
 
+function getInheritedTags(fileCache: CachedMetadata | null): string[] {
+	const tagsSet = new Set<string>();
+
+	// 1. Tags in file body (#tag)
+	if (fileCache?.tags) {
+		for (const tagRef of fileCache.tags) {
+			const clean = tagRef.tag.replace(/^#/, '').trim();
+			if (clean) tagsSet.add(clean);
+		}
+	}
+
+	// 2. Frontmatter tags
+	const fmTags = parseFrontMatterTags(fileCache?.frontmatter ?? null) ?? [];
+	for (const tag of fmTags) {
+		const clean = tag.replace(/^#/, '').trim();
+		if (clean) tagsSet.add(clean);
+	}
+
+	return Array.from(tagsSet);
+}
+
 export class NoteScanner {
 	constructor(
 		private app: App,
 		private db: DatabaseManager,
 	) {}
 
-	public generateBlockId(): string {
-		return generateBlockId();
-	}
-
-	public async scanFile(
+	public async syncFile(
 		file: TFile,
-		registeredNoteIds?: Map<string, string>,
+		existingBlockIds?: Set<string>,
 		skipPersist = false,
-	): Promise<{
-		blocksFound: number;
-		modified: boolean;
-		idCollisionFixed: boolean;
-		duplicateBlocksFixed: number;
-		ignored?: boolean;
-	}> {
-		let content = await this.app.vault.read(file);
-		let fileCache = this.app.metadataCache.getFileCache(file);
+	): Promise<ParsedBlock[]> {
+		const fileCache = this.app.metadataCache.getFileCache(file);
 		const frontmatter = fileCache?.frontmatter;
-		let sectionHints = getSectionHints(fileCache);
 
 		// Check if note is marked to be ignored for flashcards
 		const isIgnored =
@@ -50,162 +71,78 @@ export class NoteScanner {
 			String(frontmatter?.['cards-ignore']).toLowerCase() === 'true';
 
 		if (isIgnored) {
-			const mtime = file.stat?.mtime || Date.now();
-			this.db.setNoteIgnoredByPath(file.path, true, mtime);
+			this.db.syncNoteBlocks(file.path, []);
 			if (!skipPersist) {
 				await this.db.persist();
 			}
-			return {
-				blocksFound: 0,
-				modified: false,
-				idCollisionFixed: false,
-				duplicateBlocksFixed: 0,
-				ignored: true,
-			};
+			return [];
 		}
 
-		// Extract inherited tags from frontmatter
-		const inheritedTags = parseFrontMatterTags(frontmatter ?? null) ?? [];
+		const content = await this.app.vault.cachedRead(file);
+		const inheritedTags = getInheritedTags(fileCache);
+		const sectionHints = getSectionHints(fileCache);
+		const existingIds = existingBlockIds ?? this.db.getAllBlockIds();
 
-		// Initial parse to check if this note contains flashcards
-		let parsed = WasmBridge.parseMarkdownBlocks(content, inheritedTags, sectionHints);
-		let idCollisionFixed = false;
+		// Single-pass sync via Rust WASM
+		const result = WasmBridge.syncDocument(content, existingIds, inheritedTags, sectionHints);
 
-		if (parsed.length > 0) {
-			// 1. Ensure Note has a truly unique frontmatter UUID BEFORE modifying file body
-			const rawNoteId = frontmatter?.id as string | undefined;
-			const conflictingPathInDb = rawNoteId ? this.db.getNotePathById(rawNoteId) : undefined;
-			const oldFileExists = conflictingPathInDb
-				? this.app.vault.getAbstractFileByPath(conflictingPathInDb) !== null
-				: false;
-
-			const collision = resolveNoteIdCollision({
-				noteId: rawNoteId,
-				filePath: file.path,
-				conflictingPathInDb,
-				conflictingPathInVault: rawNoteId ? registeredNoteIds?.get(rawNoteId) : undefined,
-				oldFileExistsOnDisk: oldFileExists,
-			});
-
-			let noteId = collision.noteId;
-			if (collision.idCollisionFixed) {
-				idCollisionFixed = true;
-			}
-
-			if (!noteId) {
-				noteId = crypto.randomUUID();
-				await this.app.fileManager.processFrontMatter(file, (fm) => {
-					fm.id = noteId;
-				});
-				// Re-read content after frontmatter modification to ensure accurate line offsets
-				content = await this.app.vault.read(file);
-				fileCache = this.app.metadataCache.getFileCache(file);
-				sectionHints = getSectionHints(fileCache);
-				parsed = WasmBridge.parseMarkdownBlocks(content, inheritedTags, sectionHints);
-			}
-
-			registeredNoteIds?.set(noteId, file.path);
-
-			// 2. Check for missing block IDs OR duplicate block IDs in this file
-			let modifiedContent = content;
-			let isModified = false;
-			const { duplicateBlocksFixed } = deduplicateBlockIds(parsed);
-			const seenBlockIds = new Set<string>();
-			for (const b of parsed) {
-				if (b.block_id) seenBlockIds.add(b.block_id);
-			}
-
-			if (parsed.some((b) => !b.block_id)) {
-				const lines = modifiedContent.split('\n');
-				for (const b of parsed) {
-					if (!b.block_id) {
-						let newId = this.generateBlockId();
-						while (seenBlockIds.has(newId)) {
-							newId = this.generateBlockId();
-						}
-						b.block_id = newId;
-						seenBlockIds.add(newId);
-
-						lines[b.line_start] = stampBlockId(lines[b.line_start] ?? '', b.card_type, newId);
-						isModified = true;
-					}
-				}
-				if (isModified) {
-					modifiedContent = lines.join('\n');
-					await this.app.vault.modify(file, modifiedContent);
-					// Re-parse with the updated unique IDs
-					parsed = WasmBridge.parseMarkdownBlocks(modifiedContent, inheritedTags, sectionHints);
-				}
-			}
-
-			const mtime = file.stat?.mtime || Date.now();
-			this.db.upsertNote(noteId, file.path, mtime, 0);
-			this.db.syncNoteBlocks(noteId, parsed);
-			if (!skipPersist) {
-				await this.db.persist();
-			}
-
-			return {
-				blocksFound: parsed.length,
-				modified: isModified,
-				idCollisionFixed,
-				duplicateBlocksFixed,
-			};
-		} else {
-			// If note contains no flashcards, remove any stale records
-			this.db.deleteNoteByPath(file.path);
-			if (!skipPersist) {
-				await this.db.persist();
-			}
-
-			return {
-				blocksFound: 0,
-				modified: false,
-				idCollisionFixed: false,
-				duplicateBlocksFixed: 0,
-			};
+		// If missing IDs were generated or duplicate IDs replaced, write updated Markdown once
+		if (result.updated_content !== null && result.updated_content !== content) {
+			await this.app.vault.modify(file, result.updated_content);
 		}
+
+		// Reconcile SQLite database
+		this.db.syncNoteBlocks(file.path, result.blocks);
+
+		// Track generated/discovered IDs for subsequent files in a batch scan
+		if (existingBlockIds) {
+			for (const block of result.blocks) {
+				existingBlockIds.add(block.id);
+			}
+		}
+
+		if (!skipPersist) {
+			await this.db.persist();
+		}
+
+		return result.blocks;
 	}
 
-	public async scanVault(): Promise<{
-		notesScanned: number;
-		totalCards: number;
-		idCollisionsFixed: number;
-		duplicateBlocksFixed: number;
-		failedFiles: string[];
+	public async fullScan(filesToScan?: TFile[]): Promise<{
+		filesScanned: number;
+		totalBlocks: number;
 	}> {
-		const files = this.app.vault.getMarkdownFiles();
+		const files = filesToScan ?? this.app.vault.getMarkdownFiles();
 		const validPaths = new Set(files.map((f) => f.path));
-		const registeredNoteIds = new Map<string, string>();
-		let notesScanned = 0;
-		let totalCards = 0;
-		let idCollisionsFixed = 0;
-		let duplicateBlocksFixed = 0;
-		const failedFiles: string[] = [];
+		const existingBlockIds = this.db.getAllBlockIds();
+		let totalBlocks = 0;
 
 		for (const file of files) {
 			try {
-				const res = await this.scanFile(file, registeredNoteIds, true);
-				notesScanned++;
-				totalCards += res.blocksFound;
-				if (res.idCollisionFixed) idCollisionsFixed++;
-				duplicateBlocksFixed += res.duplicateBlocksFixed;
+				const blocks = await this.syncFile(file, existingBlockIds, true);
+				totalBlocks += blocks.length;
 			} catch (error) {
-				console.error(`[Flashcards] Failed to scan note "${file.path}":`, error);
-				failedFiles.push(file.path);
+				console.error(`[Flashcards] Failed to sync note "${file.path}":`, error);
 			}
 		}
 
-		// Prune any notes in SQLite that no longer exist in the vault
+		// Prune any deleted notes from database
 		this.db.pruneDeletedNotes(validPaths);
 		await this.db.persist();
 
 		return {
-			notesScanned,
-			totalCards,
-			idCollisionsFixed,
-			duplicateBlocksFixed,
-			failedFiles,
+			filesScanned: files.length,
+			totalBlocks,
 		};
+	}
+
+	public async deleteFile(filePath: string): Promise<void> {
+		this.db.syncNoteBlocks(filePath, []);
+		await this.db.persist();
+	}
+
+	public async renameFile(oldPath: string, newPath: string): Promise<void> {
+		this.db.renameNote(oldPath, newPath);
+		await this.db.persist();
 	}
 }

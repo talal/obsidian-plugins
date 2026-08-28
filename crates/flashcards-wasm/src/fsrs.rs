@@ -44,9 +44,40 @@ impl FsrsEngine {
         let next_states = self
             .model
             .next_states(memory_state, retention, elapsed_days)
+            .or_else(|_| self.model.next_states(None, retention, 0))
             .unwrap_or_else(|_| {
-                // Fallback to fresh next states if invalid
-                self.model.next_states(None, retention, 0).unwrap()
+                FSRS::default()
+                    .next_states(None, 0.9, 0)
+                    .unwrap_or(fsrs::NextStates {
+                        again: fsrs::ItemState {
+                            memory: MemoryState {
+                                stability: 0.1,
+                                difficulty: 5.0,
+                            },
+                            interval: 0.0,
+                        },
+                        hard: fsrs::ItemState {
+                            memory: MemoryState {
+                                stability: 1.0,
+                                difficulty: 5.0,
+                            },
+                            interval: 1.0,
+                        },
+                        good: fsrs::ItemState {
+                            memory: MemoryState {
+                                stability: 3.0,
+                                difficulty: 5.0,
+                            },
+                            interval: 3.0,
+                        },
+                        easy: fsrs::ItemState {
+                            memory: MemoryState {
+                                stability: 7.0,
+                                difficulty: 4.0,
+                            },
+                            interval: 7.0,
+                        },
+                    })
             });
 
         let rating_items = [

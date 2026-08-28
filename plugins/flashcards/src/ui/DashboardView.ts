@@ -60,7 +60,7 @@ export class DashboardView extends ItemView {
 				stats,
 				dueCutoff,
 				onStartReview: () => {
-					const dueItems = this.plugin.db.getDueReviewItems(undefined, rollover);
+					const dueItems = this.plugin.db.getDueCards(undefined, rollover);
 					const queue = dueItems.length > 0 ? dueItems : items;
 					if (queue.length === 0) {
 						new Notice('No cards available to study.');

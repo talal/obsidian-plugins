@@ -3,11 +3,14 @@ import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 
 import initWasm, {
 	calculate_schedule,
+	generate_block_id,
 	init,
 	optimize_fsrs_weights,
 	parse_blocks,
+	sync_document_wasm,
 } from '../../../crates/flashcards-wasm/pkg/flashcards_wasm.js';
 import type {
+	DocumentSyncResult,
 	FsrsParams,
 	ObsidianSectionHint,
 	ParsedBlock,
@@ -19,6 +22,10 @@ import type {
 export class WasmBridge {
 	private static isWasmInitialized = false;
 	private static sqlJs: SqlJsStatic | null = null;
+
+	public static initForTest(sqlJs: SqlJsStatic): void {
+		this.sqlJs = sqlJs;
+	}
 
 	public static async initialize(app: App, manifest: PluginManifest): Promise<void> {
 		const dir = manifest.dir ?? '.obsidian/plugins/flashcards';
@@ -48,6 +55,21 @@ export class WasmBridge {
 		return binaryData ? new this.sqlJs.Database(binaryData) : new this.sqlJs.Database();
 	}
 
+	public static syncDocument(
+		markdown: string,
+		existingIds: Set<string>,
+		inheritedTags: string[],
+		sectionHints: ObsidianSectionHint[] = [],
+	): DocumentSyncResult {
+		const json = sync_document_wasm(
+			markdown,
+			JSON.stringify(Array.from(existingIds)),
+			JSON.stringify(inheritedTags),
+			JSON.stringify(sectionHints),
+		);
+		return JSON.parse(json) as DocumentSyncResult;
+	}
+
 	public static parseMarkdownBlocks(
 		markdown: string,
 		inheritedTags: string[],
@@ -59,6 +81,10 @@ export class WasmBridge {
 			JSON.stringify(sectionHints),
 		);
 		return JSON.parse(json) as ParsedBlock[];
+	}
+
+	public static generateBlockId(existingIds: Set<string> = new Set()): string {
+		return generate_block_id(JSON.stringify(Array.from(existingIds)));
 	}
 
 	public static calculateSchedule(

@@ -6,6 +6,7 @@
 docs/
 
 # Obsidian
+*.db
 cache.json
 data.json
 test-vault/

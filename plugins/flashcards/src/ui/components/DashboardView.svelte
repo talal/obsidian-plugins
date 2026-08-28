@@ -1,6 +1,10 @@
 <script lang="ts">
 	import type { DashboardStats, ReviewItem } from '../../types.ts';
-	import { filterDashboardCard } from '../../utils/dashboardFilter.ts';
+	import {
+		filterDashboardBlock,
+		groupCardsByBlock,
+		type DashboardBlockItem,
+	} from '../../utils/dashboardCards.ts';
 
 	interface Props {
 		items: ReviewItem[];
@@ -18,23 +22,36 @@
 	let sortColumn = $state<'note' | 'due' | 'reviews' | 'last'>('due');
 	let sortAsc = $state(true);
 
-	let filteredItems = $derived(
-		items
-			.filter((item) => {
-				// Status Filter
-				if (statusFilter === 'due' && item.due > dueCutoff) return false;
-				if (statusFilter === 'new' && item.state !== 'new') return false;
-				if (statusFilter === 'learning' && item.state !== 'learning') return false;
-				if (statusFilter === 'review' && item.state !== 'review') return false;
+	let blockItems = $derived(groupCardsByBlock(items));
 
-				return filterDashboardCard(item, searchQuery);
-			})
+	let statusCounts = $derived({
+		all: blockItems.length,
+		due: blockItems.filter((b) => filterDashboardBlock(b, 'due', dueCutoff, '')).length,
+		new: blockItems.filter((b) => filterDashboardBlock(b, 'new', dueCutoff, '')).length,
+		learning: blockItems.filter((b) => filterDashboardBlock(b, 'learning', dueCutoff, '')).length,
+		review: blockItems.filter((b) => filterDashboardBlock(b, 'review', dueCutoff, '')).length,
+	});
+
+	let filteredItems = $derived(
+		blockItems
+			.filter((item) => filterDashboardBlock(item, statusFilter, dueCutoff, searchQuery))
 			.sort((a, b) => {
 				let cmp = 0;
-				if (sortColumn === 'note') cmp = a.noteTitle.localeCompare(b.noteTitle);
-				else if (sortColumn === 'due') cmp = a.due - b.due;
-				else if (sortColumn === 'reviews') cmp = a.reps - b.reps;
-				else if (sortColumn === 'last') cmp = (a.lastReview || 0) - (b.lastReview || 0);
+				if (sortColumn === 'note') {
+					cmp = a.noteTitle.localeCompare(b.noteTitle);
+				} else if (sortColumn === 'due') {
+					const aDue = Math.min(a.forward?.dueAt ?? Infinity, a.reverse?.dueAt ?? Infinity);
+					const bDue = Math.min(b.forward?.dueAt ?? Infinity, b.reverse?.dueAt ?? Infinity);
+					cmp = aDue - bDue;
+				} else if (sortColumn === 'reviews') {
+					const aReps = (a.forward?.reps ?? 0) + (a.reverse?.reps ?? 0);
+					const bReps = (b.forward?.reps ?? 0) + (b.reverse?.reps ?? 0);
+					cmp = aReps - bReps;
+				} else if (sortColumn === 'last') {
+					const aLast = Math.max(a.forward?.lastReview ?? 0, a.reverse?.lastReview ?? 0);
+					const bLast = Math.max(b.forward?.lastReview ?? 0, b.reverse?.lastReview ?? 0);
+					cmp = aLast - bLast;
+				}
 				return sortAsc ? cmp : -cmp;
 			}),
 	);
@@ -50,45 +67,48 @@
 </script>
 
 <div class="fc-dashboard">
-	<!-- Top Overview Stats Cards -->
-	<div class="fc-overview-header">
-		<div class="fc-stats-grid-dashboard">
-			<div class="fc-stat-card">
+	<!-- Top Overview Metric Bar -->
+	<header class="fc-dashboard-header">
+		<div class="fc-stats-bar">
+			<div class="fc-stat-item">
 				<span class="fc-stat-number">{stats.studiedToday}</span>
-				<span class="fc-stat-label">Studied Today</span>
+				<span class="fc-stat-label">Studied today</span>
 			</div>
-			<div class="fc-stat-card">
+			<div class="fc-stat-divider"></div>
+			<div class="fc-stat-item">
 				<span class="fc-stat-number">{stats.dailyRetention}%</span>
-				<span class="fc-stat-label">Daily Retention</span>
+				<span class="fc-stat-label">Retention</span>
 			</div>
-			<div class="fc-stat-card">
+			<div class="fc-stat-divider"></div>
+			<div class="fc-stat-item">
 				<span class="fc-stat-number">🔥 {stats.studyStreak}d</span>
-				<span class="fc-stat-label">Study Streak</span>
+				<span class="fc-stat-label">Streak</span>
 			</div>
-			<div class="fc-stat-card">
-				<span class="fc-stat-number">{items.length}</span>
-				<span class="fc-stat-label">Total Flashcards</span>
+			<div class="fc-stat-divider"></div>
+			<div class="fc-stat-item">
+				<span class="fc-stat-number">{stats.totalCards}</span>
+				<span class="fc-stat-label">Total cards</span>
 			</div>
 		</div>
 
-		<div class="fc-quick-actions">
+		<div class="fc-header-actions">
 			<button class="mod-cta" onclick={onStartReview}>
-				<span>Study All ({stats.dueToday} due)</span>
+				<span>Study all ({stats.dueToday} due)</span>
 			</button>
 			<button onclick={onStudyDeck}>
-				<span>Study Deck</span>
+				<span>Study deck</span>
 			</button>
 		</div>
-	</div>
+	</header>
 
 	<!-- Filter and Search Toolbar -->
 	<div class="fc-toolbar">
 		<div class="fc-filter-pills">
-			<button class="fc-pill" class:active={statusFilter === 'all'} onclick={() => statusFilter = 'all'}>All ({items.length})</button>
-			<button class="fc-pill" class:active={statusFilter === 'due'} onclick={() => statusFilter = 'due'}>Due Today ({stats.dueToday})</button>
-			<button class="fc-pill" class:active={statusFilter === 'new'} onclick={() => statusFilter = 'new'}>New ({stats.newCards})</button>
-			<button class="fc-pill" class:active={statusFilter === 'learning'} onclick={() => statusFilter = 'learning'}>Learning</button>
-			<button class="fc-pill" class:active={statusFilter === 'review'} onclick={() => statusFilter = 'review'}>Review</button>
+			<button class="fc-pill" class:active={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>All ({statusCounts.all})</button>
+			<button class="fc-pill" class:active={statusFilter === 'due'} onclick={() => (statusFilter = 'due')}>Due today ({statusCounts.due})</button>
+			<button class="fc-pill" class:active={statusFilter === 'new'} onclick={() => (statusFilter = 'new')}>New ({statusCounts.new})</button>
+			<button class="fc-pill" class:active={statusFilter === 'learning'} onclick={() => (statusFilter = 'learning')}>Learning ({statusCounts.learning})</button>
+			<button class="fc-pill" class:active={statusFilter === 'review'} onclick={() => (statusFilter = 'review')}>Review ({statusCounts.review})</button>
 		</div>
 
 		<div class="fc-search-box search-input-container">
@@ -101,20 +121,20 @@
 		<table class="fc-table">
 			<thead>
 				<tr>
-					<th onclick={() => toggleSort('note')} class="fc-sortable fc-th-note">
+					<th onclick={() => toggleSort('note')} class="fc-sortable">
 						Note {sortColumn === 'note' ? (sortAsc ? '↑' : '↓') : ''}
 					</th>
-					<th class="fc-th-front">Front (Question)</th>
-					<th class="fc-th-back">Back (Answer)</th>
-					<th class="fc-th-tags">Tags</th>
-					<th onclick={() => toggleSort('due')} class="fc-sortable fc-th-due">
+					<th>Front (Question)</th>
+					<th>Back (Answer)</th>
+					<th>Tags</th>
+					<th onclick={() => toggleSort('due')} class="fc-sortable">
 						Due {sortColumn === 'due' ? (sortAsc ? '↑' : '↓') : ''}
 					</th>
-					<th onclick={() => toggleSort('reviews')} class="fc-sortable fc-th-reps">
+					<th onclick={() => toggleSort('reviews')} class="fc-sortable">
 						Reviews {sortColumn === 'reviews' ? (sortAsc ? '↑' : '↓') : ''}
 					</th>
-					<th onclick={() => toggleSort('last')} class="fc-sortable fc-th-last">
-						Last Practiced {sortColumn === 'last' ? (sortAsc ? '↑' : '↓') : ''}
+					<th onclick={() => toggleSort('last')} class="fc-sortable">
+						Last practiced {sortColumn === 'last' ? (sortAsc ? '↑' : '↓') : ''}
 					</th>
 				</tr>
 			</thead>
@@ -124,34 +144,57 @@
 						<td colspan="7" class="fc-empty-row">No flashcards match the current filter.</td>
 					</tr>
 				{:else}
-					{#each filteredItems as item (item.id)}
-						<tr onclick={() => onOpenCard?.(item)}>
+					{#each filteredItems as item (item.blockId)}
+						<tr onclick={() => onOpenCard?.(item.forward ?? item.reverse)}>
 							<td class="fc-cell-note">
 								<span class="fc-note-link" title={item.notePath} dir="auto">{item.noteTitle}</span>
 							</td>
-							<td class="fc-cell-front">
+							<td>
 								<span class="fc-text-preview" dir="auto">{item.front}</span>
-								{#if item.direction === 'reverse'}
-									<span class="fc-badge fc-badge-reverse">rev</span>
-								{/if}
 							</td>
-							<td class="fc-cell-back">
+							<td>
 								<span class="fc-text-preview" dir="auto">{item.back}</span>
 							</td>
 							<td class="fc-cell-tags">
 								<div class="fc-tag-list">
 									{#each item.tags as tag}
-										<span class="fc-tag" dir="auto">#{tag}</span>
+										<span class="tag" dir="auto">#{tag}</span>
 									{/each}
 								</div>
 							</td>
 							<td class="fc-cell-due">
-								<span class="fc-due-badge" class:fc-due-now={item.due <= Date.now()} dir="auto">
-									{item.dueHuman}
-								</span>
+								{#if item.forward}
+									<span class="fc-due-badge" class:fc-due-now={item.forward.dueAt <= dueCutoff} dir="auto">
+										{item.forward.dueHuman}
+									</span>
+								{/if}
+								{#if item.reverse}
+									<div class="fc-metric-sub" dir="auto">
+										<span class="fc-due-badge" class:fc-due-now={item.reverse.dueAt <= dueCutoff}>
+											{item.reverse.dueHuman}
+										</span>
+										<span class="fc-sub-icon">⇄</span>
+									</div>
+								{/if}
 							</td>
-							<td class="fc-cell-reps">{item.reps}</td>
-							<td class="fc-cell-last">{item.lastPracticedHuman}</td>
+							<td class="fc-cell-reps">
+								<span>{item.forward?.reps ?? 0}</span>
+								{#if item.reverse}
+									<div class="fc-metric-sub">
+										<span>{item.reverse.reps}</span>
+										<span class="fc-sub-icon">⇄</span>
+									</div>
+								{/if}
+							</td>
+							<td class="fc-cell-last">
+								<span>{item.forward?.lastPracticedHuman ?? 'Never'}</span>
+								{#if item.reverse}
+									<div class="fc-metric-sub" dir="auto">
+										<span>{item.reverse.lastPracticedHuman}</span>
+										<span class="fc-sub-icon">⇄</span>
+									</div>
+								{/if}
+							</td>
 						</tr>
 					{/each}
 				{/if}

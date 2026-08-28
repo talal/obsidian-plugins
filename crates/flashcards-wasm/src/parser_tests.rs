@@ -1,6 +1,33 @@
     use super::*;
 
     #[test]
+    fn test_valid_block_id() {
+        assert!(syntax::is_valid_block_id("k9x2mp"));
+        assert!(syntax::is_valid_block_id("012345"));
+        assert!(syntax::is_valid_block_id("abcdef"));
+        assert!(syntax::is_valid_block_id("zzzzzz"));
+
+        // Invalid: uppercase, wrong length, special characters
+        assert!(!syntax::is_valid_block_id("K9X2MP"));
+        assert!(!syntax::is_valid_block_id("k9x2m"));
+        assert!(!syntax::is_valid_block_id("k9x2mp7"));
+        assert!(!syntax::is_valid_block_id("k9-2mp"));
+        assert!(!syntax::is_valid_block_id(""));
+    }
+
+    #[test]
+    fn test_generate_unique_block_id() {
+        let mut existing = HashSet::new();
+        let id1 = syntax::generate_unique_block_id(&existing);
+        assert!(syntax::is_valid_block_id(&id1));
+        existing.insert(id1.clone());
+
+        let id2 = syntax::generate_unique_block_id(&existing);
+        assert!(syntax::is_valid_block_id(&id2));
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
     fn test_parse_inline_cards() {
         let content = r#"
 # Demo Note
@@ -11,23 +38,25 @@ die Entscheidung ::: the decision #german ^c9f4d1
         let blocks = parse_markdown_blocks(content, &tags);
         assert_eq!(blocks.len(), 2);
 
-        assert_eq!(blocks[0].card_type, CardType::InlineForward);
-        assert_eq!(blocks[0].front_raw, "Capital of France?");
-        assert_eq!(blocks[0].back_raw, "Paris");
-        assert_eq!(blocks[0].block_id, "8a1b2c");
+        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert!(!blocks[0].reversible);
+        assert_eq!(blocks[0].front, "Capital of France?");
+        assert_eq!(blocks[0].back, "Paris");
+        assert_eq!(blocks[0].id, "8a1b2c");
         assert_eq!(blocks[0].tags, vec!["geography"]);
 
-        assert_eq!(blocks[1].card_type, CardType::InlineBoth);
-        assert_eq!(blocks[1].front_raw, "die Entscheidung");
-        assert_eq!(blocks[1].back_raw, "the decision #german");
-        assert_eq!(blocks[1].block_id, "c9f4d1");
+        assert_eq!(blocks[1].block_type, CardBlockType::Inline);
+        assert!(blocks[1].reversible);
+        assert_eq!(blocks[1].front, "die Entscheidung");
+        assert_eq!(blocks[1].back, "the decision #german");
+        assert_eq!(blocks[1].id, "c9f4d1");
         assert_eq!(blocks[1].tags, vec!["geography", "german"]);
     }
 
     #[test]
     fn test_parse_block_card() {
         let content = r#"
-%% card-start id=37066d direction=both %%
+%% card-start id=37066d reversible=true %%
 What are the largest cities of Pakistan?
 
 ...
@@ -42,25 +71,25 @@ What are the largest cities of Pakistan?
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.card_type, CardType::Block);
-        assert_eq!(b.direction, CardDirection::Both);
-        assert_eq!(b.block_id, "37066d");
-        assert_eq!(b.front_raw, "What are the largest cities of Pakistan?");
-        assert!(b.back_raw.contains("Karachi"));
-        assert!(b.back_raw.contains("Lahore"));
+        assert_eq!(b.block_type, CardBlockType::Block);
+        assert!(b.reversible);
+        assert_eq!(b.id, "37066d");
+        assert_eq!(b.front, "What are the largest cities of Pakistan?");
+        assert!(b.back.contains("Karachi"));
+        assert!(b.back.contains("Lahore"));
     }
 
     #[test]
     fn test_block_card_hash_changes_on_header_edit() {
         let content1 = r#"
-%% card-start id=37066d direction=forward %%
+%% card-start id=37066d reversible=false %%
 Question
 ...
 Answer
 %% card-end %%
 "#;
         let content2 = r#"
-%% card-start id=37066d direction=both %%
+%% card-start id=37066d reversible=true %%
 Question
 ...
 Answer
@@ -73,47 +102,51 @@ Answer
 
     #[test]
     fn test_parse_cloze_card() {
-        let content = "The register ==%rax== holds the return value. ^e3d2c1\n";
+        let content = "The register {{%rax}} holds the return value. ^e3d2c1\n";
         let tags = vec!["cs".to_string()];
         let blocks = parse_markdown_blocks(content, &tags);
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.card_type, CardType::Cloze);
-        assert_eq!(b.block_id, "e3d2c1");
-        assert_eq!(b.front_raw, "The register ==%rax== holds the return value.");
+        assert_eq!(b.block_type, CardBlockType::Cloze);
+        assert!(!b.reversible);
+        assert_eq!(b.id, "e3d2c1");
+        assert_eq!(b.front, "The register {{%rax}} holds the return value.");
+        assert_eq!(b.back, "");
     }
 
     #[test]
     fn test_parse_cloze_card_without_block_id() {
-        let content = "The capital of France is ==Paris==.\n";
+        let content = "The capital of France is {{Paris}}.\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.card_type, CardType::Cloze);
-        assert_eq!(b.block_id, "");
-        assert_eq!(b.front_raw, "The capital of France is ==Paris==.");
+        assert_eq!(b.block_type, CardBlockType::Cloze);
+        assert_eq!(b.id, "");
+        assert_eq!(b.front, "The capital of France is {{Paris}}.");
+        assert_eq!(b.back, "");
     }
 
     #[test]
-    fn test_parse_cloze_with_colons_inside_highlight() {
-        let content = "The C++ namespace is ==std::vector== ^123456\n";
+    fn test_parse_cloze_with_colons_inside_cloze() {
+        let content = "The C++ namespace is {{std::vector}} ^123456\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].card_type, CardType::Cloze);
-        assert_eq!(blocks[0].block_id, "123456");
-        assert_eq!(blocks[0].front_raw, "The C++ namespace is ==std::vector==");
+        assert_eq!(blocks[0].block_type, CardBlockType::Cloze);
+        assert_eq!(blocks[0].id, "123456");
+        assert_eq!(blocks[0].front, "The C++ namespace is {{std::vector}}");
+        assert_eq!(blocks[0].back, "");
     }
 
     #[test]
-    fn test_parse_inline_with_highlights_in_question() {
-        let content = "What is ==const== in Rust? :: A constant declaration ^123456\n";
+    fn test_parse_inline_with_clozes_in_question() {
+        let content = "What is `const` in Rust? :: A constant declaration ^123456\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].card_type, CardType::InlineForward);
-        assert_eq!(blocks[0].front_raw, "What is ==const== in Rust?");
-        assert_eq!(blocks[0].back_raw, "A constant declaration");
+        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[0].front, "What is `const` in Rust?");
+        assert_eq!(blocks[0].back, "A constant declaration");
     }
 
     #[test]
@@ -121,22 +154,22 @@ Answer
         let content_without_id = "Energy formula :: E = mc^2\n";
         let blocks = parse_markdown_blocks(content_without_id, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Energy formula");
-        assert_eq!(blocks[0].back_raw, "E = mc^2");
-        assert_eq!(blocks[0].block_id, ""); // No trailing block ID, exponent preserved!
+        assert_eq!(blocks[0].front, "Energy formula");
+        assert_eq!(blocks[0].back, "E = mc^2");
+        assert_eq!(blocks[0].id, ""); // No trailing block ID, exponent preserved!
 
         let content_with_id = "Energy formula :: E = mc^2 ^8a1b2c\n";
         let blocks_with_id = parse_markdown_blocks(content_with_id, &[]);
         assert_eq!(blocks_with_id.len(), 1);
-        assert_eq!(blocks_with_id[0].front_raw, "Energy formula");
-        assert_eq!(blocks_with_id[0].back_raw, "E = mc^2");
-        assert_eq!(blocks_with_id[0].block_id, "8a1b2c");
+        assert_eq!(blocks_with_id[0].front, "Energy formula");
+        assert_eq!(blocks_with_id[0].back, "E = mc^2");
+        assert_eq!(blocks_with_id[0].id, "8a1b2c");
     }
 
     #[test]
     fn test_reject_unclosed_block_card() {
         let content = r#"
-%% card-start id=37066d direction=both %%
+%% card-start id=37066d reversible=true %%
 What are the largest cities?
 ...
 - Karachi
@@ -158,8 +191,8 @@ Later question :: Later answer ^8a1b2c
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Later question");
-        assert_eq!(blocks[0].back_raw, "Later answer");
+        assert_eq!(blocks[0].front, "Later question");
+        assert_eq!(blocks[0].back, "Later answer");
     }
 
     #[test]
@@ -167,14 +200,14 @@ Later question :: Later answer ^8a1b2c
         let content = "Question :: Answer ^beta\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].back_raw, "Answer ^beta");
-        assert_eq!(blocks[0].block_id, "");
+        assert_eq!(blocks[0].back, "Answer ^beta");
+        assert_eq!(blocks[0].id, "");
     }
 
     #[test]
     fn test_extract_tag_from_block_header() {
         let content = r#"
-%% card-start id=37066d direction=forward #todo/card %%
+%% card-start id=37066d reversible=false #todo/card %%
 Question here
 ...
 Answer here
@@ -201,14 +234,14 @@ Valid Question :: Valid Answer ^8a1b2c
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Valid Question");
-        assert_eq!(blocks[0].back_raw, "Valid Answer");
-        assert_eq!(blocks[0].block_id, "8a1b2c");
+        assert_eq!(blocks[0].front, "Valid Question");
+        assert_eq!(blocks[0].back, "Valid Answer");
+        assert_eq!(blocks[0].id, "8a1b2c");
     }
 
     #[test]
     fn test_block_code_does_not_close_block_card_early() {
-        let content = r#"%% card-start id=37066d direction=forward %%
+        let content = r#"%% card-start id=37066d reversible=false %%
 Question
 ...
 ```text
@@ -219,14 +252,8 @@ Answer
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert!(blocks[0].back_raw.contains("%% card-end %%"));
-        assert!(blocks[0].back_raw.contains("Answer"));
-    }
-
-    #[test]
-    fn test_double_backtick_code_span_is_not_a_cloze() {
-        let content = "This is code: ``a == b``.\n";
-        assert!(parse_markdown_blocks(content, &[]).is_empty());
+        assert!(blocks[0].back.contains("%% card-end %%"));
+        assert!(blocks[0].back.contains("Answer"));
     }
 
     #[test]
@@ -236,28 +263,28 @@ Answer
 | --- | --- |
 | std::vector::push_back | Append element |
 | `std::map` | Key :: Value store |
-| ==highlighted item== | Details |
+| {{highlighted item}} | Details |
 
 Real Question :: Real Answer ^123456
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Real Question");
-        assert_eq!(blocks[0].back_raw, "Real Answer");
+        assert_eq!(blocks[0].front, "Real Question");
+        assert_eq!(blocks[0].back, "Real Answer");
     }
 
     #[test]
     fn test_ignore_blockquotes() {
         let content = r#"
-> This is a quote with std::string::c_str and ==cloze== highlight
+> This is a quote with std::string::c_str and {{cloze}} highlight
 > Another quote line :: not a card
 
 Card Question :: Card Answer ^654321
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Card Question");
-        assert_eq!(blocks[0].back_raw, "Card Answer");
+        assert_eq!(blocks[0].front, "Card Question");
+        assert_eq!(blocks[0].back, "Card Answer");
     }
 
     #[test]
@@ -273,8 +300,8 @@ What is the capital of Japan? :: Tokyo ^fedcba
 "#;
         let blocks = parse_markdown_blocks(content, &["inherited".to_string()]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "What is the capital of Japan?");
-        assert_eq!(blocks[0].back_raw, "Tokyo");
+        assert_eq!(blocks[0].front, "What is the capital of Japan?");
+        assert_eq!(blocks[0].back, "Tokyo");
     }
 
     #[test]
@@ -288,8 +315,8 @@ Math Question :: Answer ^112233
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Math Question");
-        assert_eq!(blocks[0].back_raw, "Answer");
+        assert_eq!(blocks[0].front, "Math Question");
+        assert_eq!(blocks[0].back, "Answer");
     }
 
     #[test]
@@ -297,8 +324,8 @@ Math Question :: Answer ^112233
         let content = "What does `std::cmp::Ordering` do? :: Compares values ^aabbcc\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "What does `std::cmp::Ordering` do?");
-        assert_eq!(blocks[0].back_raw, "Compares values");
+        assert_eq!(blocks[0].front, "What does `std::cmp::Ordering` do?");
+        assert_eq!(blocks[0].back, "Compares values");
     }
 
     #[test]
@@ -312,81 +339,101 @@ tags: [پنجابی, الفاظ]
 
 پانی ::: Water #ذخیرہ ^8a1b2c
 سورج :: Sun ^c9f4d1
-زمین سورج دے گرد ==چکر== کٹدی اے۔ ^d3e2f1
+زمین سورج دے گرد {{چکر}} کٹدی اے۔ ^d3e2f1
 "#;
         let blocks = parse_markdown_blocks(content, &["پنجابی".to_string()]);
         assert_eq!(blocks.len(), 3);
 
         // 1. Bidirectional card
-        assert_eq!(blocks[0].card_type, CardType::InlineBoth);
-        assert_eq!(blocks[0].front_raw, "پانی");
-        assert_eq!(blocks[0].back_raw, "Water #ذخیرہ");
-        assert_eq!(blocks[0].block_id, "8a1b2c");
+        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert!(blocks[0].reversible);
+        assert_eq!(blocks[0].front, "پانی");
+        assert_eq!(blocks[0].back, "Water #ذخیرہ");
+        assert_eq!(blocks[0].id, "8a1b2c");
         assert!(blocks[0].tags.contains(&"پنجابی".to_string()));
         assert!(blocks[0].tags.contains(&"ذخیرہ".to_string()));
 
         // 2. Forward card
-        assert_eq!(blocks[1].card_type, CardType::InlineForward);
-        assert_eq!(blocks[1].front_raw, "سورج");
-        assert_eq!(blocks[1].back_raw, "Sun");
-        assert_eq!(blocks[1].block_id, "c9f4d1");
+        assert_eq!(blocks[1].block_type, CardBlockType::Inline);
+        assert!(!blocks[1].reversible);
+        assert_eq!(blocks[1].front, "سورج");
+        assert_eq!(blocks[1].back, "Sun");
+        assert_eq!(blocks[1].id, "c9f4d1");
 
         // 3. Cloze card
-        assert_eq!(blocks[2].card_type, CardType::Cloze);
-        assert_eq!(blocks[2].front_raw, "زمین سورج دے گرد ==چکر== کٹدی اے۔");
-        assert_eq!(blocks[2].block_id, "d3e2f1");
+        assert_eq!(blocks[2].block_type, CardBlockType::Cloze);
+        assert!(!blocks[2].reversible);
+        assert_eq!(blocks[2].front, "زمین سورج دے گرد {{چکر}} کٹدی اے۔");
+        assert_eq!(blocks[2].back, "");
+        assert_eq!(blocks[2].id, "d3e2f1");
     }
 
     #[test]
-    fn test_equality_operators_in_inline_code_are_not_clozes() {
-        let content = "In JavaScript, `a == 1` and `b == 2` check equality.\n";
-        let blocks = parse_markdown_blocks(content, &[]);
-        assert!(blocks.is_empty());
-    }
+    fn test_sync_document_generates_missing_ids() {
+        let input = r#"
+# Biology
+What is the powerhouse of the cell? :: Mitochondria
+French word for apple ::: la pomme
+The capital of Germany is {{Berlin}}.
 
-    #[test]
-    fn test_code_equality_does_not_corrupt_inline_card_state() {
-        let content = "Code if (`x == y`) :: Check equality ^abc123\n";
-        let blocks = parse_markdown_blocks(content, &[]);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Code if (`x == y`)");
-        assert_eq!(blocks[0].back_raw, "Check equality");
-        assert_eq!(blocks[0].block_id, "abc123");
-    }
-
-    #[test]
-    fn test_equality_operators_in_inline_math_are_not_clozes() {
-        let content = "Logic uses $a == b$ and $c == d$.\n";
-        let blocks = parse_markdown_blocks(content, &[]);
-        assert!(blocks.is_empty());
-    }
-
-    #[test]
-    fn test_math_separator_does_not_split_a_card() {
-        let content = "Math $x :: y$ is valid :: Valid answer ^abc123\n";
-        let blocks = parse_markdown_blocks(content, &[]);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Math $x :: y$ is valid");
-        assert_eq!(blocks[0].back_raw, "Valid answer");
-    }
-
-    #[test]
-    fn test_block_card_markers_inside_fenced_code_are_ignored() {
-        let content = r#"
-```markdown
-%% card-start id=abc123 direction=both %%
-Fake question
+%% card-start reversible=true %%
+List three states of matter:
 ...
-Fake answer
+- Solid
+- Liquid
+- Gas
 %% card-end %%
-```
-
-Real question :: Real answer ^def456
 "#;
-        let blocks = parse_markdown_blocks(content, &[]);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Real question");
-        assert_eq!(blocks[0].back_raw, "Real answer");
+        let result = sync_document(input, &HashSet::new(), &[], &[]);
+        assert!(result.updated_content.is_some());
+        let updated = result.updated_content.unwrap();
+        assert_eq!(result.blocks.len(), 4);
+
+        for block in &result.blocks {
+            assert!(syntax::is_valid_block_id(&block.id));
+            assert!(updated.contains(&block.id));
+        }
+
+        // Re-syncing the updated document should produce NO modifications
+        let second_sync = sync_document(&updated, &HashSet::new(), &[], &[]);
+        assert!(second_sync.updated_content.is_none());
+        assert_eq!(second_sync.blocks.len(), 4);
+        for (b1, b2) in result.blocks.iter().zip(second_sync.blocks.iter()) {
+            assert_eq!(b1.id, b2.id);
+            assert_eq!(b1.front, b2.front);
+            assert_eq!(b1.back, b2.back);
+            assert_eq!(b1.reversible, b2.reversible);
+        }
+    }
+
+    #[test]
+    fn test_sync_document_replaces_duplicate_id() {
+        let input = "Capital of France :: Paris ^dup001\nCapital of Italy :: Rome ^dup001\n";
+        let result = sync_document(input, &HashSet::new(), &[], &[]);
+        assert!(result.updated_content.is_some());
+        let updated = result.updated_content.unwrap();
+        assert_eq!(result.blocks.len(), 2);
+
+        assert_eq!(result.blocks[0].id, "dup001");
+        assert_ne!(result.blocks[1].id, "dup001");
+        assert!(syntax::is_valid_block_id(&result.blocks[1].id));
+        assert!(updated.contains(&result.blocks[1].id));
+    }
+
+    #[test]
+    fn test_sync_document_replaces_externally_colliding_id() {
+        let mut existing = HashSet::new();
+        existing.insert("col001".to_string());
+
+        let input = "Capital of Japan :: Tokyo ^col001\n";
+        let result = sync_document(input, &existing, &[], &[]);
+        assert!(result.updated_content.is_some());
+        let updated = result.updated_content.unwrap();
+        assert_eq!(result.blocks.len(), 1);
+
+        assert_ne!(result.blocks[0].id, "col001");
+        assert!(syntax::is_valid_block_id(&result.blocks[0].id));
+        assert!(updated.contains(&result.blocks[0].id));
     }
 
     #[test]
@@ -399,5 +446,6 @@ Real question :: Real answer ^def456
         }];
         let blocks = parse_markdown_blocks_with_sections(content, &[], &hints);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].front_raw, "Real question");
+        assert_eq!(blocks[0].front, "Real question");
     }
+

@@ -2,63 +2,41 @@ import type { App, PluginManifest } from 'obsidian';
 import type { Database } from 'sql.js';
 
 import type {
+	Block,
+	CardBlockType,
+	CardPerformanceUpdate,
 	DashboardStats,
 	ParsedBlock,
 	ReviewItem,
 	ReviewLogEntry,
+	ReviewRecord,
 	ReviewState,
-	SchedulingCard,
+	SessionRecord,
 } from '../types.js';
 import { matchCardTags } from '../utils/dashboardFilter.js';
+import {
+	getStudyDayCutoff,
+	getStudyDayKey,
+	getStudyDayStart,
+	shiftLocalDateKey,
+} from '../utils/studyDay.js';
 import { WasmBridge } from '../wasm.js';
-import { SCHEMA_SQL } from './schema.js';
+import SCHEMA_SQL from './schema.sql?raw';
+import {
+	computeSha256,
+	isValidSqliteHeader,
+	packSnapshot,
+	unpackAndVerifySnapshot,
+} from './snapshot.js';
 
-export function getStudyDayStart(rolloverHour = 4, now = new Date()): number {
-	const start = new Date(now.getTime());
-	if (now.getHours() < rolloverHour) {
-		start.setDate(start.getDate() - 1);
-	}
-	start.setHours(rolloverHour, 0, 0, 0);
-	return start.getTime();
-}
-
-export function getStudyDayCutoff(rolloverHour = 4, now = new Date()): number {
-	const cutoff = new Date(now.getTime());
-	if (now.getHours() < rolloverHour) {
-		cutoff.setHours(rolloverHour, 0, 0, 0);
-	} else {
-		cutoff.setDate(cutoff.getDate() + 1);
-		cutoff.setHours(rolloverHour, 0, 0, 0);
-	}
-	return cutoff.getTime();
-}
-
-function formatLocalDate(date: Date): string {
-	const year = date.getFullYear();
-	const month = String(date.getMonth() + 1).padStart(2, '0');
-	const day = String(date.getDate()).padStart(2, '0');
-	return `${year}-${month}-${day}`;
-}
-
-export function getStudyDayKey(timestampMs: number, rolloverHour = 4): string {
-	const date = new Date(timestampMs);
-	if (date.getHours() < rolloverHour) {
-		date.setDate(date.getDate() - 1);
-	}
-	return formatLocalDate(date);
-}
-
-function shiftLocalDateKey(key: string, days: number): string {
-	const [year = 0, month = 1, day = 1] = key.split('-').map(Number);
-	const date = new Date(year, month - 1, day);
-	date.setDate(date.getDate() + days);
-	return formatLocalDate(date);
-}
+export { getStudyDayCutoff, getStudyDayKey, getStudyDayStart } from '../utils/studyDay.js';
 
 export class DatabaseManager {
 	private db: Database | null = null;
-	private dbPath: string;
-	private tempDbPath: string;
+	private slotAPath: string;
+	private slotBPath: string;
+	private activeSlot: 'a' | 'b' = 'a';
+	private activeGeneration = 0n;
 	private persistQueue: Promise<void> = Promise.resolve();
 
 	constructor(
@@ -66,18 +44,23 @@ export class DatabaseManager {
 		private manifest: PluginManifest,
 	) {
 		const dir = this.manifest.dir ?? '.obsidian/plugins/flashcards';
-		this.dbPath = `${dir}/cards.db`;
-		this.tempDbPath = `${dir}/cards.db.writing`;
+		this.slotAPath = `${dir}/cards.a.db`;
+		this.slotBPath = `${dir}/cards.b.db`;
 	}
 
 	public static createInMemory(db: Database): DatabaseManager {
+		const storage = new Map<string, ArrayBuffer>();
 		const mockApp = {
 			vault: {
 				adapter: {
-					exists: async () => false,
-					readBinary: async () => new Uint8Array(),
-					writeBinary: async () => {},
-					remove: async () => {},
+					exists: async (p: string) => storage.has(p),
+					readBinary: async (p: string) => storage.get(p) ?? new ArrayBuffer(0),
+					writeBinary: async (p: string, data: ArrayBuffer) => {
+						storage.set(p, data.slice(0));
+					},
+					remove: async (p: string) => {
+						storage.delete(p);
+					},
 				},
 			},
 		} as unknown as App;
@@ -86,340 +69,205 @@ export class DatabaseManager {
 		manager.db = db;
 		manager.db.run('PRAGMA foreign_keys = ON;');
 		manager.db.run(SCHEMA_SQL);
-		manager.ensureColumn('review_items', 'learning_step', 'INTEGER NOT NULL DEFAULT 0');
-		manager.ensureColumn('review_items', 'relearning_step', 'INTEGER NOT NULL DEFAULT 0');
 		return manager;
 	}
 
 	public async init(): Promise<void> {
 		const adapter = this.app.vault.adapter;
-		const dbExists = await adapter.exists(this.dbPath);
-		const tempExists = await adapter.exists(this.tempDbPath);
-		const dbBytes = dbExists ? await this.readValidDatabase(this.dbPath) : null;
-		const tempBytes = tempExists ? await this.readValidDatabase(this.tempDbPath) : null;
+		const aExists = await adapter.exists(this.slotAPath);
+		const bExists = await adapter.exists(this.slotBPath);
 
-		if (tempBytes) {
-			// The temporary file is the newest complete export. Promote it even when
-			// cards.db is also valid; this covers a crash between the two writes.
+		let slotAData = null;
+		let slotBData = null;
+
+		if (aExists) {
 			try {
-				await this.promoteTemporaryDatabase(adapter, tempBytes);
-			} catch (e) {
-				console.warn('Failed to promote cards.db.writing:', e);
+				const bytesA = new Uint8Array(await adapter.readBinary(this.slotAPath));
+				slotAData = await unpackAndVerifySnapshot(bytesA);
+			} catch {
+				slotAData = null;
 			}
-		} else if (!dbBytes && (dbExists || tempExists)) {
-			throw new Error('Flashcards database is corrupted and no valid recovery copy exists.');
 		}
 
-		this.db = WasmBridge.createDatabase(tempBytes ?? dbBytes ?? undefined);
+		if (bExists) {
+			try {
+				const bytesB = new Uint8Array(await adapter.readBinary(this.slotBPath));
+				slotBData = await unpackAndVerifySnapshot(bytesB);
+			} catch {
+				slotBData = null;
+			}
+		}
+
+		let payloadToLoad: Uint8Array | undefined;
+		if (slotAData && slotBData) {
+			if (slotBData.generation > slotAData.generation) {
+				payloadToLoad = slotBData.payload;
+				this.activeSlot = 'b';
+				this.activeGeneration = slotBData.generation;
+			} else {
+				payloadToLoad = slotAData.payload;
+				this.activeSlot = 'a';
+				this.activeGeneration = slotAData.generation;
+			}
+		} else if (slotAData) {
+			payloadToLoad = slotAData.payload;
+			this.activeSlot = 'a';
+			this.activeGeneration = slotAData.generation;
+		} else if (slotBData) {
+			payloadToLoad = slotBData.payload;
+			this.activeSlot = 'b';
+			this.activeGeneration = slotBData.generation;
+		} else {
+			this.activeSlot = 'a';
+			this.activeGeneration = 0n;
+		}
+
+		this.db = WasmBridge.createDatabase(payloadToLoad);
 		this.db.run('PRAGMA foreign_keys = ON;');
-
-		// Deduplicate any legacy duplicate note paths before applying unique index
-		try {
-			this.db.run(`
-				DELETE FROM notes WHERE rowid NOT IN (
-					SELECT rowid FROM (
-						SELECT rowid, ROW_NUMBER() OVER (
-							PARTITION BY path
-							ORDER BY mtime DESC, rowid DESC
-						) AS rn
-						FROM notes
-					) WHERE rn = 1
-				);
-			`);
-		} catch {
-			// Ignore if fresh database where notes table does not exist yet
-		}
-
 		this.db.run(SCHEMA_SQL);
-		this.ensureColumn('notes', 'ignored', 'INTEGER NOT NULL DEFAULT 0');
-		this.ensureColumn('review_items', 'learning_step', 'INTEGER NOT NULL DEFAULT 0');
-		this.ensureColumn('review_items', 'relearning_step', 'INTEGER NOT NULL DEFAULT 0');
+		this.db.run('DELETE FROM cards WHERE block_id NOT IN (SELECT id FROM blocks);');
 	}
 
 	public async persist(): Promise<void> {
 		const next = this.persistQueue.catch(() => undefined).then(() => this.persistNow());
 		this.persistQueue = next.catch((error) => {
-			console.error('Failed to persist flashcards database:', error);
+			console.error('Failed to persist flashcards database snapshot:', error);
 		});
 		await next;
 	}
 
-	private isValidSqliteHeader(bytes: Uint8Array): boolean {
-		if (bytes.length < 16) return false;
-		const header = 'SQLite format 3\0';
-		for (let i = 0; i < 16; i++) {
-			if (bytes[i] !== header.charCodeAt(i)) return false;
-		}
-		return true;
-	}
-
 	private async persistNow(): Promise<void> {
 		if (!this.db) return;
-		const exported = this.db.export();
-		if (!this.isValidSqliteHeader(exported)) {
+		const payload = this.db.export();
+		if (!isValidSqliteHeader(payload)) {
 			throw new Error('Exported database buffer is not a valid SQLite database.');
 		}
+
+		const sha256 = await computeSha256(payload);
+		const targetSlot: 'a' | 'b' = this.activeSlot === 'a' ? 'b' : 'a';
+		const targetGen = this.activeGeneration + 1n;
+		const targetPath = targetSlot === 'a' ? this.slotAPath : this.slotBPath;
+
+		const packed = packSnapshot(payload, targetGen, sha256);
 		const adapter = this.app.vault.adapter;
-		const bytes = exported.buffer.slice(
-			exported.byteOffset,
-			exported.byteOffset + exported.byteLength,
-		) as ArrayBuffer;
 
-		await adapter.writeBinary(this.tempDbPath, bytes);
-		await this.promoteTemporaryDatabase(adapter, exported);
-	}
+		await adapter.writeBinary(
+			targetPath,
+			packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength) as ArrayBuffer,
+		);
 
-	private async readValidDatabase(path: string): Promise<Uint8Array | null> {
-		let testDb: Database | null = null;
-		try {
-			const bytes = new Uint8Array(await this.app.vault.adapter.readBinary(path));
-			testDb = WasmBridge.createDatabase(bytes);
-			const check = testDb.prepare('PRAGMA integrity_check;');
-			let valid = false;
-			if (check.step()) {
-				valid = Object.values(check.getAsObject())[0] === 'ok';
-			}
-			check.free();
-			return valid ? bytes : null;
-		} catch {
-			return null;
-		} finally {
-			testDb?.close();
+		// Read-back verification
+		const readBack = new Uint8Array(await adapter.readBinary(targetPath));
+		const verified = await unpackAndVerifySnapshot(readBack);
+		if (!verified || verified.generation !== targetGen) {
+			throw new Error(`Dual-slot read-back verification failed for slot ${targetSlot}`);
 		}
+
+		this.activeSlot = targetSlot;
+		this.activeGeneration = targetGen;
 	}
 
-	private async promoteTemporaryDatabase(
-		adapter: App['vault']['adapter'],
-		bytes: Uint8Array,
-	): Promise<void> {
-		try {
-			await adapter.rename(this.tempDbPath, this.dbPath);
-		} catch {
-			// Some adapters do not replace an existing destination on rename. Keep
-			// the validated temporary copy until the replacement write succeeds.
-			await adapter.writeBinary(this.dbPath, bytes.slice().buffer as ArrayBuffer);
-			if (await adapter.exists(this.tempDbPath)) {
-				await adapter.remove(this.tempDbPath);
-			}
-		}
+	public getActiveSlot(): { slot: 'a' | 'b'; generation: bigint } {
+		return { slot: this.activeSlot, generation: this.activeGeneration };
 	}
 
-	private ensureColumn(table: string, column: string, definition: string): void {
+	public upsertBlock(block: Block): void {
 		if (!this.db) return;
-		const columns = this.db.exec(`PRAGMA table_info(${table})`)[0]?.values ?? [];
-		if (!columns.some((row) => row[1] === column)) {
-			this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-		}
-	}
-
-	public getNotePathById(noteId: string): string | null {
-		if (!this.db) return null;
-		const stmt = this.db.prepare('SELECT path FROM notes WHERE note_id = ?');
-		stmt.bind([noteId]);
-		let path: string | null = null;
-		if (stmt.step()) {
-			path = stmt.getAsObject().path as string;
-		}
-		stmt.free();
-		return path;
-	}
-
-	public upsertNote(noteId: string, path: string, mtime: number, ignored = 0): void {
-		if (!this.db) return;
-		// Clean up any old orphaned note entry that previously had this path under a different ID
-		this.db.run('DELETE FROM notes WHERE path = ? AND note_id != ?', [path, noteId]);
 		this.db.run(
-			`INSERT INTO notes (note_id, path, mtime, ignored) VALUES (?, ?, ?, ?)
-			 ON CONFLICT(note_id) DO UPDATE SET path = excluded.path, mtime = excluded.mtime, ignored = excluded.ignored`,
-			[noteId, path, mtime, ignored],
+			`INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, content_hash, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   file_path = excluded.file_path,
+			   block_type = excluded.block_type,
+			   reversible = excluded.reversible,
+			   front = excluded.front,
+			   back = excluded.back,
+			   tags = excluded.tags,
+			   content_hash = excluded.content_hash,
+			   updated_at = excluded.updated_at`,
+			[
+				block.id,
+				block.file_path,
+				block.block_type,
+				block.reversible,
+				block.front,
+				block.back,
+				block.tags,
+				block.content_hash,
+				block.updated_at,
+			],
 		);
 	}
 
-	public setNoteIgnoredByPath(path: string, ignored: boolean, mtime?: number): void {
+	public reconcileCards(block: Block): void {
 		if (!this.db) return;
-		const ignoredVal = ignored ? 1 : 0;
-		if (mtime !== undefined) {
-			this.db.run('UPDATE notes SET ignored = ?, mtime = ? WHERE path = ?', [
-				ignoredVal,
-				mtime,
-				path,
-			]);
+		const now = Date.now();
+
+		if (block.block_type === 'cloze') {
+			this.db.run('DELETE FROM cards WHERE block_id = ? AND direction IS NOT NULL', [block.id]);
+			this.db.run(
+				`INSERT OR IGNORE INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
+				 VALUES (?, NULL, 0, ?, 0.0, 0.0, 0, 0, NULL, 0, 0)`,
+				[block.id, now],
+			);
 		} else {
-			this.db.run('UPDATE notes SET ignored = ? WHERE path = ?', [ignoredVal, path]);
-		}
-	}
+			const neededDirs: ('forward' | 'reverse')[] =
+				block.reversible === 1 ? ['forward', 'reverse'] : ['forward'];
 
-	public deleteNoteByPath(path: string): void {
-		if (!this.db) return;
-		this.db.run('DELETE FROM notes WHERE path = ?', [path]);
-	}
+			const placeholders = neededDirs.map(() => '?').join(',');
+			this.db.run(
+				`DELETE FROM cards WHERE block_id = ? AND (direction IS NULL OR direction NOT IN (${placeholders}))`,
+				[block.id, ...neededDirs],
+			);
 
-	public pruneDeletedNotes(validPaths: Set<string>): void {
-		if (!this.db) return;
-		const stmt = this.db.prepare('SELECT note_id, path FROM notes');
-		const toDelete: string[] = [];
-		while (stmt.step()) {
-			const row = stmt.getAsObject();
-			if (!validPaths.has(row.path as string)) {
-				toDelete.push(row.note_id as string);
+			for (const dir of neededDirs) {
+				this.db.run(
+					`INSERT OR IGNORE INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
+					 VALUES (?, ?, 0, ?, 0.0, 0.0, 0, 0, NULL, 0, 0)`,
+					[block.id, dir, now],
+				);
 			}
 		}
-		stmt.free();
-		for (const noteId of toDelete) {
-			this.db.run('DELETE FROM notes WHERE note_id = ?', [noteId]);
-		}
 	}
 
-	public async optimizeDatabase(validVaultPaths?: Set<string>): Promise<{
-		prunedNotes: number;
-		cleanedBlocks: number;
-		cleanedItems: number;
-		integrityOk: boolean;
-	}> {
-		if (!this.db) {
-			return { prunedNotes: 0, cleanedBlocks: 0, cleanedItems: 0, integrityOk: false };
-		}
+	public syncNoteBlocks(filePath: string, parsedBlocks: ParsedBlock[]): void {
+		if (!this.db) return;
+		const now = Date.now();
+		const incomingIds = new Set(parsedBlocks.map((b) => b.id));
 
-		// 1. Enforce foreign keys
-		this.db.run('PRAGMA foreign_keys = ON;');
-
-		// 2. Prune deleted notes if validPaths provided
-		let prunedNotes = 0;
-		if (validVaultPaths) {
-			const stmt = this.db.prepare('SELECT note_id, path FROM notes');
+		this.db.run('BEGIN TRANSACTION');
+		try {
+			const stmt = this.db.prepare('SELECT id FROM blocks WHERE file_path = ?');
+			stmt.bind([filePath]);
 			const toDelete: string[] = [];
 			while (stmt.step()) {
-				const row = stmt.getAsObject();
-				if (!validVaultPaths.has(row.path as string)) {
-					toDelete.push(row.note_id as string);
+				const id = stmt.getAsObject().id as string;
+				if (!incomingIds.has(id)) {
+					toDelete.push(id);
 				}
 			}
 			stmt.free();
-			for (const noteId of toDelete) {
-				this.db.run('DELETE FROM notes WHERE note_id = ?', [noteId]);
-				prunedNotes++;
-			}
-		}
 
-		// 3. Clean up any orphaned blocks or review items
-		const preBlocks =
-			(this.db.exec('SELECT COUNT(*) as count FROM blocks')[0]?.values[0]?.[0] as number) ?? 0;
-		this.db.run('DELETE FROM blocks WHERE note_id NOT IN (SELECT note_id FROM notes)');
-		const postBlocks =
-			(this.db.exec('SELECT COUNT(*) as count FROM blocks')[0]?.values[0]?.[0] as number) ?? 0;
-		const cleanedBlocks = preBlocks - postBlocks;
-
-		const preItems =
-			(this.db.exec('SELECT COUNT(*) as count FROM review_items')[0]?.values[0]?.[0] as number) ??
-			0;
-		this.db.run(
-			'DELETE FROM review_items WHERE note_id NOT IN (SELECT note_id FROM notes) OR (note_id, block_id) NOT IN (SELECT note_id, block_id FROM blocks)',
-		);
-		const postItems =
-			(this.db.exec('SELECT COUNT(*) as count FROM review_items')[0]?.values[0]?.[0] as number) ??
-			0;
-		const cleanedItems = preItems - postItems;
-
-		// 4. Integrity check
-		let integrityOk = true;
-		const checkStmt = this.db.prepare('PRAGMA integrity_check;');
-		if (checkStmt.step()) {
-			const res = checkStmt.getAsObject();
-			const val = Object.values(res)[0];
-			if (val !== 'ok') {
-				integrityOk = false;
-			}
-		}
-		checkStmt.free();
-
-		// 5. VACUUM and optimize query planner
-		this.db.run('VACUUM;');
-		this.db.run('PRAGMA optimize;');
-
-		await this.persist();
-
-		return {
-			prunedNotes,
-			cleanedBlocks,
-			cleanedItems,
-			integrityOk,
-		};
-	}
-
-	public syncNoteBlocks(noteId: string, parsedBlocks: ParsedBlock[]): void {
-		if (!this.db) return;
-
-		const existingBlockIds: string[] = [];
-		const stmt = this.db.prepare('SELECT block_id FROM blocks WHERE note_id = ?');
-		stmt.bind([noteId]);
-		while (stmt.step()) {
-			const row = stmt.getAsObject();
-			existingBlockIds.push(row.block_id as string);
-		}
-		stmt.free();
-
-		const incomingBlockIds = new Set(parsedBlocks.map((b) => b.block_id));
-		const now = Date.now();
-
-		// Delete deleted blocks
-		this.db.run('BEGIN TRANSACTION');
-		try {
-			for (const oldId of existingBlockIds) {
-				if (!incomingBlockIds.has(oldId)) {
-					this.db.run('DELETE FROM blocks WHERE note_id = ? AND block_id = ?', [noteId, oldId]);
-				}
+			for (const oldId of toDelete) {
+				this.db.run('DELETE FROM blocks WHERE id = ?', [oldId]);
 			}
 
-			// Upsert incoming blocks and generate review items
 			for (const b of parsedBlocks) {
-				const tagsStr = b.tags.join(' ');
-				this.db.run(
-					`INSERT INTO blocks (note_id, block_id, block_type, direction, front_raw, back_raw, tags, content_hash, created_at, updated_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					 ON CONFLICT(note_id, block_id) DO UPDATE SET
-					   block_type = excluded.block_type,
-					   direction = excluded.direction,
-					   front_raw = excluded.front_raw,
-					   back_raw = excluded.back_raw,
-					   tags = excluded.tags,
-					   content_hash = excluded.content_hash,
-					   updated_at = excluded.updated_at`,
-					[
-						noteId,
-						b.block_id,
-						b.card_type,
-						b.direction,
-						b.front_raw,
-						b.back_raw,
-						tagsStr,
-						b.content_hash,
-						now,
-						now,
-					],
-				);
-
-				// Directional Review Items
-				const directions: ('forward' | 'reverse')[] =
-					b.direction === 'both'
-						? ['forward', 'reverse']
-						: [b.direction === 'reverse' ? 'reverse' : 'forward'];
-
-				// Prune any obsolete review items for this block (e.g. converted from both to forward)
-				const placeholders = directions.map(() => '?').join(',');
-				this.db.run(
-					`DELETE FROM review_items WHERE note_id = ? AND block_id = ? AND direction NOT IN (${placeholders})`,
-					[noteId, b.block_id, ...directions],
-				);
-
-				for (const dir of directions) {
-					const itemId = `${noteId}:${b.block_id}:${dir}`;
-					this.db.run(
-						`INSERT OR IGNORE INTO review_items (id, note_id, block_id, direction, state, due, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
-						 VALUES (?, ?, ?, ?, 0, ?, 0, 0, 0, 0, NULL, 0, 0)`,
-						[itemId, noteId, b.block_id, dir, now],
-					);
-				}
+				const blockRecord: Block = {
+					id: b.id,
+					file_path: filePath,
+					block_type: b.block_type,
+					reversible: b.reversible ? 1 : 0,
+					front: b.front,
+					back: b.back,
+					tags: b.tags.join(' '),
+					content_hash: b.content_hash,
+					updated_at: now,
+				};
+				this.upsertBlock(blockRecord);
+				this.reconcileCards(blockRecord);
 			}
+
 			this.db.run('COMMIT');
 		} catch (error) {
 			this.db.run('ROLLBACK');
@@ -427,19 +275,51 @@ export class DatabaseManager {
 		}
 	}
 
-	public getDueReviewItems(filterTags?: string[], rolloverHour = 4): ReviewItem[] {
+	public pruneDeletedNotes(validFilePaths: Set<string>): void {
+		if (!this.db) return;
+		const stmt = this.db.prepare('SELECT DISTINCT file_path FROM blocks');
+		const toDelete: string[] = [];
+		while (stmt.step()) {
+			const path = stmt.getAsObject().file_path as string;
+			if (!validFilePaths.has(path)) {
+				toDelete.push(path);
+			}
+		}
+		stmt.free();
+
+		for (const path of toDelete) {
+			this.db.run('DELETE FROM blocks WHERE file_path = ?', [path]);
+		}
+	}
+
+	public renameNote(oldPath: string, newPath: string): void {
+		if (!this.db) return;
+		this.db.run('UPDATE blocks SET file_path = ? WHERE file_path = ?', [newPath, oldPath]);
+	}
+
+	public getAllBlockIds(): Set<string> {
+		if (!this.db) return new Set();
+		const ids = new Set<string>();
+		const stmt = this.db.prepare('SELECT id FROM blocks');
+		while (stmt.step()) {
+			ids.add(stmt.getAsObject().id as string);
+		}
+		stmt.free();
+		return ids;
+	}
+
+	public getDueCards(filterTags?: string[], rolloverHour = 4): ReviewItem[] {
 		if (!this.db) return [];
 		const cutoff = getStudyDayCutoff(rolloverHour);
 		const items: ReviewItem[] = [];
 
 		const query = `
-			SELECT r.id, r.note_id, r.block_id, r.direction, r.state, r.due, r.stability, r.difficulty, r.reps, r.lapses, r.last_review, r.learning_step, r.relearning_step,
-			       b.block_type, b.front_raw, b.back_raw, b.tags, n.path
-			FROM review_items r
-			JOIN blocks b ON r.note_id = b.note_id AND r.block_id = b.block_id
-			JOIN notes n ON r.note_id = n.note_id
-			WHERE n.ignored = 0 AND r.due <= ?
-			ORDER BY r.due ASC
+			SELECT c.id as card_id, c.block_id, c.direction, c.state, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.last_review, c.learning_step, c.relearning_step,
+			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.content_hash, b.updated_at
+			FROM cards c
+			JOIN blocks b ON c.block_id = b.id
+			WHERE c.due_at <= ?
+			ORDER BY c.due_at ASC
 		`;
 
 		const stmt = this.db.prepare(query);
@@ -453,31 +333,34 @@ export class DatabaseManager {
 				if (!matchCardTags(tags, filterTags)) continue;
 			}
 
-			const notePath = row.path as string;
-			const noteTitle = notePath.split('/').pop()?.replace(/\.md$/, '') || notePath;
-			const direction = row.direction as 'forward' | 'reverse';
+			const filePath = row.file_path as string;
+			const noteTitle = filePath.split('/').pop()?.replace(/\.md$/, '') || filePath;
+			const direction = (row.direction as 'forward' | 'reverse' | null) ?? null;
+			const blockType = row.block_type as CardBlockType;
+			const reversible = (row.reversible as number) === 1;
 
-			let front = row.front_raw as string;
-			let back = row.back_raw as string;
+			let front = row.front as string;
+			let back = row.back as string;
 			if (direction === 'reverse') {
-				front = row.back_raw as string;
-				back = row.front_raw as string;
+				front = row.back as string;
+				back = row.front as string;
 			}
 
 			items.push({
-				id: row.id as string,
-				noteId: row.note_id as string,
+				cardId: row.card_id as number,
 				blockId: row.block_id as string,
 				noteTitle,
-				notePath,
+				notePath: filePath,
 				direction,
-				cardType: row.block_type as any,
+				blockType,
+				reversible,
 				front,
 				back,
 				tags,
 				state: this.mapState(row.state as number),
-				due: row.due as number,
-				dueHuman: this.humanizeDue(row.due as number),
+				stateNum: row.state as number,
+				dueAt: row.due_at as number,
+				dueHuman: this.humanizeDue(row.due_at as number),
 				stability: row.stability as number,
 				difficulty: row.difficulty as number,
 				reps: row.reps as number,
@@ -499,44 +382,45 @@ export class DatabaseManager {
 		const items: ReviewItem[] = [];
 
 		const query = `
-			SELECT r.id, r.note_id, r.block_id, r.direction, r.state, r.due, r.stability, r.difficulty, r.reps, r.lapses, r.last_review, r.learning_step, r.relearning_step,
-			       b.block_type, b.front_raw, b.back_raw, b.tags, n.path
-			FROM review_items r
-			JOIN blocks b ON r.note_id = b.note_id AND r.block_id = b.block_id
-			JOIN notes n ON r.note_id = n.note_id
-			WHERE n.ignored = 0
-			ORDER BY r.due ASC
+			SELECT c.id as card_id, c.block_id, c.direction, c.state, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.last_review, c.learning_step, c.relearning_step,
+			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.content_hash, b.updated_at
+			FROM cards c
+			JOIN blocks b ON c.block_id = b.id
+			ORDER BY c.due_at ASC
 		`;
 
 		const stmt = this.db.prepare(query);
 		while (stmt.step()) {
 			const row = stmt.getAsObject();
 			const tags = ((row.tags as string) || '').split(' ').filter(Boolean);
-			const notePath = row.path as string;
-			const noteTitle = notePath.split('/').pop()?.replace(/\.md$/, '') || notePath;
-			const direction = row.direction as 'forward' | 'reverse';
+			const filePath = row.file_path as string;
+			const noteTitle = filePath.split('/').pop()?.replace(/\.md$/, '') || filePath;
+			const direction = (row.direction as 'forward' | 'reverse' | null) ?? null;
+			const blockType = row.block_type as CardBlockType;
+			const reversible = (row.reversible as number) === 1;
 
-			let front = row.front_raw as string;
-			let back = row.back_raw as string;
+			let front = row.front as string;
+			let back = row.back as string;
 			if (direction === 'reverse') {
-				front = row.back_raw as string;
-				back = row.front_raw as string;
+				front = row.back as string;
+				back = row.front as string;
 			}
 
 			items.push({
-				id: row.id as string,
-				noteId: row.note_id as string,
+				cardId: row.card_id as number,
 				blockId: row.block_id as string,
 				noteTitle,
-				notePath,
+				notePath: filePath,
 				direction,
-				cardType: row.block_type as any,
+				blockType,
+				reversible,
 				front,
 				back,
 				tags,
 				state: this.mapState(row.state as number),
-				due: row.due as number,
-				dueHuman: this.humanizeDue(row.due as number),
+				stateNum: row.state as number,
+				dueAt: row.due_at as number,
+				dueHuman: this.humanizeDue(row.due_at as number),
 				stability: row.stability as number,
 				difficulty: row.difficulty as number,
 				reps: row.reps as number,
@@ -556,9 +440,7 @@ export class DatabaseManager {
 	public getUniqueTags(): string[] {
 		if (!this.db) return [];
 		const tagsSet = new Set<string>();
-		const stmt = this.db.prepare(
-			'SELECT b.tags FROM blocks b JOIN notes n ON b.note_id = n.note_id WHERE n.ignored = 0',
-		);
+		const stmt = this.db.prepare('SELECT tags FROM blocks');
 		while (stmt.step()) {
 			const row = stmt.getAsObject();
 			const tags = ((row.tags as string) || '').split(' ').filter(Boolean);
@@ -583,12 +465,11 @@ export class DatabaseManager {
 		const startOfDayMs = getStudyDayStart(rolloverHour);
 		const endOfDayMs = getStudyDayCutoff(rolloverHour);
 
-		// Studied today from review logs
 		const logStmt = this.db.prepare(`
 			SELECT COUNT(*) as count,
 			       SUM(CASE WHEN rating >= 2 THEN 1 ELSE 0 END) as remembered
-			FROM review_logs
-			WHERE review_time >= ? AND review_time < ?
+			FROM reviews
+			WHERE reviewed_at >= ? AND reviewed_at < ?
 		`);
 		logStmt.bind([startOfDayMs, endOfDayMs]);
 		let studiedToday = 0;
@@ -603,10 +484,7 @@ export class DatabaseManager {
 		const dailyRetention =
 			studiedToday > 0 ? Math.round((rememberedToday / studiedToday) * 100) : 100;
 
-		// Calculate consecutive active study days using the user's local timezone.
-		const streakStmt = this.db.prepare(
-			'SELECT review_time FROM review_logs ORDER BY review_time DESC',
-		);
+		const streakStmt = this.db.prepare('SELECT reviewed_at FROM reviews ORDER BY reviewed_at DESC');
 		const days = new Set<string>();
 		const currentDay = getStudyDayKey(Date.now(), rolloverHour);
 		const yesterday = shiftLocalDateKey(currentDay, -1);
@@ -614,7 +492,7 @@ export class DatabaseManager {
 		let studyStreak = 0;
 
 		while (streakStmt.step()) {
-			const dayKey = getStudyDayKey(streakStmt.getAsObject().review_time as number, rolloverHour);
+			const dayKey = getStudyDayKey(streakStmt.getAsObject().reviewed_at as number, rolloverHour);
 			days.add(dayKey);
 
 			if (expectedDay === null) {
@@ -623,7 +501,6 @@ export class DatabaseManager {
 				} else if (days.has(yesterday)) {
 					expectedDay = yesterday;
 				} else if (dayKey < yesterday) {
-					// No reviews today or yesterday -> streak is 0, exit early
 					break;
 				}
 			}
@@ -645,13 +522,13 @@ export class DatabaseManager {
 		let newCards = 0;
 
 		const cardStmt = this.db.prepare(
-			'SELECT r.state, r.due FROM review_items r JOIN notes n ON r.note_id = n.note_id WHERE n.ignored = 0',
+			'SELECT c.state, c.due_at FROM cards c JOIN blocks b ON c.block_id = b.id',
 		);
 		while (cardStmt.step()) {
 			const row = cardStmt.getAsObject();
 			totalCards++;
 			const state = row.state as number;
-			const due = row.due as number;
+			const due = row.due_at as number;
 			if (state === 0) newCards++;
 			if (due <= endOfDayMs) dueToday++;
 		}
@@ -667,131 +544,101 @@ export class DatabaseManager {
 		};
 	}
 
-	public recordReview(
-		reviewItemId: string,
-		rating: number,
-		newState: ReviewState,
-		newDue: number,
-		newStability: number,
-		newDifficulty: number,
-		newReps: number,
-		newLapses: number,
-		newLearningStep: number,
-		newRelearningStep: number,
-		sessionId: number,
-	): void {
-		if (!this.db) return;
-		const now = Date.now();
-		const stateNum = this.unmapState(newState);
-
-		this.db.run(
-			`UPDATE review_items
-			 SET state = ?, due = ?, stability = ?, difficulty = ?, reps = ?, lapses = ?,
-			     last_review = ?, learning_step = ?, relearning_step = ?
-			 WHERE id = ?`,
-			[
-				stateNum,
-				newDue,
-				newStability,
-				newDifficulty,
-				newReps,
-				newLapses,
-				now,
-				newLearningStep,
-				newRelearningStep,
-				reviewItemId,
-			],
-		);
-
-		this.db.run(
-			`INSERT INTO review_logs (session_id, review_item_id, rating, state, due, stability, difficulty, review_time)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[sessionId, reviewItemId, rating, stateNum, newDue, newStability, newDifficulty, now],
-		);
-
-		this.db.run(
-			`UPDATE sessions
-			 SET cards_studied = cards_studied + 1,
-			     forgot_count = forgot_count + CASE WHEN ? = 1 THEN 1 ELSE 0 END,
-			     remembered_count = remembered_count + CASE WHEN ? >= 2 THEN 1 ELSE 0 END
-			 WHERE session_id = ?`,
-			[rating, rating, sessionId],
-		);
-	}
-
-	public rollbackReview(
-		reviewItemId: string,
-		previousCard: SchedulingCard,
-		sessionId: number,
-	): void {
-		if (!this.db) return;
-		let logId: number | null = null;
-		let rating: number | null = null;
-		const logStmt = this.db.prepare(
-			'SELECT id, rating FROM review_logs WHERE session_id = ? AND review_item_id = ? ORDER BY id DESC LIMIT 1',
-		);
-		logStmt.bind([sessionId, reviewItemId]);
-		if (logStmt.step()) {
-			const row = logStmt.getAsObject();
-			logId = row.id as number;
-			rating = row.rating as number;
-		}
-		logStmt.free();
-
-		const stateNum = this.unmapState(previousCard.state);
-		this.db.run(
-			`UPDATE review_items
-				 SET state = ?, due = ?, stability = ?, difficulty = ?, reps = ?, lapses = ?, last_review = ?, learning_step = ?, relearning_step = ?
-			 WHERE id = ?`,
-			[
-				stateNum,
-				previousCard.due,
-				previousCard.stability,
-				previousCard.difficulty,
-				previousCard.reps,
-				previousCard.lapses,
-				previousCard.last_review ?? null,
-				previousCard.learning_step,
-				previousCard.relearning_step,
-				reviewItemId,
-			],
-		);
-
-		if (logId !== null && rating !== null) {
-			this.db.run('DELETE FROM review_logs WHERE id = ?', [logId]);
+	public async commitSession(
+		session: SessionRecord,
+		reviews: ReviewRecord[],
+		cardUpdates: CardPerformanceUpdate[],
+	): Promise<number> {
+		if (!this.db) return 0;
+		this.db.run('BEGIN TRANSACTION');
+		let sessionId = 0;
+		try {
 			this.db.run(
-				`UPDATE sessions
-				 SET cards_studied = MAX(cards_studied - 1, 0),
-				     forgot_count = MAX(forgot_count - CASE WHEN ? = 1 THEN 1 ELSE 0 END, 0),
-				     remembered_count = MAX(remembered_count - CASE WHEN ? >= 2 THEN 1 ELSE 0 END, 0),
-				     ended_at = NULL
-				 WHERE session_id = ?`,
-				[rating, rating, sessionId],
+				`INSERT INTO sessions (started_at, ended_at, card_count, forgot_count, remembered_count)
+				 VALUES (?, ?, ?, ?, ?)`,
+				[
+					session.started_at,
+					session.ended_at,
+					session.card_count,
+					session.forgot_count,
+					session.remembered_count,
+				],
 			);
+
+			const idStmt = this.db.prepare('SELECT last_insert_rowid() as id');
+			idStmt.step();
+			sessionId = idStmt.getAsObject().id as number;
+			idStmt.free();
+
+			for (const r of reviews) {
+				this.db.run(
+					`INSERT INTO reviews (session_id, card_id, rating, state, due_at, stability, difficulty, reviewed_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					[
+						sessionId,
+						r.card_id,
+						r.rating,
+						r.state,
+						r.due_at,
+						r.stability,
+						r.difficulty,
+						r.reviewed_at,
+					],
+				);
+			}
+
+			for (const c of cardUpdates) {
+				this.db.run(
+					`UPDATE cards
+					 SET state = ?, due_at = ?, stability = ?, difficulty = ?, reps = ?, lapses = ?,
+					     last_review = ?, learning_step = ?, relearning_step = ?
+					 WHERE id = ?`,
+					[
+						c.state,
+						c.due_at,
+						c.stability,
+						c.difficulty,
+						c.reps,
+						c.lapses,
+						c.last_review,
+						c.learning_step,
+						c.relearning_step,
+						c.id,
+					],
+				);
+			}
+
+			this.db.run('COMMIT');
+		} catch (error) {
+			this.db.run('ROLLBACK');
+			throw error;
 		}
+
+		await this.persist();
+		return sessionId;
 	}
 
 	public getReviewLogsForOptimization(): ReviewLogEntry[] {
 		if (!this.db) return [];
 		const stmt = this.db.prepare(`
-			SELECT review_item_id, rating, review_time,
+			SELECT card_id, rating, reviewed_at,
 			       COALESCE(
-			           LAG(review_time) OVER (PARTITION BY review_item_id ORDER BY review_time ASC, id ASC),
-			           review_time
+			           LAG(reviewed_at) OVER (PARTITION BY card_id ORDER BY reviewed_at ASC, id ASC),
+			           reviewed_at
 			       ) as prev_time
-			FROM review_logs
-			ORDER BY review_time ASC, id ASC
+			FROM reviews
+			ORDER BY reviewed_at ASC, id ASC
 		`);
 		const logs: ReviewLogEntry[] = [];
 		while (stmt.step()) {
 			const row = stmt.getAsObject();
 			const rating = row.rating as number;
-			const reviewTime = row.review_time as number;
+			const reviewTime = row.reviewed_at as number;
 			const prevTime = row.prev_time as number;
 			const deltaMs = Math.max(0, reviewTime - prevTime);
 			const deltaT = deltaMs / (1000 * 60 * 60 * 24);
 			logs.push({
-				card_id: row.review_item_id as string,
+				card_id: String(row.card_id),
 				rating,
 				delta_t: deltaT,
 			});
@@ -800,39 +647,56 @@ export class DatabaseManager {
 		return logs;
 	}
 
-	public createSession(deckFilter: string): number {
-		if (!this.db) return 0;
-		const now = Date.now();
-		this.db.run(
-			'INSERT INTO sessions (started_at, deck_filter, cards_studied, forgot_count, remembered_count) VALUES (?, ?, 0, 0, 0)',
-			[now, deckFilter],
-		);
-		const stmt = this.db.prepare('SELECT last_insert_rowid() as id');
-		stmt.step();
-		const res = stmt.getAsObject();
-		stmt.free();
-		return res.id as number;
-	}
+	public async optimizeDatabase(validFilePaths?: Set<string>): Promise<{
+		prunedBlocks: number;
+		integrityOk: boolean;
+	}> {
+		if (!this.db) return { prunedBlocks: 0, integrityOk: false };
+		this.db.run('PRAGMA foreign_keys = ON;');
 
-	public finishSession(
-		sessionId: number,
-		cardsStudied?: number,
-		forgotCount?: number,
-		rememberedCount?: number,
-	): void {
-		if (!this.db) return;
-		const now = Date.now();
-		if (cardsStudied !== undefined && forgotCount !== undefined && rememberedCount !== undefined) {
-			this.db.run(
-				'UPDATE sessions SET ended_at = ?, cards_studied = ?, forgot_count = ?, remembered_count = ? WHERE session_id = ?',
-				[now, cardsStudied, forgotCount, rememberedCount, sessionId],
-			);
-		} else {
-			this.db.run('UPDATE sessions SET ended_at = ? WHERE session_id = ?', [now, sessionId]);
+		let prunedBlocks = 0;
+		if (validFilePaths) {
+			const stmt = this.db.prepare('SELECT id, file_path FROM blocks');
+			const toDelete: string[] = [];
+			while (stmt.step()) {
+				const row = stmt.getAsObject();
+				if (!validFilePaths.has(row.file_path as string)) {
+					toDelete.push(row.id as string);
+				}
+			}
+			stmt.free();
+
+			for (const id of toDelete) {
+				this.db.run('DELETE FROM blocks WHERE id = ?', [id]);
+				prunedBlocks++;
+			}
 		}
+
+		this.db.run('DELETE FROM cards WHERE block_id NOT IN (SELECT id FROM blocks);');
+		this.db.run('DELETE FROM reviews WHERE card_id NOT IN (SELECT id FROM cards);');
+
+		let integrityOk = true;
+		const checkStmt = this.db.prepare('PRAGMA integrity_check;');
+		if (checkStmt.step()) {
+			const res = checkStmt.getAsObject();
+			const val = Object.values(res)[0];
+			if (val !== 'ok') {
+				integrityOk = false;
+			}
+		}
+		checkStmt.free();
+
+		this.db.run('VACUUM;');
+		this.db.run('PRAGMA optimize;');
+		await this.persist();
+
+		return {
+			prunedBlocks,
+			integrityOk,
+		};
 	}
 
-	private mapState(stateNum: number): ReviewState {
+	public mapState(stateNum: number): ReviewState {
 		switch (stateNum) {
 			case 1:
 				return 'learning';
@@ -845,7 +709,7 @@ export class DatabaseManager {
 		}
 	}
 
-	private unmapState(state: ReviewState): number {
+	public unmapState(state: ReviewState): number {
 		switch (state) {
 			case 'learning':
 				return 1;
@@ -858,8 +722,8 @@ export class DatabaseManager {
 		}
 	}
 
-	public humanizeDue(dueMs: number): string {
-		const diff = dueMs - Date.now();
+	public humanizeDue(dueMs: number, now = Date.now()): string {
+		const diff = dueMs - now;
 		if (diff <= 0) return 'Due now';
 		const days = Math.round(diff / (1000 * 60 * 60 * 24));
 		if (days === 0) return 'Today';
@@ -867,8 +731,9 @@ export class DatabaseManager {
 		return `In ${days} days`;
 	}
 
-	public humanizeRelative(ms: number): string {
-		const diff = Date.now() - ms;
+	public humanizeRelative(ms: number, now = Date.now()): string {
+		const diff = now - ms;
+		if (diff < 0) return 'Just now';
 		const mins = Math.floor(diff / (1000 * 60));
 		if (mins < 60) return `${mins}m ago`;
 		const hours = Math.floor(mins / 60);

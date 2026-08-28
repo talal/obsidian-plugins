@@ -1,87 +1,183 @@
 <script lang="ts">
+	import type { TagDeckStat } from '../../utils/tagStats.ts';
+
 	interface Props {
-		availableTags?: string[];
+		tagStats?: TagDeckStat[];
 		onSelectTags: (tags: string[]) => void;
 		onClose: () => void;
 	}
 
-	let { availableTags = [], onSelectTags, onClose }: Props = $props();
+	let { tagStats = [], onSelectTags, onClose }: Props = $props();
 
-	let tagInput = $state('');
+	let selectedTags = $state<Set<string>>(new Set());
+	let sortColumn = $state<'tag' | 'due' | 'new' | 'total'>('due');
+	let sortAsc = $state(false);
 
-	let selectedTags = $derived(
-		tagInput
-			.trim()
-			.split(/\s+/)
-			.filter(Boolean)
-			.map((t) => t.replace(/^#/, ''))
+	let sortedTags = $derived(
+		[...tagStats].sort((a, b) => {
+			let cmp = 0;
+			if (sortColumn === 'tag') {
+				cmp = a.tag.localeCompare(b.tag);
+			} else if (sortColumn === 'due') {
+				cmp = a.due - b.due;
+			} else if (sortColumn === 'new') {
+				cmp = a.newCards - b.newCards;
+			} else if (sortColumn === 'total') {
+				cmp = a.total - b.total;
+			}
+			return sortAsc ? cmp : -cmp;
+		}),
 	);
 
-	function handleSubmit(e?: Event) {
-		e?.preventDefault();
-		if (selectedTags.length > 0) {
-			onSelectTags(selectedTags);
+	let allSelected = $derived(
+		sortedTags.length > 0 && sortedTags.every((t) => selectedTags.has(t.tag.toLowerCase())),
+	);
+
+	let selectedSummary = $derived.by(() => {
+		let due = 0;
+		let newCards = 0;
+		let total = 0;
+		for (const item of tagStats) {
+			if (selectedTags.has(item.tag.toLowerCase())) {
+				due += item.due;
+				newCards += item.newCards;
+				total += item.total;
+			}
+		}
+		return { due, newCards, total };
+	});
+
+	function toggleSort(col: 'tag' | 'due' | 'new' | 'total') {
+		if (sortColumn === col) {
+			sortAsc = !sortAsc;
+		} else {
+			sortColumn = col;
+			sortAsc = col === 'tag' ? true : false;
 		}
 	}
 
 	function toggleTag(tag: string) {
-		const current = [...selectedTags];
+		const next = new Set(selectedTags);
 		const lower = tag.toLowerCase();
-		const index = current.findIndex((t) => t.toLowerCase() === lower);
-		if (index >= 0) {
-			current.splice(index, 1);
+		if (next.has(lower)) {
+			next.delete(lower);
 		} else {
-			current.push(tag);
+			next.add(lower);
 		}
-		tagInput = current.join(' ');
+		selectedTags = next;
+	}
+
+	function toggleSelectAll() {
+		const next = new Set(selectedTags);
+		if (allSelected) {
+			next.clear();
+		} else {
+			for (const item of tagStats) {
+				next.add(item.tag.toLowerCase());
+			}
+		}
+		selectedTags = next;
+	}
+
+	function handleStart() {
+		if (selectedTags.size > 0) {
+			onSelectTags(Array.from(selectedTags));
+		}
 	}
 
 	function handleKeyDown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			onClose();
+		} else if (e.key === 'Enter') {
+			if (selectedTags.size > 0) {
+				handleStart();
+			}
 		}
 	}
 </script>
 
 <svelte:window onkeydown={handleKeyDown} />
 
-<p class="setting-item-description">Select or enter tags to assemble a custom practice queue.</p>
+<p class="setting-item-description fc-tag-modal-description">Select tags to assemble a custom study queue.</p>
 
-<form onsubmit={handleSubmit}>
-	<div class="search-input-container">
-		<input
-			type="search"
-			class="search-input"
-			placeholder="e.g. geography pakistan"
-			dir="auto"
-			bind:value={tagInput}
-		/>
-	</div>
-
-	{#if availableTags.length > 0}
-		<div class="fc-tag-suggestions">
-			<span class="setting-item-description">Available tags in cards:</span>
-			<div class="fc-suggest-chips">
-				{#each availableTags as tag}
-					{@const isSelected = selectedTags.some((s) => s.toLowerCase() === tag.toLowerCase())}
-					<button
-						type="button"
-						class="fc-pill"
-						class:active={isSelected}
-						onclick={() => toggleTag(tag)}
-						dir="auto"
+<div class="fc-tag-table-container">
+	<table class="fc-table fc-tag-table">
+		<thead>
+			<tr>
+				<th class="fc-col-select">
+					<input
+						type="checkbox"
+						checked={allSelected}
+						aria-label="Select all tags"
+						onchange={toggleSelectAll}
+					/>
+				</th>
+				<th onclick={() => toggleSort('tag')} class="fc-sortable fc-col-tag">
+					Tag {sortColumn === 'tag' ? (sortAsc ? '↑' : '↓') : ''}
+				</th>
+				<th onclick={() => toggleSort('due')} class="fc-sortable fc-col-num">
+					Due {sortColumn === 'due' ? (sortAsc ? '↑' : '↓') : ''}
+				</th>
+				<th onclick={() => toggleSort('new')} class="fc-sortable fc-col-num">
+					New {sortColumn === 'new' ? (sortAsc ? '↑' : '↓') : ''}
+				</th>
+				<th onclick={() => toggleSort('total')} class="fc-sortable fc-col-num">
+					Total {sortColumn === 'total' ? (sortAsc ? '↑' : '↓') : ''}
+				</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#if sortedTags.length === 0}
+				<tr>
+					<td colspan="5" class="fc-empty-row">No tags found.</td>
+				</tr>
+			{:else}
+				{#each sortedTags as item (item.tag)}
+					{@const isChecked = selectedTags.has(item.tag.toLowerCase())}
+					<tr
+						class="fc-tag-row"
+						class:is-selected={isChecked}
+						onclick={() => toggleTag(item.tag)}
 					>
-						#{tag}
-					</button>
+						<td class="fc-col-select" onclick={(e) => e.stopPropagation()}>
+							<input
+								type="checkbox"
+								checked={isChecked}
+								aria-label={`Select tag ${item.tag}`}
+								onchange={() => toggleTag(item.tag)}
+							/>
+						</td>
+						<td class="fc-col-tag">
+							<span class="tag" dir="auto">#{item.tag}</span>
+						</td>
+						<td class="fc-col-num" class:fc-stat-due={item.due > 0} class:fc-stat-zero={item.due === 0}>
+							{item.due}
+						</td>
+						<td class="fc-col-num" class:fc-stat-new={item.newCards > 0} class:fc-stat-zero={item.newCards === 0}>
+							{item.newCards}
+						</td>
+						<td class="fc-col-num">
+							{item.total}
+						</td>
+					</tr>
 				{/each}
-			</div>
-		</div>
-	{/if}
+			{/if}
+		</tbody>
+	</table>
+</div>
 
-	<div class="modal-button-container">
-		<button type="button" onclick={onClose}>Cancel</button>
-		<button type="submit" class="mod-cta" disabled={selectedTags.length === 0}>
-			Start study session ({selectedTags.length > 0 ? selectedTags.length : 0} tags)
-		</button>
-	</div>
-</form>
+<div class="modal-button-container">
+	<button type="button" onclick={onClose}>Cancel</button>
+	<button
+		type="button"
+		class="mod-cta"
+		disabled={selectedTags.size === 0}
+		onclick={handleStart}
+	>
+		{#if selectedTags.size === 0}
+			Select tags to study
+		{:else}
+			Study selected ({selectedSummary.due} due • {selectedSummary.total} total)
+		{/if}
+	</button>
+</div>

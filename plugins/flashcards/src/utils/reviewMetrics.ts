@@ -28,7 +28,7 @@ export function calculateProgress(
 	const currentCardNumber = isFinished ? totalCards : boundedIndex + 1;
 	const progressPercent = isFinished
 		? 100
-		: Math.max(0, Math.min(100, Math.round((boundedIndex / totalCards) * 100)));
+		: Math.max(0, Math.min(100, Math.round((currentCardNumber / totalCards) * 100)));
 
 	return {
 		currentCardNumber,

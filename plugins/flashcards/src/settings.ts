@@ -198,9 +198,7 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 					if (!res.integrityOk) {
 						new Notice('⚠️ Database integrity check reported warnings.');
 					} else {
-						new Notice(
-							`✨ Database optimized: ${res.prunedNotes} stale notes, ${res.cleanedBlocks} orphaned blocks, ${res.cleanedItems} items cleaned.`,
-						);
+						new Notice(`✨ Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
 					}
 					this.plugin.refreshDashboardIfOpen();
 				});

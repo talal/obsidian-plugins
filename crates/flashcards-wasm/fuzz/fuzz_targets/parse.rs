@@ -1,21 +1,22 @@
 #![no_main]
 
-//! Coverage-guided fuzzing for Markdown/card-boundary parsing.
-//!
-//! The target checks both the ordinary Rust entry point and the path that
-//! consumes block ranges supplied by Obsidian's MetadataCache.
+//! Coverage-guided fuzzing for Markdown/card-boundary parsing and document syncing.
 
 use flashcards_wasm::parser::{
-    parse_markdown_blocks, parse_markdown_blocks_with_sections, ObsidianSectionHint,
+    parse_markdown_blocks, parse_markdown_blocks_with_sections, sync_document, ObsidianSectionHint,
 };
+use flashcards_wasm::types::{CardBlockType, ParsedBlock};
 use libfuzzer_sys::fuzz_target;
+use std::collections::HashSet;
 use std::str;
 
-fn assert_valid_blocks(input: &str, blocks: &[flashcards_wasm::types::ParsedBlock]) {
+fn assert_valid_blocks(input: &str, blocks: &[ParsedBlock]) {
     let line_count = input.lines().count();
     for block in blocks {
-        assert!(!block.front_raw.trim().is_empty());
-        assert!(!block.back_raw.trim().is_empty());
+        assert!(!block.front.trim().is_empty());
+        if block.block_type != CardBlockType::Cloze {
+            assert!(!block.back.trim().is_empty());
+        }
         assert!(block.line_start <= block.line_end);
         assert!(block.line_end < line_count);
     }
@@ -29,9 +30,7 @@ fuzz_target!(|data: &[u8]| {
     let blocks = parse_markdown_blocks(input, &[]);
     assert_valid_blocks(input, &blocks);
 
-    // Feed bounded, intentionally arbitrary section ranges as well. This
-    // exercises the external metadata boundary without allowing fuzz data to
-    // allocate unbounded hint strings or ranges.
+    // Feed bounded, intentionally arbitrary section ranges as well.
     let line_count = input.lines().count();
     let hints: Vec<_> = data
         .chunks(3)
@@ -60,4 +59,11 @@ fuzz_target!(|data: &[u8]| {
         .collect();
     let hinted_blocks = parse_markdown_blocks_with_sections(input, &[], &hints);
     assert_valid_blocks(input, &hinted_blocks);
+
+    // Fuzz single-pass document sync
+    let sync_result = sync_document(input, &HashSet::new(), &[], &hints);
+    assert_valid_blocks(
+        sync_result.updated_content.as_deref().unwrap_or(input),
+        &sync_result.blocks,
+    );
 });

@@ -3,17 +3,20 @@ import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
 import type { FsrsParams, ReviewItem, SchedulingCard } from '../types.js';
+import { ReviewSessionCache } from '../utils/ReviewSessionCache.js';
 import {
 	DEFAULT_LEARNING_STEPS,
 	DEFAULT_RELEARNING_STEPS,
 	parseStudySteps,
 } from '../utils/studySteps.js';
+import { toggleCardTodoInMarkdown } from '../utils/todoTag.js';
 import { WasmBridge } from '../wasm.js';
-import ReviewStage from './components/ReviewStage.svelte';
+import ReviewModalComponent from './components/ReviewModal.svelte';
 
 export class ReviewModal extends Modal {
-	private component: ReturnType<typeof ReviewStage> | undefined;
-	private sessionId = 0;
+	private component: ReturnType<typeof ReviewModalComponent> | undefined;
+	private cache: ReviewSessionCache;
+	private isCommitted = false;
 
 	constructor(
 		app: App,
@@ -22,6 +25,7 @@ export class ReviewModal extends Modal {
 		private deckName = 'All Cards',
 	) {
 		super(app);
+		this.cache = new ReviewSessionCache();
 	}
 
 	onOpen() {
@@ -29,24 +33,20 @@ export class ReviewModal extends Modal {
 		this.contentEl.empty();
 		this.contentEl.addClass('fc-modal-content-reset');
 
-		this.sessionId = this.plugin.db.createSession(this.deckName);
-
-		this.component = mount(ReviewStage, {
+		this.component = mount(ReviewModalComponent, {
 			target: this.contentEl,
 			props: {
 				app: this.app,
 				items: this.items,
 				deckName: this.deckName,
-				onGrade: async (item: ReviewItem, ratingStr: 'forgot' | 'remembered') => {
-					await this.handleCardGrade(item, ratingStr);
+				onGrade: (item: ReviewItem, ratingStr: 'forgot' | 'remembered') => {
+					this.handleCardGrade(item, ratingStr);
 				},
-				onUndo: async (item: ReviewItem) => {
-					await this.handleCardUndo(item);
+				onUndo: (item: ReviewItem) => {
+					this.handleCardUndo(item);
 				},
 				onFinishSession: async (studied: number, forgot: number, remembered: number) => {
-					this.plugin.db.finishSession(this.sessionId, studied, forgot, remembered);
-					await this.plugin.db.persist();
-					this.plugin.refreshDashboardIfOpen();
+					await this.commitSessionData(studied, forgot, remembered);
 				},
 				onToggleTodo: async (item: ReviewItem) => {
 					await this.handleToggleTodo(item);
@@ -56,10 +56,7 @@ export class ReviewModal extends Modal {
 		});
 	}
 
-	private async handleCardGrade(
-		item: ReviewItem,
-		ratingStr: 'forgot' | 'remembered',
-	): Promise<void> {
+	private handleCardGrade(item: ReviewItem, ratingStr: 'forgot' | 'remembered'): void {
 		const previousCard = this.toSchedulingCard(item);
 		const rawWeights = this.plugin.settings.customWeights
 			? this.plugin.settings.customWeights
@@ -80,50 +77,48 @@ export class ReviewModal extends Modal {
 			),
 		};
 
-		const info = WasmBridge.calculateSchedule(previousCard, params, Date.now());
+		const now = Date.now();
+		const info = WasmBridge.calculateSchedule(previousCard, params, now);
 		const targetRating = ratingStr === 'forgot' ? 'again' : 'good';
-		const ratingNum = ratingStr === 'forgot' ? 1 : 3;
 
 		const candidate =
 			info.next_states.find((c) => c.rating === targetRating) ?? info.next_states[2];
 		if (!candidate) return;
 
-		this.plugin.db.recordReview(
-			item.id,
-			ratingNum,
-			candidate.card.state,
-			candidate.card.due,
-			candidate.card.stability,
-			candidate.card.difficulty,
-			candidate.card.reps,
-			candidate.card.lapses,
-			candidate.card.learning_step,
-			candidate.card.relearning_step,
-			this.sessionId,
-		);
+		const stateNum = this.plugin.db.unmapState(candidate.card.state);
+
+		this.cache.recordReview(item, previousCard, ratingStr, candidate.card, stateNum, now);
+
 		this.applySchedulingCard(item, candidate.card);
-		try {
-			await this.plugin.db.persist();
-		} catch (error) {
-			this.plugin.db.rollbackReview(item.id, previousCard, this.sessionId);
-			this.applySchedulingCard(item, previousCard);
-			try {
-				await this.plugin.db.persist();
-			} catch {
-				// Preserve the original persistence error for the review UI.
-			}
-			throw error;
-		}
-		this.plugin.refreshDashboardIfOpen();
 	}
 
-	private async handleCardUndo(item: ReviewItem): Promise<void> {
-		const previousCard = this.toSchedulingCard(item);
-		this.plugin.db.rollbackReview(item.id, previousCard, this.sessionId);
-		const liveItem = this.items.find((candidate) => candidate.id === item.id);
-		if (liveItem) this.applySchedulingCard(liveItem, previousCard);
-		await this.plugin.db.persist();
-		this.plugin.refreshDashboardIfOpen();
+	private handleCardUndo(_item: ReviewItem): void {
+		const undoRes = this.cache.undo();
+		if (undoRes) {
+			this.applySchedulingCard(undoRes.item, undoRes.previousState);
+		}
+	}
+
+	private async commitSessionData(
+		studied: number,
+		forgot: number,
+		remembered: number,
+	): Promise<void> {
+		if (this.isCommitted || this.cache.getReviewsCount() === 0) return;
+		this.isCommitted = true;
+
+		const { session, reviews, cardUpdates } = this.cache.getPendingData(
+			studied,
+			forgot,
+			remembered,
+		);
+
+		try {
+			await this.plugin.db.commitSession(session, reviews, cardUpdates);
+			this.plugin.refreshDashboardIfOpen();
+		} catch (error) {
+			console.error('Failed to commit study session:', error);
+		}
 	}
 
 	private toSchedulingCard(item: ReviewItem): SchedulingCard {
@@ -136,7 +131,7 @@ export class ReviewModal extends Modal {
 			relearning_step: item.relearningStep,
 			state: item.state,
 			last_review: item.lastReview,
-			due: item.due,
+			due: item.dueAt,
 		};
 	}
 
@@ -148,8 +143,9 @@ export class ReviewModal extends Modal {
 		item.learningStep = card.learning_step;
 		item.relearningStep = card.relearning_step;
 		item.state = card.state;
+		item.stateNum = this.plugin.db.unmapState(card.state);
 		item.lastReview = card.last_review;
-		item.due = card.due;
+		item.dueAt = card.due;
 		item.dueHuman = this.plugin.db.humanizeDue(card.due);
 		item.lastPracticedHuman = card.last_review ? 'Just now' : 'Never';
 	}
@@ -158,41 +154,19 @@ export class ReviewModal extends Modal {
 		const file = this.app.vault.getAbstractFileByPath(item.notePath);
 		if (file instanceof TFile) {
 			const content = await this.app.vault.read(file);
-			const lines = content.split('\n');
-			for (let i = 0; i < lines.length; i++) {
-				const line = lines[i];
-				if (!line) continue;
-				if (line.includes(`^${item.blockId}`) || line.includes(`id=${item.blockId}`)) {
-					if (/(?:^|\s)#todo\/card(?:\s|$)/.test(line)) {
-						lines[i] = line
-							.replace(/(?:^|\s)#todo\/card(?:\s|$)/g, ' ')
-							.replace(/\s+/g, ' ')
-							.trimEnd();
-					} else if (item.cardType !== 'block') {
-						const trimmedLine = line.trimEnd();
-						const blockIdSuffix = ` ^${item.blockId}`;
-						if (trimmedLine.endsWith(blockIdSuffix)) {
-							lines[i] =
-								`${trimmedLine.slice(0, -blockIdSuffix.length).trimEnd()} #todo/card${blockIdSuffix}`;
-						} else {
-							lines[i] = `${trimmedLine} #todo/card`;
-						}
-					} else {
-						lines[i] = `${line.trimEnd()} #todo/card`;
-					}
-					break;
-				}
+			const updated = toggleCardTodoInMarkdown(content, item.blockId, item.blockType);
+			if (updated !== content) {
+				await this.app.vault.modify(file, updated);
+				await this.plugin.scanner.syncFile(file);
+				this.plugin.refreshDashboardIfOpen();
 			}
-			await this.app.vault.modify(file, lines.join('\n'));
-			await this.plugin.scanner.scanFile(file);
-			this.plugin.refreshDashboardIfOpen();
 		}
 	}
 
 	onClose() {
-		if (this.sessionId) {
-			this.plugin.db.finishSession(this.sessionId);
-			void this.plugin.db.persist().catch(() => undefined);
+		if (!this.isCommitted && this.cache.getReviewsCount() > 0) {
+			const stats = this.cache.getStats();
+			void this.commitSessionData(stats.studied, stats.forgot, stats.remembered);
 		}
 		if (this.component) {
 			void unmount(this.component);
