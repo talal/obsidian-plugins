@@ -170,6 +170,13 @@
 		}
 	}
 
+	function handleNext() {
+		if (!isProcessing && !isFinished && currentIndex + 1 < items.length) {
+			currentIndex += 1;
+			isRevealed = false;
+		}
+	}
+
 	function handleToggleTodoTag() {
 		if (!currentCard || isProcessing || isFinished) return;
 		const hasTodo = currentCard.tags.includes('card/todo');
@@ -233,10 +240,7 @@
 			void handleGrade('remembered');
 		} else if (e.key === 'ArrowRight') {
 			e.preventDefault();
-			if (!isProcessing && !isFinished && currentIndex + 1 < items.length) {
-				currentIndex += 1;
-				isRevealed = false;
-			}
+			handleNext();
 		} else if (e.key === 'ArrowLeft') {
 			e.preventDefault();
 			handlePrev();
@@ -280,9 +284,11 @@
 	{#if currentCard && !isFinished}
 		<ReviewBottomBar
 			{currentIndex}
+			{totalCards}
 			{isRevealed}
 			{isProcessing}
 			onPrev={handlePrev}
+			onNext={handleNext}
 			onReveal={handleReveal}
 			onGrade={handleGrade}
 		/>

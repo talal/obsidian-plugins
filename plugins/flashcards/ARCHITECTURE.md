@@ -469,7 +469,7 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 - **Top Overview Metric Bar**: Displays four core operational stats (`Studied today`, `Retention`, `🔥 Streak`, `Total cards`) and quick CTA launch buttons (`Study all (X due)` and `Study deck`).
 - **1:1 Block Row Grouping (`groupCardsByBlock`)**: Consolidates bidirectional cards into a single Markdown block row displaying the primary forward Question and Answer. Independent reverse scheduling metrics sit directly underneath in a muted `⇄` sub-row under **Due**, **Reviews**, and **Last Practiced**.
 - **Interactive Toolbar & Table Filters**: Filter pills (`All`, `Due today`, `New`, `Learning`, `Review`) and real-time search box (`note` text or `#tag`). Filter pill counts accurately reflect matching table rows.
-- **Obsidian Design Tokens**: Strict reliance on native Obsidian table variables (`--table-border-color`, `--table-header-background`, `--table-row-alt-background`, `var(--font-ui-small)`, `var(--font-bold)`).
+- **Obsidian Design Tokens**: Strict reliance on native Obsidian table variables (`--table-border-color`, `--table-header-background`, `--table-row-alt-background`, `var(--font-ui-medium)`, `var(--font-ui-small)`, `var(--font-bold)`).
 
 ### 10.4 Tag Picker Modal (Hashcards-Inspired Deck Stats Table)
 - **Compact Deck Statistics Table**: Lists all tag decks with detailed columns for `[Tag]`, `[Due]`, `[New]`, and `[Total]` (`computeTagDeckStats`).

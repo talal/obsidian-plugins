@@ -39,6 +39,7 @@
 	padding: 0;
 	height: 100%;
 	overflow-y: auto;
+	overflow-x: hidden;
 }
 
 .fc-dashboard {
@@ -49,6 +50,8 @@
 	background-color: var(--background-primary);
 	min-height: 100%;
 	color: var(--text-normal);
+	box-sizing: border-box;
+	max-width: 100%;
 }
 
 /* Unified Metric Bar Header */
@@ -99,6 +102,12 @@
 	gap: var(--size-4-2);
 }
 
+.fc-header-actions button {
+	justify-content: center;
+	text-align: center;
+	white-space: nowrap;
+}
+
 /* Toolbar & Filters */
 .fc-toolbar {
 	display: flex;
@@ -113,6 +122,7 @@
 	gap: var(--size-2-2);
 	overflow-x: auto;
 	scrollbar-width: none;
+	max-width: 100%;
 }
 
 .fc-filter-pills::-webkit-scrollbar {
@@ -127,6 +137,8 @@
 	border-radius: var(--radius-xl);
 	font-size: var(--font-ui-smaller);
 	cursor: pointer;
+	white-space: nowrap;
+	flex-shrink: 0;
 	transition:
 		background-color 120ms ease,
 		color 120ms ease;
@@ -158,21 +170,52 @@
 	.fc-dashboard-header {
 		flex-direction: column;
 		align-items: stretch;
+		gap: var(--size-4-3);
 	}
 
 	.fc-stats-bar {
-		justify-content: space-around;
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: var(--size-4-2);
+		width: 100%;
+	}
+
+	.fc-stat-divider {
+		display: none;
+	}
+
+	.fc-stat-item {
+		justify-content: center;
+		background: var(--background-primary);
+		padding: var(--size-4-2);
+		border-radius: var(--radius-s);
+		border: var(--border-width) solid var(--background-modifier-border);
 	}
 
 	.fc-header-actions {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
+		display: flex;
+		flex-direction: column;
+		gap: var(--size-4-2);
 		width: 100%;
+	}
+
+	.fc-header-actions button {
+		width: 100%;
+		height: 40px;
+		font-size: var(--font-ui-small);
 	}
 
 	.fc-toolbar {
 		flex-direction: column;
 		align-items: stretch;
+		gap: var(--size-4-3);
+		width: 100%;
+		min-width: 0;
+	}
+
+	.fc-filter-pills {
+		width: 100%;
+		min-width: 0;
 	}
 
 	.fc-search-box {
@@ -194,7 +237,7 @@
 .fc-table {
 	width: 100%;
 	border-collapse: collapse;
-	font-size: var(--font-ui-smaller);
+	font-size: var(--font-ui-small);
 	text-align: start;
 }
 
@@ -205,7 +248,7 @@
 .fc-table th {
 	background-color: var(--table-header-background, var(--background-secondary));
 	color: var(--table-header-color, var(--text-muted));
-	font-size: var(--font-ui-small);
+	font-size: var(--font-ui-medium);
 	font-weight: var(--font-bold);
 	border-bottom: var(--table-header-border-width, var(--border-width)) solid
 		var(--table-header-border-color, var(--background-modifier-border));
@@ -680,6 +723,7 @@
 	color: var(--text-muted);
 	cursor: pointer;
 	flex-shrink: 0;
+	min-width: 72px;
 	transition: all 0.15s ease;
 }
 

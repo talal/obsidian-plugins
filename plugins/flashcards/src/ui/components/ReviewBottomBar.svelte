@@ -1,18 +1,22 @@
 <script lang="ts">
 	interface Props {
 		currentIndex: number;
+		totalCards: number;
 		isRevealed: boolean;
 		isProcessing: boolean;
 		onPrev: () => void;
+		onNext: () => void;
 		onReveal: () => void;
 		onGrade: (rating: 'forgot' | 'remembered') => void;
 	}
 
 	let {
 		currentIndex,
+		totalCards,
 		isRevealed,
 		isProcessing,
 		onPrev,
+		onNext,
 		onReveal,
 		onGrade,
 	}: Props = $props();
@@ -63,4 +67,14 @@
 			</div>
 		{/if}
 	</div>
+
+	<button
+		class="fc-nav-btn"
+		onclick={onNext}
+		disabled={currentIndex >= totalCards - 1 || isProcessing}
+		aria-label="Next (→)"
+		title="Next (→)"
+	>
+		<span>Next</span>
+	</button>
 </footer>
