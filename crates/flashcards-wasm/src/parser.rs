@@ -336,18 +336,20 @@ pub fn parse_markdown_blocks_with_sections(
 }
 
 /// Single-pass note document transformer:
-/// Parses cards, validates block IDs against `existing_ids`, mints fresh 6-character
-/// lowercase base-36 IDs for missing or colliding blocks, and rebuilds the note content.
+/// Parses cards, validates block IDs against `external_ids` (claimed by other files),
+/// mints fresh 6-character lowercase base-36 IDs for missing or colliding blocks,
+/// and rebuilds the note content.
 pub fn sync_document(
     content: &str,
-    existing_ids: &HashSet<String>,
+    external_ids: &HashSet<String>,
     note_inherited_tags: &[String],
     section_hints: &[ObsidianSectionHint],
 ) -> DocumentSyncResult {
     let raw_lines: Vec<&str> = content.lines().collect();
     let context = MarkdownContext::new(content, raw_lines.len(), section_hints);
     let mut out_lines: Vec<String> = raw_lines.iter().map(|s| s.to_string()).collect();
-    let mut used_ids: HashSet<String> = existing_ids.clone();
+    let mut used_ids: HashSet<String> = HashSet::new();
+    let mut all_known_ids: HashSet<String> = external_ids.clone();
     let mut blocks = Vec::new();
     let mut modified = false;
     let mut line_number = 0;
@@ -376,14 +378,16 @@ pub fn sync_document(
             ) {
                 let id = if !raw_block_id.is_empty()
                     && syntax::is_valid_block_id(&raw_block_id)
-                    && !existing_ids.contains(&raw_block_id)
+                    && !external_ids.contains(&raw_block_id)
                     && !used_ids.contains(&raw_block_id)
                 {
                     used_ids.insert(raw_block_id.clone());
+                    all_known_ids.insert(raw_block_id.clone());
                     raw_block_id
                 } else {
-                    let new_id = syntax::generate_unique_block_id(&used_ids);
+                    let new_id = syntax::generate_unique_block_id(&all_known_ids);
                     used_ids.insert(new_id.clone());
+                    all_known_ids.insert(new_id.clone());
                     out_lines[line_number] = rewrite_block_header(&out_lines[line_number], &new_id);
                     modified = true;
                     new_id
@@ -416,14 +420,16 @@ pub fn sync_document(
         {
             let id = if !raw_block_id.is_empty()
                 && syntax::is_valid_block_id(&raw_block_id)
-                && !existing_ids.contains(&raw_block_id)
+                && !external_ids.contains(&raw_block_id)
                 && !used_ids.contains(&raw_block_id)
             {
                 used_ids.insert(raw_block_id.clone());
+                all_known_ids.insert(raw_block_id.clone());
                 raw_block_id
             } else {
-                let new_id = syntax::generate_unique_block_id(&used_ids);
+                let new_id = syntax::generate_unique_block_id(&all_known_ids);
                 used_ids.insert(new_id.clone());
+                all_known_ids.insert(new_id.clone());
                 out_lines[line_number] =
                     rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
                 modified = true;
@@ -450,14 +456,16 @@ pub fn sync_document(
         {
             let id = if !raw_block_id.is_empty()
                 && syntax::is_valid_block_id(&raw_block_id)
-                && !existing_ids.contains(&raw_block_id)
+                && !external_ids.contains(&raw_block_id)
                 && !used_ids.contains(&raw_block_id)
             {
                 used_ids.insert(raw_block_id.clone());
+                all_known_ids.insert(raw_block_id.clone());
                 raw_block_id
             } else {
-                let new_id = syntax::generate_unique_block_id(&used_ids);
+                let new_id = syntax::generate_unique_block_id(&all_known_ids);
                 used_ids.insert(new_id.clone());
+                all_known_ids.insert(new_id.clone());
                 out_lines[line_number] =
                     rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
                 modified = true;
@@ -478,14 +486,16 @@ pub fn sync_document(
 
             let id = if !raw_block_id.is_empty()
                 && syntax::is_valid_block_id(&raw_block_id)
-                && !existing_ids.contains(&raw_block_id)
+                && !external_ids.contains(&raw_block_id)
                 && !used_ids.contains(&raw_block_id)
             {
                 used_ids.insert(raw_block_id.clone());
+                all_known_ids.insert(raw_block_id.clone());
                 raw_block_id
             } else {
-                let new_id = syntax::generate_unique_block_id(&used_ids);
+                let new_id = syntax::generate_unique_block_id(&all_known_ids);
                 used_ids.insert(new_id.clone());
+                all_known_ids.insert(new_id.clone());
                 out_lines[line_number] =
                     rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
                 modified = true;

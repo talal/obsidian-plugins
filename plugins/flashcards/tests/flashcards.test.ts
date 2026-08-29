@@ -2000,3 +2000,385 @@ describe('Tag Deck Stats Aggregation (Hashcards Model)', () => {
 		expect(stats[2]!.due).toBe(0);
 	});
 });
+
+describe('Identity Reconciliation & Note Synchronization Invariants', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+		WasmBridge.initForTest(SQL);
+	});
+
+	function createMockVault(files: Record<string, string>) {
+		const storage = new Map<string, string>(Object.entries(files));
+		let modifyCalls = 0;
+		const mockVault = {
+			cachedRead: async (file: any) => storage.get(file.path) ?? '',
+			modify: async (file: any, data: string) => {
+				modifyCalls++;
+				storage.set(file.path, data);
+			},
+			getMarkdownFiles: () =>
+				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: Date.now() } })),
+			adapter: {
+				exists: async () => false,
+				readBinary: async () => new Uint8Array(),
+				writeBinary: async () => {},
+				remove: async () => {},
+			},
+		};
+		const mockMetadataCache = {
+			getFileCache: (file: any) => {
+				const content = storage.get(file.path) ?? '';
+				const tags: { tag: string }[] = [];
+				for (const match of content.matchAll(/#([a-zA-Z0-9_\-/]+)/g)) {
+					const t = match[0];
+					if (t) tags.push({ tag: t });
+				}
+				return { tags, frontmatter: null, sections: [] };
+			},
+		};
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: mockMetadataCache,
+		} as any;
+
+		return { mockApp, storage, getModifyCalls: () => modifyCalls };
+	}
+
+	it('existing ID in same note remains stable across fullScan without file modifications or scheduling resets', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const initialMarkdown = 'What is the capital of Japan? :: Tokyo ^abc123\n';
+		const { mockApp, storage, getModifyCalls } = createMockVault({
+			'Notes/Japan.md': initialMarkdown,
+		});
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		// Initial scan
+		await scanner.fullScan();
+		const cards = db.getAllCards();
+		expect(cards).toHaveLength(1);
+		const cardId = cards[0]!.cardId;
+
+		// Set reviewed FSRS state
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: cardId,
+					rating: 3,
+					state: 2,
+					due_at: 10000,
+					stability: 15.4,
+					difficulty: 4.1,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: cardId,
+					state: 2,
+					due_at: 10000,
+					stability: 15.4,
+					difficulty: 4.1,
+					reps: 6,
+					lapses: 0,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		const beforeRescanCalls = getModifyCalls();
+
+		// Run fullScan again across vault
+		await scanner.fullScan();
+
+		// Assert: File was NOT modified, ID remains abc123
+		expect(getModifyCalls()).toBe(beforeRescanCalls);
+		expect(storage.get('Notes/Japan.md')).toBe(initialMarkdown);
+
+		// Assert: Card scheduling in DB is completely preserved
+		const cardsAfterScan = db.getAllCards();
+		expect(cardsAfterScan).toHaveLength(1);
+		expect(cardsAfterScan[0]!.cardId).toBe(cardId);
+		expect(cardsAfterScan[0]!.blockId).toBe('abc123');
+		expect(cardsAfterScan[0]!.reps).toBe(6);
+		expect(cardsAfterScan[0]!.stability).toBe(15.4);
+		expect(cardsAfterScan[0]!.difficulty).toBe(4.1);
+		expect(cardsAfterScan[0]!.state).toBe('review');
+	});
+
+	it('cross-file duplicate ID causes the second file to mint a new ID while preserving the first file', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const fileAContent = 'Question A :: Answer A ^shared\n';
+		const fileBContent = 'Question B :: Answer B ^shared\n';
+		const { mockApp, storage } = createMockVault({
+			'Notes/FileA.md': fileAContent,
+			'Notes/FileB.md': fileBContent,
+		});
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		// Scan File A first
+		await scanner.syncFile({ path: 'Notes/FileA.md' } as any);
+		const cardA = db.getAllCards()[0]!;
+		expect(cardA.blockId).toBe('shared');
+
+		// Set review metrics on File A
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: cardA.cardId,
+					rating: 3,
+					state: 2,
+					due_at: 8000,
+					stability: 9.0,
+					difficulty: 3.5,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: cardA.cardId,
+					state: 2,
+					due_at: 8000,
+					stability: 9.0,
+					difficulty: 3.5,
+					reps: 3,
+					lapses: 0,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// Scan File B (which copied ^shared)
+		await scanner.syncFile({ path: 'Notes/FileB.md' } as any);
+
+		// Assert: File A keeps ^shared and its scheduling
+		const allCards = db.getAllCards();
+		expect(allCards).toHaveLength(2);
+
+		const updatedCardA = allCards.find((c) => c.notePath === 'Notes/FileA.md')!;
+		expect(updatedCardA.blockId).toBe('shared');
+		expect(updatedCardA.reps).toBe(3);
+		expect(updatedCardA.stability).toBe(9.0);
+
+		// Assert: File B got a brand new ID
+		const cardB = allCards.find((c) => c.notePath === 'Notes/FileB.md')!;
+		expect(cardB.blockId).not.toBe('shared');
+		expect(cardB.blockId).toMatch(/^[0-9a-z]{6}$/);
+		expect(storage.get('Notes/FileB.md')).toContain(cardB.blockId);
+	});
+
+	it('duplicate ID within the same file mints a new ID for the second block while preserving the first', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const initialMarkdown = 'Question 1 :: Answer 1 ^dup001\nQuestion 2 :: Answer 2 ^dup001\n';
+		const { mockApp, storage } = createMockVault({ 'Notes/Dupes.md': initialMarkdown });
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		const blocks = await scanner.syncFile({ path: 'Notes/Dupes.md' } as any);
+		expect(blocks).toHaveLength(2);
+
+		// First block kept dup001
+		expect(blocks[0]!.id).toBe('dup001');
+		// Second block got a newly generated ID
+		expect(blocks[1]!.id).not.toBe('dup001');
+		expect(blocks[1]!.id).toMatch(/^[0-9a-z]{6}$/);
+
+		const updatedContent = storage.get('Notes/Dupes.md')!;
+		expect(updatedContent).toContain('^dup001');
+		expect(updatedContent).toContain(`^${blocks[1]!.id}`);
+	});
+
+	it('editing question or answer text preserves existing block ID and FSRS card scheduling', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const { mockApp, storage } = createMockVault({
+			'Notes/Edit.md': 'Original question :: Original answer ^edit01\n',
+		});
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		await scanner.syncFile({ path: 'Notes/Edit.md' } as any);
+		const initialCard = db.getAllCards()[0]!;
+
+		// Review card
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: initialCard.cardId,
+					rating: 3,
+					state: 2,
+					due_at: 9999,
+					stability: 11.2,
+					difficulty: 4.8,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: initialCard.cardId,
+					state: 2,
+					due_at: 9999,
+					stability: 11.2,
+					difficulty: 4.8,
+					reps: 5,
+					lapses: 1,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// User edits text in note
+		storage.set(
+			'Notes/Edit.md',
+			'Completely rewritten question? :: Brand new polished answer ^edit01\n',
+		);
+
+		await scanner.syncFile({ path: 'Notes/Edit.md' } as any);
+
+		// Assert: Block text updated, card scheduling preserved
+		const cardsAfterEdit = db.getAllCards();
+		expect(cardsAfterEdit).toHaveLength(1);
+		expect(cardsAfterEdit[0]!.front).toBe('Completely rewritten question?');
+		expect(cardsAfterEdit[0]!.back).toBe('Brand new polished answer');
+		expect(cardsAfterEdit[0]!.reps).toBe(5);
+		expect(cardsAfterEdit[0]!.lapses).toBe(1);
+		expect(cardsAfterEdit[0]!.stability).toBe(11.2);
+		expect(cardsAfterEdit[0]!.difficulty).toBe(4.8);
+	});
+
+	it('changing card from reversible (:::) to forward (::) prunes reverse card while preserving forward card scheduling', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const { mockApp, storage } = createMockVault({
+			'Notes/Reversible.md': 'Front ::: Back ^rev001\n',
+		});
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		await scanner.syncFile({ path: 'Notes/Reversible.md' } as any);
+		const cards = db.getAllCards();
+		expect(cards).toHaveLength(2);
+
+		const forwardCard = cards.find((c) => c.direction === 'forward')!;
+		// Review forward card
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: forwardCard.cardId,
+					rating: 3,
+					state: 2,
+					due_at: 12000,
+					stability: 7.5,
+					difficulty: 4.0,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: forwardCard.cardId,
+					state: 2,
+					due_at: 12000,
+					stability: 7.5,
+					difficulty: 4.0,
+					reps: 2,
+					lapses: 0,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// Switch to non-reversible
+		storage.set('Notes/Reversible.md', 'Front :: Back ^rev001\n');
+		await scanner.syncFile({ path: 'Notes/Reversible.md' } as any);
+
+		// Assert: 1 card remains, forward scheduling preserved
+		const cardsAfterPrune = db.getAllCards();
+		expect(cardsAfterPrune).toHaveLength(1);
+		expect(cardsAfterPrune[0]!.direction).toBe('forward');
+		expect(cardsAfterPrune[0]!.reps).toBe(2);
+		expect(cardsAfterPrune[0]!.stability).toBe(7.5);
+	});
+
+	it('changing card from forward (::) to reversible (:::) preserves forward scheduling and creates new reverse card', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const { mockApp, storage } = createMockVault({
+			'Notes/Forward.md': 'Front :: Back ^fwd001\n',
+		});
+
+		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+		const scanner = new NoteScanner(mockApp, db);
+
+		await scanner.syncFile({ path: 'Notes/Forward.md' } as any);
+		const forwardCard = db.getAllCards()[0]!;
+
+		// Review forward card
+		await db.commitSession(
+			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
+			[
+				{
+					card_id: forwardCard.cardId,
+					rating: 3,
+					state: 2,
+					due_at: 15000,
+					stability: 10.0,
+					difficulty: 3.0,
+					reviewed_at: 1000,
+				},
+			],
+			[
+				{
+					id: forwardCard.cardId,
+					state: 2,
+					due_at: 15000,
+					stability: 10.0,
+					difficulty: 3.0,
+					reps: 4,
+					lapses: 0,
+					last_review: 1000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// Switch to reversible
+		storage.set('Notes/Forward.md', 'Front ::: Back ^fwd001\n');
+		await scanner.syncFile({ path: 'Notes/Forward.md' } as any);
+
+		// Assert: 2 cards exist, forward retained reps, reverse is new
+		const cardsAfterExpansion = db.getAllCards();
+		expect(cardsAfterExpansion).toHaveLength(2);
+
+		const forward = cardsAfterExpansion.find((c) => c.direction === 'forward')!;
+		expect(forward.reps).toBe(4);
+		expect(forward.stability).toBe(10.0);
+
+		const reverse = cardsAfterExpansion.find((c) => c.direction === 'reverse')!;
+		expect(reverse.reps).toBe(0);
+		expect(reverse.state).toBe('new');
+	});
+});

@@ -308,6 +308,30 @@ export class DatabaseManager {
 		return ids;
 	}
 
+	public getBlockFileOwnershipMap(): Map<string, string> {
+		if (!this.db) return new Map();
+		const map = new Map<string, string>();
+		const stmt = this.db.prepare('SELECT id, file_path FROM blocks');
+		while (stmt.step()) {
+			const row = stmt.getAsObject();
+			map.set(row.id as string, row.file_path as string);
+		}
+		stmt.free();
+		return map;
+	}
+
+	public getBlockIdsExcludingFile(filePath: string): Set<string> {
+		if (!this.db) return new Set();
+		const ids = new Set<string>();
+		const stmt = this.db.prepare('SELECT id FROM blocks WHERE file_path != ?');
+		stmt.bind([filePath]);
+		while (stmt.step()) {
+			ids.add(stmt.getAsObject().id as string);
+		}
+		stmt.free();
+		return ids;
+	}
+
 	public getDueCards(filterTags?: string[], rolloverHour = 4): ReviewItem[] {
 		if (!this.db) return [];
 		const cutoff = getStudyDayCutoff(rolloverHour);

@@ -17,9 +17,11 @@ The Flashcards plugin enables spaced repetition learning directly within Obsidia
   - Obsidian UI views built in Svelte 5 with native Obsidian CSS design tokens.
   - In-memory SQLite runtime via `sql.js` for instant queries.
   - Obsidian vault API bridge (`cachedRead`, `modify`, `writeBinary`).
-- **Two-Tier Relational Model (`blocks` → `cards`)**:
-  - **`blocks` table (Source of Truth)**: Represents the raw extracted markdown blocks from Obsidian notes, keyed directly by their 6-character lowercase base-36 block ID.
-  - **`cards` table (Scheduling & Review Entities)**: Represents the actual study items generated from blocks. A standard block produces 1 card (`direction = 'forward'`), a bidirectional block (`reversible = 1`) produces 2 cards (`'forward'` and `'reverse'`), and a cloze block produces 1 card (`direction = NULL`). Uses SQLite's internal autoincrement ID and links back to `block_id`.
+- **Projection Model (`Markdown` → `blocks` → `cards` → `reviews`)**:
+  - **Markdown (Canonical Source of Truth)**: Cards authored in notes with 6-character lowercase base-36 block IDs (`^k9x2mp`).
+  - **`blocks` table (Parsed Projection / Block Index)**: In-memory index of parsed markdown blocks, keyed by `id`.
+  - **`cards` table (Scheduling Projection)**: Materialized FSRS study items (forward, reverse, cloze), linked to `block_id`.
+  - **`reviews` table (Immutable Event Log)**: Append-only ledger of historical review grades and timestamp deltas.
 - **In-Memory Review Cache (Hashcards Model)**:
   - Active review sessions modify an in-memory session cache. Undoing is an instant memory pop (0 SQL queries), and quitting mid-session discards changes cleanly.
   - Database writes are batched and committed in a single atomic transaction at the end of the session.
@@ -500,5 +502,5 @@ plugins/flashcards/
 │       ├── tagStats.ts           # Tag deck statistics aggregation
 │       └── todoTag.ts            # #todo/card tag toggling in Markdown
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (51 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (57 tests)
 ```

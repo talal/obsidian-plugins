@@ -59,7 +59,7 @@ export class NoteScanner {
 
 	public async syncFile(
 		file: TFile,
-		existingBlockIds?: Set<string>,
+		externalCollisionIds?: Set<string>,
 		skipPersist = false,
 	): Promise<ParsedBlock[]> {
 		const fileCache = this.app.metadataCache.getFileCache(file);
@@ -81,10 +81,10 @@ export class NoteScanner {
 		const content = await this.app.vault.cachedRead(file);
 		const inheritedTags = getInheritedTags(fileCache);
 		const sectionHints = getSectionHints(fileCache);
-		const existingIds = existingBlockIds ?? this.db.getAllBlockIds();
+		const externalIds = externalCollisionIds ?? this.db.getBlockIdsExcludingFile(file.path);
 
-		// Single-pass sync via Rust WASM
-		const result = WasmBridge.syncDocument(content, existingIds, inheritedTags, sectionHints);
+		// Single-pass sync via Rust WASM (validates block IDs against external collision set)
+		const result = WasmBridge.syncDocument(content, externalIds, inheritedTags, sectionHints);
 
 		// If missing IDs were generated or duplicate IDs replaced, write updated Markdown once
 		if (result.updated_content !== null && result.updated_content !== content) {
@@ -93,13 +93,6 @@ export class NoteScanner {
 
 		// Reconcile SQLite database
 		this.db.syncNoteBlocks(file.path, result.blocks);
-
-		// Track generated/discovered IDs for subsequent files in a batch scan
-		if (existingBlockIds) {
-			for (const block of result.blocks) {
-				existingBlockIds.add(block.id);
-			}
-		}
 
 		if (!skipPersist) {
 			await this.db.persist();
@@ -114,13 +107,31 @@ export class NoteScanner {
 	}> {
 		const files = filesToScan ?? this.app.vault.getMarkdownFiles();
 		const validPaths = new Set(files.map((f) => f.path));
-		const existingBlockIds = this.db.getAllBlockIds();
+		const ownershipMap = this.db.getBlockFileOwnershipMap();
 		let totalBlocks = 0;
 
 		for (const file of files) {
 			try {
-				const blocks = await this.syncFile(file, existingBlockIds, true);
+				// External collision set: all IDs claimed by notes other than the current file
+				const externalIds = new Set<string>();
+				for (const [id, ownerPath] of ownershipMap.entries()) {
+					if (ownerPath !== file.path) {
+						externalIds.add(id);
+					}
+				}
+
+				const blocks = await this.syncFile(file, externalIds, true);
 				totalBlocks += blocks.length;
+
+				// Update ownership map: remove old blocks for this file, register new ones
+				for (const [id, ownerPath] of Array.from(ownershipMap.entries())) {
+					if (ownerPath === file.path) {
+						ownershipMap.delete(id);
+					}
+				}
+				for (const block of blocks) {
+					ownershipMap.set(block.id, file.path);
+				}
 			} catch (error) {
 				console.error(`[Flashcards] Failed to sync note "${file.path}":`, error);
 			}
