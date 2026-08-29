@@ -87,9 +87,11 @@ impl MarkdownContext {
             }
         }
 
-        // Keep this explicit guard for malformed frontmatter that the Markdown
-        // parser cannot classify as a metadata block.
+        // Keep explicit guards for multiline syntax that pulldown-cmark
+        // does not natively represent as structured block tags:
         context.mark_frontmatter(content);
+        context.mark_display_math(content);
+        context.mark_html_comments(content);
         context
     }
 
@@ -159,6 +161,44 @@ impl MarkdownContext {
             self.ignored_lines[index] = true;
             if index > 0 && line.trim() == marker {
                 break;
+            }
+        }
+    }
+
+    fn mark_display_math(&mut self, content: &str) {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut in_math_block = false;
+        let mut block_start = 0;
+
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("$$") {
+                if in_math_block {
+                    self.mark_line_range(block_start, index);
+                    in_math_block = false;
+                } else if rest.is_empty() || !rest.contains("$$") {
+                    in_math_block = true;
+                    block_start = index;
+                }
+            }
+        }
+    }
+
+    fn mark_html_comments(&mut self, content: &str) {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut in_comment = false;
+        let mut comment_start = 0;
+
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !in_comment {
+                if trimmed.starts_with("<!--") && !trimmed.contains("-->") {
+                    in_comment = true;
+                    comment_start = index;
+                }
+            } else if trimmed.contains("-->") {
+                self.mark_line_range(comment_start, index);
+                in_comment = false;
             }
         }
     }

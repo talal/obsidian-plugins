@@ -129,11 +129,17 @@ pub struct FsrsParams {
 
 impl FsrsParams {
     pub fn retention(&self) -> f64 {
-        self.request_retention.unwrap_or(0.90)
+        self.request_retention
+            .filter(|r| r.is_finite() && *r > 0.0 && *r < 1.0)
+            .unwrap_or(0.90)
+            .clamp(0.70, 0.99)
     }
 
     pub fn max_interval(&self) -> f64 {
-        self.maximum_interval.unwrap_or(36500.0)
+        self.maximum_interval
+            .filter(|ivl| ivl.is_finite() && *ivl >= 1.0)
+            .unwrap_or(36500.0)
+            .clamp(1.0, 36500.0)
     }
 
     pub fn is_fuzz_enabled(&self) -> bool {

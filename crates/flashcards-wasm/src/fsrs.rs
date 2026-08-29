@@ -31,12 +31,21 @@ impl FsrsEngine {
             0
         };
 
-        let memory_state = if current.state == State::New || current.stability <= 0.0 {
+        let memory_state = if current.state == State::New
+            || !current.stability.is_finite()
+            || current.stability <= 0.0
+        {
             None
         } else {
+            let stability = (current.stability as f32).clamp(0.01, 36500.0);
+            let difficulty = if current.difficulty.is_finite() {
+                (current.difficulty as f32).clamp(1.0, 10.0)
+            } else {
+                5.0
+            };
             Some(MemoryState {
-                stability: current.stability as f32,
-                difficulty: current.difficulty as f32,
+                stability,
+                difficulty,
             })
         };
 
@@ -158,11 +167,16 @@ impl FsrsEngine {
             }
 
             let mut interval_days = if let Some(duration_ms) = step_duration_ms {
-                duration_ms as f64 / DAY_MS
+                (duration_ms as f64 / DAY_MS).max(0.0)
             } else if rating == Rating::Again {
                 0.0
             } else {
-                (item_state.interval as f64).max(1.0).min(max_ivl)
+                let ivl = item_state.interval as f64;
+                if ivl.is_finite() {
+                    ivl.clamp(1.0, max_ivl)
+                } else {
+                    1.0
+                }
             };
 
             // Apply FSRS interval fuzzing for multi-day intervals if enabled
@@ -171,9 +185,13 @@ impl FsrsEngine {
                 && self.params.is_fuzz_enabled()
                 && interval_days >= 2.5
             {
-                let seed = ((current.stability * 1000.0) as u64)
-                    ^ ((current.reps as u64) << 16)
-                    ^ (now_ms as u64);
+                let seed = if current.stability.is_finite() {
+                    ((current.stability * 1000.0) as u64)
+                        ^ ((current.reps as u64) << 16)
+                        ^ (now_ms as u64)
+                } else {
+                    (current.reps as u64) ^ (now_ms as u64)
+                };
                 let factor = (((seed % 200) as f64) - 100.0) / 2000.0; // [-0.05, +0.05]
                 let fuzzed = (interval_days * (1.0 + factor)).round();
                 interval_days = fuzzed.clamp(1.0, max_ivl);
@@ -191,11 +209,22 @@ impl FsrsEngine {
                 now_ms.saturating_add((interval_days * DAY_MS) as i64)
             };
 
+            let next_stability = if item_state.memory.stability.is_finite() {
+                (item_state.memory.stability as f64).max(0.01)
+            } else {
+                0.1
+            };
+            let next_difficulty = if item_state.memory.difficulty.is_finite() {
+                (item_state.memory.difficulty as f64).clamp(1.0, 10.0)
+            } else {
+                5.0
+            };
+
             candidates.push(SchedulingCardCandidate {
                 rating,
                 card: SchedulingCard {
-                    stability: item_state.memory.stability as f64,
-                    difficulty: item_state.memory.difficulty as f64,
+                    stability: next_stability,
+                    difficulty: next_difficulty,
                     reps: current.reps.saturating_add(1),
                     lapses,
                     learning_step,

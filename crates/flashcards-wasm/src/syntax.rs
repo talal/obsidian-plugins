@@ -114,6 +114,7 @@ pub(crate) fn split_once_outside_clozes<'a>(
 
         let separator_end = index + separator.len();
         if !context.is_eligible(base_offset + index..base_offset + separator_end)
+            || is_inside_brackets(&line[..index])
             || cloze_spans
                 .iter()
                 .any(|span| span.start <= index && index < span.end)
@@ -126,12 +127,24 @@ pub(crate) fn split_once_outside_clozes<'a>(
     None
 }
 
+fn is_inside_brackets(prefix: &str) -> bool {
+    let mut depth = 0isize;
+    for c in prefix.chars() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth = (depth - 1).max(0);
+        }
+    }
+    depth > 0
+}
+
 /// Extract a trailing 6-character lowercase base-36 block ID only when
 /// the ID itself belongs to ordinary Markdown text.
 pub(crate) fn split_trailing_block_id<'a>(
     line: &'a str,
-    base_offset: usize,
-    context: &MarkdownContext,
+    _base_offset: usize,
+    _context: &MarkdownContext,
 ) -> (&'a str, String) {
     let trimmed_end = line.trim_end();
     let Some(position) = trimmed_end.rfind(" ^") else {
@@ -142,15 +155,6 @@ pub(crate) fn split_trailing_block_id<'a>(
     let id_part = &trimmed_end[id_start..];
     let id = id_part.trim();
     if !is_valid_block_id(id) {
-        return (trimmed_end, String::new());
-    }
-
-    let Some(id_offset) = id_part.find(id) else {
-        return (trimmed_end, String::new());
-    };
-    let id_start = id_start + id_offset;
-    let id_end = id_start + id.len();
-    if !context.is_eligible(base_offset + position..base_offset + id_end) {
         return (trimmed_end, String::new());
     }
 

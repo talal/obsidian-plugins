@@ -450,3 +450,96 @@ List three states of matter:
         assert_eq!(blocks[0].front, "Real question");
     }
 
+    #[test]
+    fn test_fuzz_reproduce_crash() {
+        let bytes: &[u8] = &[
+            73, 110, 32, 58, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+            17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+            17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+            17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 58, 58, 58, 32, 67, 104, 101, 99,
+            107, 32, 110, 97, 32, 32, 61, 61, 32, 74, 58, 32, 67, 104, 96, 32, 101, 99, 107, 32,
+            101, 113, 117, 99, 46, 10, 96, 118, 96, 109, 61, 61, 91, 97, 10, 96, 118, 96, 109,
+            61, 61, 91, 97, 114,
+        ];
+        let input = std::str::from_utf8(bytes).unwrap();
+        let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_protected_syntax() {
+        let doc = r#"---
+title: Fake Front :: Fake Back
+summary: Fake Cloze {{answer}}
+---
+
+Real Question 1 :: Real Answer 1
+
+Here is some code: `Fake Q :: Fake A ` and cloze `{{fake_cloze}}`.
+
+```rust
+// Code comment with :: separator: e}
+%% card-start id=fake01 %%
+Fake Block Q
+...
+Fake Block A
+%% card-end %%
+let x = std::sync::Arc::new(5);
+```
+
+%% card-start %%
+Real Block Question
+...
+Real Block Answer
+%% card-end %%
+
+Formula: $f(x) :: y + ez$ and $x = {{cloze_math}}$
+
+$$
+E = mc^2 :: c^2 + e}
+$$
+
+| Column 1 | Column 2 |
+| --- | --- |
+| Cell :: Sep | Detail {{cloze}} |
+
+> Quoted line :: not a card 
+> Another quote with {{fake_cloze}}
+
+<!-- Hidden comment :: fake card  -->
+
+Real Cloze with {{valid cloze}} here.
+"#;
+        let mut options = pulldown_cmark::Options::empty();
+        options.insert(pulldown_cmark::Options::ENABLE_TABLES);
+        options.insert(pulldown_cmark::Options::ENABLE_GFM);
+        options.insert(pulldown_cmark::Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+        options.insert(pulldown_cmark::Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS);
+        options.insert(pulldown_cmark::Options::ENABLE_MATH);
+        options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+        options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+        options.insert(pulldown_cmark::Options::ENABLE_HEADING_ATTRIBUTES);
+        options.insert(pulldown_cmark::Options::ENABLE_WIKILINKS);
+        let blocks = parse_markdown_blocks(doc, &[]);
+        assert_eq!(blocks.len(), 3);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_rescan_mismatch() {
+        let bytes: &[u8] = &[
+            45, 58, 58, 58, 10, 10, 91, 61, 45, 58, 61, 45, 58, 58, 58, 58, 10, 10, 91, 52, 0,
+            61, 45, 58, 93, 58, 58, 58, 58, 10, 10, 91, 58, 58, 58, 93, 58, 32,
+        ];
+        let input = std::str::from_utf8(bytes).unwrap();
+        let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
+        println!("SYNC1 blocks: {:?}", sync1.blocks);
+        println!("SYNC1 updated:\n{}", synced_text);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        println!("SYNC2 blocks: {:?}", sync2.blocks);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+

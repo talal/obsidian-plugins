@@ -2366,3 +2366,105 @@ describe('Identity Reconciliation & Note Synchronization Invariants', () => {
 		expect(reverse.state).toBe('new');
 	});
 });
+
+describe('Dual-Slot Snapshot Binary Fuzzing & Corruption Resilience', () => {
+	it('fuzzes unpackAndVerifySnapshot with truncated and arbitrary random byte sequences', async () => {
+		// 1. Truncated inputs (< 48 bytes header)
+		for (let len = 0; len < 48; len++) {
+			const truncated = new Uint8Array(len);
+			for (let i = 0; i < len; i++) truncated[i] = (i * 37) & 0xff;
+			const result = await unpackAndVerifySnapshot(truncated);
+			expect(result).toBeNull();
+		}
+
+		// 2. Random fuzz byte sequences of varying lengths (48 to 1024 bytes)
+		for (let trial = 0; trial < 100; trial++) {
+			const len = 48 + ((trial * 13) % 500);
+			const randomBytes = new Uint8Array(len);
+			for (let i = 0; i < len; i++) {
+				randomBytes[i] = ((trial + 1) * 31 + i * 17) & 0xff;
+			}
+			const result = await unpackAndVerifySnapshot(randomBytes);
+			// Unless accidentally matching HSHC magic, version 1, exact length, and exact sha256, it must return null
+			expect(result).toBeNull();
+		}
+	});
+
+	it('fuzzes packSnapshot + unpackAndVerifySnapshot round-trip with bit flips and corruption', async () => {
+		const headerPrefix = new TextEncoder().encode('SQLite format 3\0');
+
+		for (let trial = 0; trial < 50; trial++) {
+			const payloadLen = 16 + ((trial * 41) % 256);
+			const payload = new Uint8Array(payloadLen);
+			payload.set(headerPrefix, 0);
+			for (let i = 16; i < payloadLen; i++) payload[i] = (i ^ trial) & 0xff;
+
+			const sha256 = await computeSha256(payload);
+			const generation = BigInt(trial * 1000 + 1);
+			const packed = packSnapshot(payload, generation, sha256);
+
+			// Valid round-trip
+			const unpacked = await unpackAndVerifySnapshot(packed);
+			expect(unpacked).not.toBeNull();
+			expect(unpacked!.generation).toBe(generation);
+			expect(unpacked!.payload).toEqual(payload);
+
+			// Corrupt random byte in payload
+			const corruptedPayload = new Uint8Array(packed);
+			const corruptIdx = 48 + (trial % payloadLen);
+			corruptedPayload[corruptIdx] = (corruptedPayload[corruptIdx] ?? 0) ^ 0xff;
+			const corruptResult = await unpackAndVerifySnapshot(corruptedPayload);
+			expect(corruptResult).toBeNull();
+
+			// Corrupt magic byte in header
+			const corruptedHeader = new Uint8Array(packed);
+			const headerIdx = trial % 4;
+			corruptedHeader[headerIdx] = (corruptedHeader[headerIdx] ?? 0) ^ 0x01;
+			const headerResult = await unpackAndVerifySnapshot(corruptedHeader);
+			expect(headerResult).toBeNull();
+		}
+	});
+});
+
+describe('Todo Tag (#todo/card) Property Fuzzing & Unicode Invariants', () => {
+	it('fuzzes toggling on arbitrary markdown and maintains idempotency and block ID placement', () => {
+		const sampleBlockIds = ['abc123', '9x2k0p', 'zzz999', '000000'];
+		const sampleTexts = [
+			'Simple question :: Simple answer',
+			'What is the capital of Japan? ::: Tokyo',
+			'The speed of light is {{299,792,458 m/s}} in vacuum.',
+			'پانی ::: Water #ذخیرہ',
+			'Multiple clozes {{one}} and {{two}} in sentence.',
+			'Question with `code::here` :: Answer with $x::y$',
+			'Question with existing tags #vocab #important :: Answer',
+		];
+
+		for (const text of sampleTexts) {
+			for (const blockId of sampleBlockIds) {
+				const inlineDoc = `${text} ^${blockId}\n`;
+
+				// Toggle ON
+				const tagged = toggleCardTodoInMarkdown(inlineDoc, blockId, 'inline');
+				expect(tagged).toContain('#todo/card');
+				expect(tagged.trimEnd().endsWith(`^${blockId}`)).toBe(true);
+
+				// Toggle OFF
+				const untagged = toggleCardTodoInMarkdown(tagged, blockId, 'inline');
+				expect(untagged).not.toContain('#todo/card');
+				expect(untagged.trimEnd().endsWith(`^${blockId}`)).toBe(true);
+
+				// Block card toggle ON and OFF
+				const blockDoc = `%% card-start id=${blockId} %%\n${text}\n...\nAnswer content\n%% card-end %%\n`;
+				const taggedBlock = toggleCardTodoInMarkdown(blockDoc, blockId, 'block');
+				expect(taggedBlock).toContain('#todo/card');
+				expect(taggedBlock).toContain(`%% card-start id=${blockId}`);
+				expect(taggedBlock).toContain('%% card-end %%');
+
+				const untaggedBlock = toggleCardTodoInMarkdown(taggedBlock, blockId, 'block');
+				expect(untaggedBlock).not.toContain('#todo/card');
+				expect(untaggedBlock).toContain(`%% card-start id=${blockId}`);
+				expect(untaggedBlock).toContain('%% card-end %%');
+			}
+		}
+	});
+});

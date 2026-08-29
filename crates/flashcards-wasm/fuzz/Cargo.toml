@@ -20,4 +20,25 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "protected_syntax"
+path = "fuzz_targets/protected_syntax.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fsrs_schedule"
+path = "fuzz_targets/fsrs_schedule.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fsrs_optimize"
+path = "fuzz_targets/fsrs_optimize.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

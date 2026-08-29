@@ -30,6 +30,9 @@ The Flashcards plugin enables spaced repetition learning directly within Obsidia
   - Engineered for mobile and Syncthing realities where atomic POSIX `rename` or `fsync` are not guaranteed.
 - **Native Markdown Rendering**:
   - Review cards render in Svelte 5 via Obsidian's official `MarkdownRenderer`, preserving LaTeX math, wikilinks, code blocks, callouts, and vault image attachments.
+- **Strictly Manual / On-Demand Scanning**:
+  - No parsing, document scanning, or database synchronization is ever attached to `vault.on('modify')`, `vault.on('create')`, or editor keystroke events.
+  - Scanning is triggered strictly via explicit user commands (**`Scan current note`** and **`Scan entire vault`**) to guarantee zero editor interference, zero cursor jumping, and zero background disk/battery drain while writing notes.
 
 ---
 
