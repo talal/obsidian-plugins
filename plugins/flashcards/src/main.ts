@@ -18,6 +18,7 @@ export default class FlashcardsPlugin extends Plugin {
 	public db!: DatabaseManager;
 	public scanner!: NoteScanner;
 	public settings!: FlashcardsPluginSettings;
+	public activeReviewModal: ReviewModal | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -61,6 +62,19 @@ export default class FlashcardsPlugin extends Plugin {
 				}
 			}),
 		);
+
+		// 4. Register Lifecycle Checkpointing Events
+		this.registerDomEvent(document, 'visibilitychange', () => {
+			if (document.visibilityState === 'hidden' && this.activeReviewModal) {
+				void this.activeReviewModal.flushSessionData();
+			}
+		});
+
+		this.registerDomEvent(window, 'beforeunload', () => {
+			if (this.activeReviewModal) {
+				void this.activeReviewModal.flushSessionData();
+			}
+		});
 
 		// 4. Register Commands
 
@@ -275,6 +289,9 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	onunload() {
+		if (this.activeReviewModal) {
+			void this.activeReviewModal.flushSessionData();
+		}
 		if (this.db) {
 			void this.db.persist();
 		}

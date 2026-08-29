@@ -2718,4 +2718,369 @@ describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
 		const candidateSiblingGood = infoSibling.next_states.find((c) => c.rating === 'good')!;
 		expect(candidateSiblingGood.interval_days).toBeGreaterThanOrEqual(1.0);
 	});
+
+	it('supports incremental session checkpointing without duplicating session rows', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const now = Date.now();
+
+		db.syncNoteBlocks('Notes/Test.md', [
+			{
+				id: 'blk01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q1',
+				back: 'A1',
+				tags: [],
+				line_start: 1,
+				line_end: 1,
+			},
+			{
+				id: 'blk02',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q2',
+				back: 'A2',
+				tags: [],
+				line_start: 2,
+				line_end: 2,
+			},
+		]);
+
+		const cards = db.getAllCards();
+		const card1 = cards[0]!;
+		const card2 = cards[1]!;
+
+		// Checkpoint 1: User reviewed card 1
+		const session1 = {
+			started_at: now,
+			ended_at: now + 5000,
+			card_count: 1,
+			forgot_count: 0,
+			remembered_count: 1,
+		};
+		const reviews1 = [
+			{
+				card_id: card1.cardId,
+				rating: 3,
+				state: 2,
+				due_at: now + 86400000,
+				stability: 3.0,
+				difficulty: 5.0,
+				reviewed_at: now + 5000,
+			},
+		];
+		const cardUpdates1 = [
+			{
+				id: card1.cardId,
+				state: 2,
+				due_at: now + 86400000,
+				stability: 3.0,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 0,
+				last_review: now + 5000,
+				learning_step: 0,
+				relearning_step: 0,
+			},
+		];
+
+		const sessionId = await db.commitSession(session1, reviews1, cardUpdates1);
+		expect(sessionId).toBeGreaterThan(0);
+
+		// Checkpoint 2: User reviewed card 2 (app backgrounded or modal closed)
+		const session2 = {
+			started_at: now,
+			ended_at: now + 15000,
+			card_count: 2,
+			forgot_count: 0,
+			remembered_count: 2,
+		};
+		const reviews2 = [
+			...reviews1,
+			{
+				card_id: card2.cardId,
+				rating: 3,
+				state: 2,
+				due_at: now + 86400000,
+				stability: 3.0,
+				difficulty: 5.0,
+				reviewed_at: now + 15000,
+			},
+		];
+		const cardUpdates2 = [
+			...cardUpdates1,
+			{
+				id: card2.cardId,
+				state: 2,
+				due_at: now + 86400000,
+				stability: 3.0,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 0,
+				last_review: now + 15000,
+				learning_step: 0,
+				relearning_step: 0,
+			},
+		];
+
+		const updatedSessionId = await db.commitSession(session2, reviews2, cardUpdates2, sessionId);
+		expect(updatedSessionId).toBe(sessionId);
+
+		// Verify database records
+		const sessionStmt = rawDb.prepare('SELECT COUNT(*) as cnt, card_count FROM sessions');
+		sessionStmt.step();
+		const sessionRow = sessionStmt.getAsObject();
+		expect(sessionRow.cnt).toBe(1); // Still exactly 1 session
+		expect(sessionRow.card_count).toBe(2);
+		sessionStmt.free();
+
+		const reviewStmt = rawDb.prepare('SELECT COUNT(*) as cnt FROM reviews WHERE session_id = ?');
+		reviewStmt.bind([sessionId]);
+		reviewStmt.step();
+		expect(reviewStmt.getAsObject().cnt).toBe(2);
+		reviewStmt.free();
+	});
+
+	it('correctly handles interleaved undo across multiple session checkpoints', async () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+		const now = Date.now();
+
+		db.syncNoteBlocks('Notes/TestUndo.md', [
+			{
+				id: 'u01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q1',
+				back: 'A1',
+				tags: [],
+				line_start: 1,
+				line_end: 1,
+			},
+			{
+				id: 'u02',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q2',
+				back: 'A2',
+				tags: [],
+				line_start: 2,
+				line_end: 2,
+			},
+			{
+				id: 'u03',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Q3',
+				back: 'A3',
+				tags: [],
+				line_start: 3,
+				line_end: 3,
+			},
+		]);
+
+		const [c1, c2, c3] = db.getAllCards();
+		const cache = new ReviewSessionCache(now);
+
+		// 1. User reviews Card 1 (Good) and Card 2 (Forgot)
+		cache.recordReview(
+			c1!,
+			{ ...c1!, state: 'new' } as any,
+			'remembered',
+			{
+				stability: 3.0,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 0,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'review',
+				due: now + 86400000,
+				last_review: now,
+			},
+			2,
+			now,
+		);
+		cache.recordReview(
+			c2!,
+			{ ...c2!, state: 'new' } as any,
+			'forgot',
+			{
+				stability: 0.1,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 1,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'learning',
+				due: now + 600000,
+				last_review: now,
+			},
+			1,
+			now + 1000,
+		);
+
+		// 2. Checkpoint #1 (App backgrounded)
+		const data1 = cache.getPendingData();
+		const sessionId = await db.commitSession(data1.session, data1.reviews, data1.cardUpdates);
+		expect(sessionId).toBeGreaterThan(0);
+
+		// In DB: 2 reviews recorded, 1 forgot, 1 remembered
+		const statsMid = db.getDashboardStats(4);
+		expect(statsMid.studiedToday).toBe(2);
+
+		// 3. User returns to app and hits Undo on Card 2 (undoing the Forgot review)
+		const undoRes = cache.undo();
+		expect(undoRes).not.toBeNull();
+		expect(undoRes!.item.cardId).toBe(c2!.cardId);
+
+		// User now reviews Card 3 (Remembered)
+		cache.recordReview(
+			c3!,
+			{ ...c3!, state: 'new' } as any,
+			'remembered',
+			{
+				stability: 3.0,
+				difficulty: 5.0,
+				reps: 1,
+				lapses: 0,
+				learning_step: 0,
+				relearning_step: 0,
+				state: 'review',
+				due: now + 86400000,
+				last_review: now,
+			},
+			2,
+			now + 5000,
+		);
+
+		// 4. Checkpoint #2 (Modal finished or app closed)
+		const data2 = cache.getPendingData();
+		const updatedSessionId = await db.commitSession(
+			data2.session,
+			data2.reviews,
+			data2.cardUpdates,
+			sessionId,
+		);
+		expect(updatedSessionId).toBe(sessionId);
+
+		// 5. Verify final database state
+		const sessionStmt = rawDb.prepare(
+			'SELECT card_count, forgot_count, remembered_count FROM sessions WHERE id = ?',
+		);
+		sessionStmt.bind([sessionId]);
+		sessionStmt.step();
+		const sessionRow = sessionStmt.getAsObject();
+		expect(sessionRow.card_count).toBe(2); // 2 total cards (C1 and C3)
+		expect(sessionRow.forgot_count).toBe(0); // 0 forgot (undone)
+		expect(sessionRow.remembered_count).toBe(2); // 2 remembered
+		sessionStmt.free();
+
+		// Card 2's review log must be removed from the session
+		const reviewsStmt = rawDb.prepare(
+			'SELECT card_id, rating FROM reviews WHERE session_id = ? ORDER BY reviewed_at ASC',
+		);
+		reviewsStmt.bind([sessionId]);
+		const dbReviews: Array<{ card_id: number; rating: number }> = [];
+		while (reviewsStmt.step()) {
+			dbReviews.push(reviewsStmt.getAsObject() as any);
+		}
+		reviewsStmt.free();
+		expect(dbReviews).toHaveLength(2);
+		expect(dbReviews.map((r) => r.card_id)).toEqual([c1!.cardId, c3!.cardId]);
+	});
+
+	it('preserves checkpointed session across simulated app crash and cold restart', async () => {
+		const mockStorage: Record<string, Uint8Array> = {};
+		const mockApp = {
+			vault: {
+				adapter: {
+					exists: async (p: string) => p in mockStorage,
+					readBinary: async (p: string) => {
+						const data = mockStorage[p];
+						if (!data) throw new Error('File not found');
+						return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+					},
+					writeBinary: async (p: string, data: ArrayBuffer) => {
+						mockStorage[p] = new Uint8Array(data);
+					},
+				},
+			},
+		} as any;
+
+		// 1. Initial boot: Create database, add card, and study it
+		const dbManager1 = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
+		await dbManager1.init();
+
+		const now = Date.now();
+		dbManager1.syncNoteBlocks('Notes/ColdStart.md', [
+			{
+				id: 'cs01',
+				block_type: 'inline',
+				reversible: false,
+				front: 'Crash test?',
+				back: 'Passed',
+				tags: ['test'],
+				line_start: 1,
+				line_end: 1,
+			},
+		]);
+
+		const card = dbManager1.getAllCards()[0]!;
+		await dbManager1.commitSession(
+			{
+				started_at: now,
+				ended_at: now + 2000,
+				card_count: 1,
+				forgot_count: 0,
+				remembered_count: 1,
+			},
+			[
+				{
+					card_id: card.cardId,
+					rating: 3,
+					state: 2,
+					due_at: now + 86400000 * 3,
+					stability: 3.0,
+					difficulty: 5.0,
+					reviewed_at: now + 2000,
+				},
+			],
+			[
+				{
+					id: card.cardId,
+					state: 2,
+					due_at: now + 86400000 * 3,
+					stability: 3.0,
+					difficulty: 5.0,
+					reps: 1,
+					lapses: 0,
+					last_review: now + 2000,
+					learning_step: 0,
+					relearning_step: 0,
+				},
+			],
+		);
+
+		// Verify snapshot files exist on mock disk
+		expect(
+			'.obsidian/plugins/flashcards/cards.a.db' in mockStorage ||
+				'.obsidian/plugins/flashcards/cards.b.db' in mockStorage,
+		).toBe(true);
+
+		// 2. Simulate Crash & Cold Restart: instantiate brand new DatabaseManager
+		const dbManager2 = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
+		await dbManager2.init();
+
+		const recoveredCards = dbManager2.getAllCards();
+		expect(recoveredCards).toHaveLength(1);
+		expect(recoveredCards[0]!.state).toBe('review');
+		expect(recoveredCards[0]!.reps).toBe(1);
+		expect(recoveredCards[0]!.dueAt).toBe(now + 86400000 * 3);
+
+		const stats = dbManager2.getDashboardStats(4);
+		expect(stats.studiedToday).toBe(1);
+		expect(stats.dailyRetention).toBe(100);
+	});
 });

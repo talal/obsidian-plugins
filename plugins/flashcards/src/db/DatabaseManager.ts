@@ -638,27 +638,44 @@ export class DatabaseManager {
 		session: SessionRecord,
 		reviews: ReviewRecord[],
 		cardUpdates: CardPerformanceUpdate[],
+		existingSessionId?: number,
 	): Promise<number> {
 		if (!this.db) return 0;
 		this.db.run('BEGIN TRANSACTION');
-		let sessionId = 0;
+		let sessionId = existingSessionId ?? 0;
 		try {
-			this.db.run(
-				`INSERT INTO sessions (started_at, ended_at, card_count, forgot_count, remembered_count)
-				 VALUES (?, ?, ?, ?, ?)`,
-				[
-					session.started_at,
-					session.ended_at,
-					session.card_count,
-					session.forgot_count,
-					session.remembered_count,
-				],
-			);
+			if (sessionId > 0) {
+				this.db.run(
+					`UPDATE sessions
+					 SET ended_at = ?, card_count = ?, forgot_count = ?, remembered_count = ?
+					 WHERE id = ?`,
+					[
+						session.ended_at,
+						session.card_count,
+						session.forgot_count,
+						session.remembered_count,
+						sessionId,
+					],
+				);
+				this.db.run('DELETE FROM reviews WHERE session_id = ?', [sessionId]);
+			} else {
+				this.db.run(
+					`INSERT INTO sessions (started_at, ended_at, card_count, forgot_count, remembered_count)
+					 VALUES (?, ?, ?, ?, ?)`,
+					[
+						session.started_at,
+						session.ended_at,
+						session.card_count,
+						session.forgot_count,
+						session.remembered_count,
+					],
+				);
 
-			const idStmt = this.db.prepare('SELECT last_insert_rowid() as id');
-			idStmt.step();
-			sessionId = idStmt.getAsObject().id as number;
-			idStmt.free();
+				const idStmt = this.db.prepare('SELECT last_insert_rowid() as id');
+				idStmt.step();
+				sessionId = idStmt.getAsObject().id as number;
+				idStmt.free();
+			}
 
 			for (const r of reviews) {
 				this.db.run(

@@ -294,14 +294,16 @@ flowchart TD
         CheckNext -->|Yes| LoopActive
     end
 
-    CheckNext -->|No / Finished| Commit[Session Finished or Modal Closed]
-    LoopActive -->|User closes modal| Commit
+    subgraph LifecycleTriggers["Lifecycle & Flush Triggers"]
+        CheckNext -->|No / Finished| Commit[Session Finished]
+        LoopActive -->|User closes modal| Commit
+        LoopActive -->|App backgrounded / visibilitychange| Commit
+        LoopActive -->|Window unload / beforeunload| Commit
+    end
 
-    Commit --> BatchSql["Execute Single SQLite Batch Transaction:<br/>1. INSERT INTO sessions<br/>2. INSERT INTO reviews<br/>3. UPDATE cards for all modified items"]
+    Commit --> BatchSql["Execute SQLite Transaction / Checkpoint:<br/>1. INSERT or UPDATE sessions<br/>2. INSERT INTO reviews<br/>3. UPDATE cards for all modified items"]
     BatchSql --> Snapshot[Trigger Dual-Slot Snapshot Save to Disk]
-    Snapshot --> Done([Session Complete])
-```
-
+    Snapshot --> Done([Persisted to Disk])
 ```
 
 ---
@@ -549,5 +551,5 @@ plugins/flashcards/
 │       ├── tagStats.ts           # Tag deck statistics aggregation
 │       └── todoTag.ts            # #todo/card tag toggling in Markdown
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (67 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (70 tests)
 ```

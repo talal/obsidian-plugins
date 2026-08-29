@@ -16,7 +16,8 @@ import ReviewModalComponent from './components/ReviewModal.svelte';
 export class ReviewModal extends Modal {
 	private component: ReturnType<typeof ReviewModalComponent> | undefined;
 	private cache: ReviewSessionCache;
-	private isCommitted = false;
+	private activeSessionId: number | null = null;
+	private hasUnsavedChanges = false;
 
 	constructor(
 		app: App,
@@ -29,6 +30,7 @@ export class ReviewModal extends Modal {
 	}
 
 	onOpen() {
+		this.plugin.activeReviewModal = this;
 		this.modalEl.addClass('fc-review-modal-window');
 		this.contentEl.empty();
 		this.contentEl.addClass('fc-modal-content-reset');
@@ -46,7 +48,7 @@ export class ReviewModal extends Modal {
 					this.handleCardUndo(item);
 				},
 				onFinishSession: async (studied: number, forgot: number, remembered: number) => {
-					await this.commitSessionData(studied, forgot, remembered);
+					await this.flushSessionData(studied, forgot, remembered);
 				},
 				onToggleTodo: async (item: ReviewItem) => {
 					await this.handleToggleTodo(item);
@@ -96,6 +98,7 @@ export class ReviewModal extends Modal {
 		const stateNum = this.plugin.db.unmapState(candidate.card.state);
 
 		this.cache.recordReview(item, previousCard, ratingStr, candidate.card, stateNum, now);
+		this.hasUnsavedChanges = true;
 
 		this.applySchedulingCard(item, candidate.card);
 	}
@@ -103,29 +106,37 @@ export class ReviewModal extends Modal {
 	private handleCardUndo(_item: ReviewItem): void {
 		const undoRes = this.cache.undo();
 		if (undoRes) {
+			this.hasUnsavedChanges = true;
 			this.applySchedulingCard(undoRes.item, undoRes.previousState);
 		}
 	}
 
-	private async commitSessionData(
-		studied: number,
-		forgot: number,
-		remembered: number,
+	public async flushSessionData(
+		studied?: number,
+		forgot?: number,
+		remembered?: number,
 	): Promise<void> {
-		if (this.isCommitted || this.cache.getReviewsCount() === 0) return;
-		this.isCommitted = true;
+		if (!this.hasUnsavedChanges || this.cache.getReviewsCount() === 0) return;
 
-		const { session, reviews, cardUpdates } = this.cache.getPendingData(
-			studied,
-			forgot,
-			remembered,
-		);
+		const stats = this.cache.getStats();
+		const s = studied ?? stats.studied;
+		const f = forgot ?? stats.forgot;
+		const r = remembered ?? stats.remembered;
+
+		const { session, reviews, cardUpdates } = this.cache.getPendingData(s, f, r);
 
 		try {
-			await this.plugin.db.commitSession(session, reviews, cardUpdates);
+			const sessionId = await this.plugin.db.commitSession(
+				session,
+				reviews,
+				cardUpdates,
+				this.activeSessionId ?? undefined,
+			);
+			this.activeSessionId = sessionId;
+			this.hasUnsavedChanges = false;
 			this.plugin.refreshDashboardIfOpen();
 		} catch (error) {
-			console.error('Failed to commit study session:', error);
+			console.error('Failed to flush study session checkpoint:', error);
 		}
 	}
 
@@ -172,9 +183,12 @@ export class ReviewModal extends Modal {
 	}
 
 	onClose() {
-		if (!this.isCommitted && this.cache.getReviewsCount() > 0) {
+		if (this.plugin.activeReviewModal === this) {
+			this.plugin.activeReviewModal = null;
+		}
+		if (this.hasUnsavedChanges && this.cache.getReviewsCount() > 0) {
 			const stats = this.cache.getStats();
-			void this.commitSessionData(stats.studied, stats.forgot, stats.remembered);
+			void this.flushSessionData(stats.studied, stats.forgot, stats.remembered);
 		}
 		if (this.component) {
 			void unmount(this.component);
