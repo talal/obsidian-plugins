@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS blocks (
   front         TEXT NOT NULL,                                         -- Raw question / front markdown (full sentence with {{cloze}} for cloze)
   back          TEXT NOT NULL,                                         -- Raw answer / back markdown (empty string '' for cloze cards)
   tags          TEXT NOT NULL,                                         -- Space-separated tags ('german vocab')
-  content_hash  TEXT NOT NULL,                                         -- FNV-1a 64-bit hex hash to detect text edits without resetting history
   updated_at    INTEGER NOT NULL,                                      -- Last modified timestamp in UTC epoch ms
   CHECK (block_type != 'cloze' OR reversible = 0)                      -- Cloze blocks must always have reversible = 0 (false)
 ) STRICT;

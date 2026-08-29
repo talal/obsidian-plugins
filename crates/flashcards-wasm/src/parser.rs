@@ -19,18 +19,6 @@ pub struct ObsidianSectionHint {
     pub line_end: usize,
 }
 
-/// Deterministic 64-bit FNV-1a hash formatted as hex
-pub fn compute_content_hash(text: &str) -> String {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
-    for byte in text.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{hash:016x}")
-}
-
 /// Extract inline `#tags` from a string
 pub fn extract_inline_tags(text: &str) -> Vec<String> {
     let mut tags = Vec::new();
@@ -180,7 +168,6 @@ fn parse_block_card(
         add_tags(&mut tags, extract_inline_tags(line));
     }
 
-    let content_hash = compute_content_hash(&format!("block:{reversible}:{front}:{back}"));
     Some((
         ParsedBlock {
             id: block_id,
@@ -189,7 +176,6 @@ fn parse_block_card(
             front,
             back,
             tags,
-            content_hash,
             line_start: start_line,
             line_end: end_line,
         },
@@ -214,7 +200,6 @@ fn make_inline_block(
 
     let mut tags = note_inherited_tags.to_vec();
     add_tags(&mut tags, extract_inline_tags(raw_line));
-    let content_hash = compute_content_hash(&format!("inline:{reversible}:{front}:{back}"));
     Some(ParsedBlock {
         id: block_id,
         block_type: CardBlockType::Inline,
@@ -222,7 +207,6 @@ fn make_inline_block(
         front: front.to_string(),
         back: back.to_string(),
         tags,
-        content_hash,
         line_start: line_number,
         line_end: line_number,
     })
@@ -315,7 +299,6 @@ pub fn parse_markdown_blocks_with_sections(
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
             let front = raw_line.trim().to_string();
-            let content_hash = compute_content_hash(&format!("cloze:{front}"));
             blocks.push(ParsedBlock {
                 id: block_id,
                 block_type: CardBlockType::Cloze,
@@ -323,7 +306,6 @@ pub fn parse_markdown_blocks_with_sections(
                 front,
                 back: String::new(),
                 tags,
-                content_hash,
                 line_start: line_number,
                 line_end: line_number,
             });
@@ -482,7 +464,6 @@ pub fn sync_document(
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
             let front = raw_line.trim().to_string();
-            let content_hash = compute_content_hash(&format!("cloze:{front}"));
 
             let id = if !raw_block_id.is_empty()
                 && syntax::is_valid_block_id(&raw_block_id)
@@ -509,7 +490,6 @@ pub fn sync_document(
                 front,
                 back: String::new(),
                 tags,
-                content_hash,
                 line_start: line_number,
                 line_end: line_number,
             });

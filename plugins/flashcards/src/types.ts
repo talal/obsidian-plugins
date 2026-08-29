@@ -12,7 +12,6 @@ export interface Block {
 	front: string;
 	back: string;
 	tags: string; // Space-separated string (e.g. 'german vocab')
-	content_hash: string;
 	updated_at: number; // UTC epoch ms
 }
 
@@ -111,7 +110,6 @@ export interface ParsedBlock {
 	front: string;
 	back: string;
 	tags: string[];
-	content_hash: string;
 	line_start: number;
 	line_end: number;
 }

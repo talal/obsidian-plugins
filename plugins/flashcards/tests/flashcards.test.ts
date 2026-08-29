@@ -407,7 +407,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'Mitochondria function?',
 				back: 'Powerhouse of the cell',
 				tags: ['biology', 'cells'],
-				content_hash: 'hash-001',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -418,7 +417,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'DNA',
 				back: 'Deoxyribonucleic acid',
 				tags: ['biology', 'genetics'],
-				content_hash: 'hash-002',
 				line_start: 3,
 				line_end: 7,
 			},
@@ -429,7 +427,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'The human body has {{206}} bones.',
 				back: '',
 				tags: ['anatomy'],
-				content_hash: 'hash-003',
 				line_start: 9,
 				line_end: 9,
 			},
@@ -463,8 +460,8 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 
 		// Insert cloze block
 		rawDb.run(`
-			INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, content_hash, updated_at)
-			VALUES ('cloze1', 'Note.md', 'cloze', 0, 'Question {{cloze}}', '', 'tags', 'hash', 1000);
+			INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, updated_at)
+			VALUES ('cloze1', 'Note.md', 'cloze', 0, 'Question {{cloze}}', '', 'tags', 1000);
 		`);
 
 		// Inserting cloze card with non-null direction MUST abort via trigger
@@ -495,7 +492,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'NaCl',
 				back: 'Sodium Chloride',
 				tags: ['chemistry'],
-				content_hash: 'hash-chem-1',
 				line_start: 1,
 				line_end: 5,
 			},
@@ -511,7 +507,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'NaCl',
 				back: 'Sodium Chloride',
 				tags: ['chemistry'],
-				content_hash: 'hash-chem-2',
 				line_start: 1,
 				line_end: 5,
 			},
@@ -533,7 +528,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'Year WW2 ended?',
 				back: '1945',
 				tags: ['history'],
-				content_hash: 'hash-hist-1',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -605,7 +599,6 @@ describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
 				front: 'Derivative of sin(x)?',
 				back: 'cos(x)',
 				tags: ['math'],
-				content_hash: 'hash-math-1',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -944,7 +937,6 @@ describe('DatabaseManager Extended Behaviors', () => {
 				front: 'Hund',
 				back: 'Dog',
 				tags: ['german', 'vocab'],
-				content_hash: 'h1',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -955,7 +947,6 @@ describe('DatabaseManager Extended Behaviors', () => {
 				front: 'Chien',
 				back: 'Dog',
 				tags: ['french', 'vocab'],
-				content_hash: 'h2',
 				line_start: 2,
 				line_end: 2,
 			},
@@ -982,7 +973,6 @@ describe('DatabaseManager Extended Behaviors', () => {
 				front: 'Q',
 				back: 'A',
 				tags: ['test'],
-				content_hash: 'h_streak',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1073,7 +1063,6 @@ describe('DatabaseManager Extended Behaviors', () => {
 				front: 'Active Front',
 				back: 'Active Back',
 				tags: ['active'],
-				content_hash: 'h_act',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1086,7 +1075,6 @@ describe('DatabaseManager Extended Behaviors', () => {
 				front: 'Stale Front',
 				back: 'Stale Back',
 				tags: ['stale'],
-				content_hash: 'h_stl',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1362,7 +1350,6 @@ describe('Advanced Metrics & Edge Case Boundaries', () => {
 				front: 'Q',
 				back: 'A',
 				tags: [],
-				content_hash: 'h',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1477,7 +1464,6 @@ describe('Advanced Metrics & Edge Case Boundaries', () => {
 				front: 'Valid Q',
 				back: 'Valid A',
 				tags: [],
-				content_hash: 'h_val',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1682,7 +1668,6 @@ describe('In-Memory Review Session Cache (Hashcards Model)', () => {
 				front: 'Q1',
 				back: 'A1',
 				tags: [],
-				content_hash: 'h1',
 				line_start: 1,
 				line_end: 1,
 			},
@@ -1693,7 +1678,6 @@ describe('In-Memory Review Session Cache (Hashcards Model)', () => {
 				front: 'Q2',
 				back: 'A2',
 				tags: [],
-				content_hash: 'h2',
 				line_start: 2,
 				line_end: 2,
 			},

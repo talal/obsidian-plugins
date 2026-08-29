@@ -80,7 +80,7 @@ What are the largest cities of Pakistan?
     }
 
     #[test]
-    fn test_block_card_hash_changes_on_header_edit() {
+    fn test_block_card_reversible_header_parsing() {
         let content1 = r#"
 %% card-start id=37066d reversible=false %%
 Question
@@ -97,7 +97,8 @@ Answer
 "#;
         let blocks1 = parse_markdown_blocks(content1, &[]);
         let blocks2 = parse_markdown_blocks(content2, &[]);
-        assert_ne!(blocks1[0].content_hash, blocks2[0].content_hash);
+        assert!(!blocks1[0].reversible);
+        assert!(blocks2[0].reversible);
     }
 
     #[test]

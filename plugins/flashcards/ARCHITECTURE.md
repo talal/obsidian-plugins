@@ -182,7 +182,6 @@ erDiagram
         TEXT front "Question or Cloze text"
         TEXT back "Answer text (empty for cloze)"
         TEXT tags "Comma-separated tags"
-        INTEGER content_hash "FNV-1a hash"
         INTEGER updated_at "epoch ms"
     }
 

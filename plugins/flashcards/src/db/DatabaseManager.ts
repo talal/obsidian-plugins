@@ -174,8 +174,8 @@ export class DatabaseManager {
 	public upsertBlock(block: Block): void {
 		if (!this.db) return;
 		this.db.run(
-			`INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, content_hash, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   file_path = excluded.file_path,
 			   block_type = excluded.block_type,
@@ -183,7 +183,6 @@ export class DatabaseManager {
 			   front = excluded.front,
 			   back = excluded.back,
 			   tags = excluded.tags,
-			   content_hash = excluded.content_hash,
 			   updated_at = excluded.updated_at`,
 			[
 				block.id,
@@ -193,7 +192,6 @@ export class DatabaseManager {
 				block.front,
 				block.back,
 				block.tags,
-				block.content_hash,
 				block.updated_at,
 			],
 		);
@@ -261,7 +259,6 @@ export class DatabaseManager {
 					front: b.front,
 					back: b.back,
 					tags: b.tags.join(' '),
-					content_hash: b.content_hash,
 					updated_at: now,
 				};
 				this.upsertBlock(blockRecord);
@@ -339,7 +336,7 @@ export class DatabaseManager {
 
 		const query = `
 			SELECT c.id as card_id, c.block_id, c.direction, c.state, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.last_review, c.learning_step, c.relearning_step,
-			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.content_hash, b.updated_at
+			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.updated_at
 			FROM cards c
 			JOIN blocks b ON c.block_id = b.id
 			WHERE c.due_at <= ?
@@ -407,7 +404,7 @@ export class DatabaseManager {
 
 		const query = `
 			SELECT c.id as card_id, c.block_id, c.direction, c.state, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.last_review, c.learning_step, c.relearning_step,
-			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.content_hash, b.updated_at
+			       b.file_path, b.block_type, b.reversible, b.front, b.back, b.tags, b.updated_at
 			FROM cards c
 			JOIN blocks b ON c.block_id = b.id
 			ORDER BY c.due_at ASC

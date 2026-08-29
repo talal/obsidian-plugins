@@ -16,7 +16,6 @@ pub struct ParsedBlock {
     pub front: String,
     pub back: String,
     pub tags: Vec<String>,
-    pub content_hash: String,
     pub line_start: usize,
     pub line_end: usize,
 }
