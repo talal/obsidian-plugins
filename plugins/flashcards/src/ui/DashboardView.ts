@@ -4,6 +4,11 @@ import { mount, unmount } from 'svelte';
 import { getStudyDayCutoff } from '../db/DatabaseManager.js';
 import type FlashcardsPlugin from '../main.js';
 import type { ReviewItem } from '../types.js';
+import {
+	DEFAULT_LEARNING_STEPS,
+	DEFAULT_RELEARNING_STEPS,
+	parseStudySteps,
+} from '../utils/studySteps.js';
 import DashboardViewComponent from './components/DashboardView.svelte';
 import { ReviewModal } from './ReviewModal.js';
 import { TagPickerModal } from './TagPickerModal.js';
@@ -60,7 +65,20 @@ export class DashboardView extends ItemView {
 				stats,
 				dueCutoff,
 				onStartReview: () => {
-					const dueItems = this.plugin.db.getDueCards(undefined, rollover);
+					const learningSteps = parseStudySteps(
+						this.plugin.settings.learningSteps,
+						DEFAULT_LEARNING_STEPS,
+					);
+					const relearningSteps = parseStudySteps(
+						this.plugin.settings.relearningSteps,
+						DEFAULT_RELEARNING_STEPS,
+					);
+					const dueItems = this.plugin.db.getDueCards(
+						undefined,
+						rollover,
+						learningSteps,
+						relearningSteps,
+					);
 					const queue = dueItems.length > 0 ? dueItems : items;
 					if (queue.length === 0) {
 						new Notice('No cards available to study.');

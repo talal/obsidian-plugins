@@ -4,6 +4,11 @@ import { mount, unmount } from 'svelte';
 import { getStudyDayCutoff } from '../db/DatabaseManager.js';
 import type FlashcardsPlugin from '../main.js';
 import { matchCardTags } from '../utils/dashboardFilter.js';
+import {
+	DEFAULT_LEARNING_STEPS,
+	DEFAULT_RELEARNING_STEPS,
+	parseStudySteps,
+} from '../utils/studySteps.js';
 import { computeTagDeckStats } from '../utils/tagStats.js';
 import TagPickerModalComponent from './components/TagPickerModal.svelte';
 import { ReviewModal } from './ReviewModal.js';
@@ -39,7 +44,20 @@ export class TagPickerModal extends Modal {
 				tagStats,
 				onSelectTags: (tags: string[]) => {
 					this.close();
-					const dueItems = this.plugin.db.getDueCards(tags, rollover);
+					const learningSteps = parseStudySteps(
+						this.plugin.settings.learningSteps,
+						DEFAULT_LEARNING_STEPS,
+					);
+					const relearningSteps = parseStudySteps(
+						this.plugin.settings.relearningSteps,
+						DEFAULT_RELEARNING_STEPS,
+					);
+					const dueItems = this.plugin.db.getDueCards(
+						tags,
+						rollover,
+						learningSteps,
+						relearningSteps,
+					);
 					const allDeckItems = allCards.filter((item) => matchCardTags(item.tags, tags));
 
 					const targetQueue = dueItems.length > 0 ? dueItems : allDeckItems;

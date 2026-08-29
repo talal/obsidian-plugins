@@ -64,6 +64,13 @@ export class ReviewModal extends Modal {
 					.map((s) => parseFloat(s.trim()))
 					.filter((n) => !isNaN(n))
 			: undefined;
+		const now = Date.now();
+		const dueCounts = this.plugin.db.getUpcomingDueCounts(90, now);
+		const sibling = this.plugin.db.getSiblingCard(item.cardId, item.blockId);
+		let siblingDueOffset: number | undefined = undefined;
+		if (sibling && sibling.due_at > now) {
+			siblingDueOffset = Math.max(0, Math.round((sibling.due_at - now) / 86400000));
+		}
 
 		const params: FsrsParams = {
 			request_retention: this.plugin.settings.requestRetention,
@@ -75,9 +82,10 @@ export class ReviewModal extends Modal {
 				this.plugin.settings.relearningSteps,
 				DEFAULT_RELEARNING_STEPS,
 			),
+			due_counts: dueCounts,
+			sibling_due_offset: siblingDueOffset,
 		};
 
-		const now = Date.now();
 		const info = WasmBridge.calculateSchedule(previousCard, params, now);
 		const targetRating = ratingStr === 'forgot' ? 'again' : 'good';
 

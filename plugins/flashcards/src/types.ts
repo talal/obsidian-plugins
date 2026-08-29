@@ -133,6 +133,8 @@ export interface FsrsParams {
 	enable_fuzz?: boolean;
 	learning_steps?: number[];
 	relearning_steps?: number[];
+	due_counts?: number[];
+	sibling_due_offset?: number;
 }
 
 export interface SchedulingCard {

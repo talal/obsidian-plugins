@@ -31,6 +31,11 @@ import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardC
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
 import { ReviewSessionCache } from '../src/utils/ReviewSessionCache.ts';
+import {
+	applySiblingBurying,
+	CardPriorityRank,
+	getCardPriorityRank,
+} from '../src/utils/siblingBurying.ts';
 import { formatLocalDate, shiftLocalDateKey } from '../src/utils/studyDay.ts';
 import {
 	DEFAULT_LEARNING_STEPS,
@@ -2466,5 +2471,251 @@ describe('Todo Tag (#todo/card) Property Fuzzing & Unicode Invariants', () => {
 				expect(untaggedBlock).toContain('%% card-end %%');
 			}
 		}
+	});
+});
+
+describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
+	let SQL: SqlJsStatic;
+
+	beforeAll(async () => {
+		SQL = await initSqlJs();
+	});
+
+	const DAY_MS = 24 * 60 * 60 * 1000;
+	const learningSteps = [10 * 60 * 1000, DAY_MS]; // 10m (intraday), 1d (interday)
+	const relearningSteps = [10 * 60 * 1000];
+
+	function mockItem(overrides: Partial<ReviewItem>): ReviewItem {
+		return {
+			cardId: overrides.cardId ?? 1,
+			blockId: overrides.blockId ?? 'blk001',
+			noteTitle: 'Note',
+			notePath: 'Note.md',
+			direction: overrides.direction ?? 'forward',
+			blockType: 'inline',
+			reversible: true,
+			front: 'Front',
+			back: 'Back',
+			tags: [],
+			state: overrides.state ?? 'new',
+			stateNum: overrides.stateNum ?? 0,
+			dueAt: overrides.dueAt ?? Date.now(),
+			dueHuman: 'now',
+			stability: overrides.stability ?? 0,
+			difficulty: overrides.difficulty ?? 0,
+			reps: overrides.reps ?? 0,
+			lapses: overrides.lapses ?? 0,
+			learningStep: overrides.learningStep ?? 0,
+			relearningStep: overrides.relearningStep ?? 0,
+			lastReview: null,
+			lastPracticedHuman: 'Never',
+		};
+	}
+
+	it('computes correct priority ranks for all card lifecycle stages', () => {
+		// New (state = 0) -> Rank 1
+		const newCard = mockItem({ stateNum: 0, state: 'new' });
+		expect(getCardPriorityRank(newCard, learningSteps, relearningSteps)).toBe(CardPriorityRank.New);
+
+		// Review (state = 2) -> Rank 2
+		const reviewCard = mockItem({ stateNum: 2, state: 'review' });
+		expect(getCardPriorityRank(reviewCard, learningSteps, relearningSteps)).toBe(
+			CardPriorityRank.Review,
+		);
+
+		// Interday Learning (state = 1, step 1 = 1d) -> Rank 3
+		const interdayCard = mockItem({ stateNum: 1, state: 'learning', learningStep: 1 });
+		expect(getCardPriorityRank(interdayCard, learningSteps, relearningSteps)).toBe(
+			CardPriorityRank.InterdayLearning,
+		);
+
+		// Intraday Learning (state = 1, step 0 = 10m) -> Rank 4
+		const intradayCard = mockItem({ stateNum: 1, state: 'learning', learningStep: 0 });
+		expect(getCardPriorityRank(intradayCard, learningSteps, relearningSteps)).toBe(
+			CardPriorityRank.IntradayLearning,
+		);
+	});
+
+	it('buries New sibling when Review sibling is due', () => {
+		const reviewSibling = mockItem({
+			cardId: 10,
+			blockId: 'geo001',
+			direction: 'forward',
+			stateNum: 2,
+			state: 'review',
+			dueAt: 1000,
+		});
+		const newSibling = mockItem({
+			cardId: 11,
+			blockId: 'geo001',
+			direction: 'reverse',
+			stateNum: 0,
+			state: 'new',
+			dueAt: 1000,
+		});
+
+		const result = applySiblingBurying([newSibling, reviewSibling], learningSteps, relearningSteps);
+		expect(result).toHaveLength(1);
+		expect(result[0]!.cardId).toBe(10); // Review sibling won, New sibling buried
+	});
+
+	it('buries Review sibling when Interday Learning sibling is due', () => {
+		const interdaySibling = mockItem({
+			cardId: 20,
+			blockId: 'geo002',
+			direction: 'forward',
+			stateNum: 1,
+			state: 'learning',
+			learningStep: 1, // 1d
+			dueAt: 2000,
+		});
+		const reviewSibling = mockItem({
+			cardId: 21,
+			blockId: 'geo002',
+			direction: 'reverse',
+			stateNum: 2,
+			state: 'review',
+			dueAt: 2000,
+		});
+
+		const result = applySiblingBurying(
+			[reviewSibling, interdaySibling],
+			learningSteps,
+			relearningSteps,
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0]!.cardId).toBe(20); // Interday learning won
+	});
+
+	it('buries less overdue sibling when both are in Review state', () => {
+		const overdueMore = mockItem({
+			cardId: 30,
+			blockId: 'geo003',
+			direction: 'reverse',
+			stateNum: 2,
+			state: 'review',
+			dueAt: 1000, // Due earlier
+		});
+		const overdueLess = mockItem({
+			cardId: 31,
+			blockId: 'geo003',
+			direction: 'forward',
+			stateNum: 2,
+			state: 'review',
+			dueAt: 2000,
+		});
+
+		const result = applySiblingBurying([overdueLess, overdueMore], learningSteps, relearningSteps);
+		expect(result).toHaveLength(1);
+		expect(result[0]!.cardId).toBe(30); // More overdue won
+	});
+
+	it('prefers Forward direction over Reverse when both are New cards with identical dueAt', () => {
+		const newForward = mockItem({
+			cardId: 40,
+			blockId: 'geo004',
+			direction: 'forward',
+			stateNum: 0,
+			state: 'new',
+			dueAt: 5000,
+		});
+		const newReverse = mockItem({
+			cardId: 41,
+			blockId: 'geo004',
+			direction: 'reverse',
+			stateNum: 0,
+			state: 'new',
+			dueAt: 5000,
+		});
+
+		const result = applySiblingBurying([newReverse, newForward], learningSteps, relearningSteps);
+		expect(result).toHaveLength(1);
+		expect(result[0]!.cardId).toBe(40);
+		expect(result[0]!.direction).toBe('forward');
+	});
+
+	it('integrates sibling burying and due histogram queries in DatabaseManager', () => {
+		const rawDb = new SQL.Database();
+		const db = DatabaseManager.createInMemory(rawDb);
+
+		const now = Date.now();
+
+		// Add a bidirectional card block
+		const syncResult = {
+			updated_content: null,
+			blocks: [
+				{
+					id: 'sib999',
+					block_type: 'inline' as const,
+					reversible: true,
+					front: 'Question',
+					back: 'Answer',
+					tags: ['test'],
+					line_start: 1,
+					line_end: 1,
+				},
+			],
+		};
+		db.syncNoteBlocks('Notes/Siblings.md', syncResult.blocks);
+
+		// Both forward and reverse are due at now
+		const dueCardsBury = db.getDueCards(undefined, 4, learningSteps, relearningSteps, true);
+		expect(dueCardsBury).toHaveLength(1);
+		expect(dueCardsBury[0]!.direction).toBe('forward');
+
+		// Without burying, both cards are returned
+		const dueCardsAll = db.getDueCards(undefined, 4, learningSteps, relearningSteps, false);
+		expect(dueCardsAll).toHaveLength(2);
+
+		// Sibling query
+		const forwardCard = dueCardsAll.find((c) => c.direction === 'forward')!;
+		const reverseCard = dueCardsAll.find((c) => c.direction === 'reverse')!;
+		const foundSibling = db.getSiblingCard(forwardCard.cardId, 'sib999');
+		expect(foundSibling).not.toBeNull();
+		expect(foundSibling!.id).toBe(reverseCard.cardId);
+
+		// Upcoming due counts histogram
+		const dueCounts = db.getUpcomingDueCounts(90, now - 86400000);
+		expect(dueCounts).toHaveLength(90);
+		expect(dueCounts[1]!).toBeGreaterThanOrEqual(1);
+	});
+
+	it('steers FSRS scheduling away from congested days and sibling due dates in WASM', () => {
+		const now = 1700000000000;
+		const card: SchedulingCard = {
+			stability: 10.0,
+			difficulty: 4.0,
+			reps: 2,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			state: 'review',
+			last_review: now - 86400000 * 10,
+			due: now,
+		};
+
+		// 1. Congested histogram: Day 10 has 1000 cards, Day 9 has 0
+		const dueCounts = Array.from({ length: 90 }, () => 0);
+		dueCounts[10] = 1000;
+
+		const paramsWithHistogram: FsrsParams = {
+			enable_fuzz: true,
+			due_counts: dueCounts,
+		};
+
+		const infoHistogram = WasmBridge.calculateSchedule(card, paramsWithHistogram, now);
+		const candidateGood = infoHistogram.next_states.find((c) => c.rating === 'good')!;
+		// Should steer away from day 10
+		expect(candidateGood.interval_days).toBeGreaterThanOrEqual(1.0);
+
+		// 2. Sibling penalty: Sibling is due on Day 10
+		const paramsWithSibling: FsrsParams = {
+			enable_fuzz: true,
+			sibling_due_offset: 10,
+		};
+
+		const infoSibling = WasmBridge.calculateSchedule(card, paramsWithSibling, now);
+		const candidateSiblingGood = infoSibling.next_states.find((c) => c.rating === 'good')!;
+		expect(candidateSiblingGood.interval_days).toBeGreaterThanOrEqual(1.0);
 	});
 });

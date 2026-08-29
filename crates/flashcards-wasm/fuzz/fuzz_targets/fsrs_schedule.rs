@@ -81,6 +81,14 @@ fuzz_target!(|data: &[u8]| {
         Ok(v) => v,
         Err(_) => return,
     };
+    let due_counts: Option<Vec<u32>> = match u.arbitrary() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let sibling_due_offset: Option<u32> = match u.arbitrary() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
     let now_ms: i64 = match u.arbitrary() {
         Ok(v) => v,
         Err(_) => return,
@@ -105,6 +113,8 @@ fuzz_target!(|data: &[u8]| {
         learning_steps,
         relearning_steps,
         enable_fuzz,
+        due_counts,
+        sibling_due_offset,
     };
 
     let engine = FsrsEngine::new(params);

@@ -7,7 +7,11 @@ import type { FlashcardsPluginSettings, FsrsParams, ReviewLogEntry } from './typ
 import { DashboardView, FLASHCARDS_DASHBOARD_VIEW_TYPE } from './ui/DashboardView.js';
 import { ReviewModal } from './ui/ReviewModal.js';
 import { TagPickerModal } from './ui/TagPickerModal.js';
-import { DEFAULT_RELEARNING_STEPS, parseStudySteps } from './utils/studySteps.js';
+import {
+	DEFAULT_LEARNING_STEPS,
+	DEFAULT_RELEARNING_STEPS,
+	parseStudySteps,
+} from './utils/studySteps.js';
 import { WasmBridge } from './wasm.js';
 
 export default class FlashcardsPlugin extends Plugin {
@@ -66,7 +70,12 @@ export default class FlashcardsPlugin extends Plugin {
 			name: 'Study all cards',
 			callback: () => {
 				const rollover = this.settings.rolloverHour ?? 4;
-				const dueCards = this.db.getDueCards(undefined, rollover);
+				const learningSteps = parseStudySteps(this.settings.learningSteps, DEFAULT_LEARNING_STEPS);
+				const relearningSteps = parseStudySteps(
+					this.settings.relearningSteps,
+					DEFAULT_RELEARNING_STEPS,
+				);
+				const dueCards = this.db.getDueCards(undefined, rollover, learningSteps, relearningSteps);
 				const queue = dueCards.length > 0 ? dueCards : this.db.getAllCards();
 
 				if (queue.length === 0) {

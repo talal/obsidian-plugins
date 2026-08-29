@@ -5,6 +5,7 @@ import type {
 	Block,
 	CardBlockType,
 	CardPerformanceUpdate,
+	CardRecord,
 	DashboardStats,
 	ParsedBlock,
 	ReviewItem,
@@ -14,12 +15,14 @@ import type {
 	SessionRecord,
 } from '../types.js';
 import { matchCardTags } from '../utils/dashboardFilter.js';
+import { applySiblingBurying } from '../utils/siblingBurying.js';
 import {
 	getStudyDayCutoff,
 	getStudyDayKey,
 	getStudyDayStart,
 	shiftLocalDateKey,
 } from '../utils/studyDay.js';
+import { DEFAULT_LEARNING_STEPS, DEFAULT_RELEARNING_STEPS } from '../utils/studySteps.js';
 import { WasmBridge } from '../wasm.js';
 import SCHEMA_SQL from './schema.sql?raw';
 import {
@@ -329,7 +332,13 @@ export class DatabaseManager {
 		return ids;
 	}
 
-	public getDueCards(filterTags?: string[], rolloverHour = 4): ReviewItem[] {
+	public getDueCards(
+		filterTags?: string[],
+		rolloverHour = 4,
+		learningSteps: number[] = DEFAULT_LEARNING_STEPS,
+		relearningSteps: number[] = DEFAULT_RELEARNING_STEPS,
+		burySiblings = true,
+	): ReviewItem[] {
 		if (!this.db) return [];
 		const cutoff = getStudyDayCutoff(rolloverHour);
 		const items: ReviewItem[] = [];
@@ -395,7 +404,67 @@ export class DatabaseManager {
 			});
 		}
 		stmt.free();
+
+		if (burySiblings && items.length > 1) {
+			return applySiblingBurying(items, learningSteps, relearningSteps);
+		}
+
 		return items;
+	}
+
+	public getUpcomingDueCounts(days = 90, nowMs = Date.now()): number[] {
+		const counts = Array.from({ length: days }, () => 0);
+		if (!this.db) return counts;
+
+		const endMs = nowMs + days * 86400000;
+		const query = `
+			SELECT CAST((due_at - ?) / 86400000 AS INTEGER) as day_offset, COUNT(*) as count
+			FROM cards
+			WHERE due_at > ? AND due_at <= ?
+			GROUP BY day_offset
+		`;
+
+		const stmt = this.db.prepare(query);
+		stmt.bind([nowMs, nowMs, endMs]);
+
+		while (stmt.step()) {
+			const row = stmt.getAsObject();
+			const offset = row.day_offset as number;
+			const count = row.count as number;
+			if (offset >= 0 && offset < days) {
+				counts[offset] = count;
+			}
+		}
+		stmt.free();
+		return counts;
+	}
+
+	public getSiblingCard(cardId: number, blockId: string): CardRecord | null {
+		if (!this.db) return null;
+		const stmt = this.db.prepare(
+			'SELECT id, block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step FROM cards WHERE block_id = ? AND id != ? LIMIT 1',
+		);
+		stmt.bind([blockId, cardId]);
+		let sibling: CardRecord | null = null;
+		if (stmt.step()) {
+			const row = stmt.getAsObject();
+			sibling = {
+				id: row.id as number,
+				block_id: row.block_id as string,
+				direction: (row.direction as 'forward' | 'reverse' | null) ?? null,
+				state: row.state as number,
+				due_at: row.due_at as number,
+				stability: row.stability as number,
+				difficulty: row.difficulty as number,
+				reps: row.reps as number,
+				lapses: row.lapses as number,
+				last_review: (row.last_review as number) || null,
+				learning_step: row.learning_step as number,
+				relearning_step: row.relearning_step as number,
+			};
+		}
+		stmt.free();
+		return sibling;
 	}
 
 	public getAllCards(): ReviewItem[] {

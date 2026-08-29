@@ -125,6 +125,10 @@ pub struct FsrsParams {
     pub learning_steps: Option<Vec<i64>>, // Milliseconds
     #[serde(default)]
     pub relearning_steps: Option<Vec<i64>>, // Milliseconds
+    #[serde(default)]
+    pub due_counts: Option<Vec<u32>>,
+    #[serde(default)]
+    pub sibling_due_offset: Option<u32>,
 }
 
 impl FsrsParams {
