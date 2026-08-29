@@ -1,4 +1,4 @@
-import type { CardBlockType } from '../types.ts';
+import { type CardBlockType, DEFAULT_LEECH_TAG } from '../types.ts';
 
 function escapeRegex(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -224,7 +224,7 @@ export function addCardLeechTagInMarkdown(
 	content: string,
 	blockId: string,
 	blockType: CardBlockType,
-	tag = '#card/leech',
+	tag = DEFAULT_LEECH_TAG,
 ): string {
 	return addCardTag(content, blockId, blockType, tag);
 }

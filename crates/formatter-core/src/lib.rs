@@ -81,7 +81,8 @@ mod tests {
 
     #[test]
     fn preserves_flashcards_cloze_syntax() {
-        let input = "The chemical symbol for water is {{H2O}} and table salt is {{NaCl}}. ^fc0003\n";
+        let input =
+            "The chemical symbol for water is {{H2O}} and table salt is {{NaCl}}. ^fc0003\n";
         let output = format(input).unwrap();
         assert_eq!(output, input);
     }

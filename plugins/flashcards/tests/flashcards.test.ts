@@ -19,6 +19,8 @@ import {
 	unpackAndVerifySnapshot,
 } from '../src/db/snapshot.ts';
 import {
+	DEFAULT_MAXIMUM_INTERVAL,
+	DEFAULT_REQUEST_RETENTION,
 	DEFAULT_SETTINGS,
 	type FlashcardsPluginSettings,
 	type FsrsParams,
@@ -1354,7 +1356,8 @@ describe('WASM FSRS-6 Scheduling & Optimizer Integration', () => {
 		const params: FsrsParams = {
 			request_retention: 0.9,
 			maximum_interval: 36500,
-			enable_fuzz: false,
+			learning_steps: DEFAULT_LEARNING_STEPS,
+			relearning_steps: DEFAULT_RELEARNING_STEPS,
 		};
 
 		const scheduleInfo = WasmBridge.calculateSchedule(newCard, params, now);
@@ -1389,6 +1392,7 @@ describe('WASM FSRS-6 Scheduling & Optimizer Integration', () => {
 			request_retention: 0.9,
 			maximum_interval: 36500,
 			learning_steps: [10 * 60 * 1000, 24 * 60 * 60 * 1000],
+			relearning_steps: DEFAULT_RELEARNING_STEPS,
 		};
 
 		const info = WasmBridge.calculateSchedule(learningCard, params, now);
@@ -1421,7 +1425,14 @@ describe('WASM FSRS-6 Scheduling & Optimizer Integration', () => {
 			delta_t: (i + 1) * 1.5,
 		}));
 
-		const weights = WasmBridge.optimizeFsrsWeights({}, logs);
+		const params: FsrsParams = {
+			request_retention: DEFAULT_REQUEST_RETENTION,
+			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
+			learning_steps: DEFAULT_LEARNING_STEPS,
+			relearning_steps: DEFAULT_RELEARNING_STEPS,
+		};
+
+		const weights = WasmBridge.optimizeFsrsWeights(params, logs);
 		expect(weights).toHaveLength(21);
 		for (const w of weights) {
 			expect(typeof w).toBe('number');
@@ -2868,7 +2879,10 @@ describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
 		dueCounts[10] = 1000;
 
 		const paramsWithHistogram: FsrsParams = {
-			enable_fuzz: true,
+			request_retention: DEFAULT_REQUEST_RETENTION,
+			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
+			learning_steps: DEFAULT_LEARNING_STEPS,
+			relearning_steps: DEFAULT_RELEARNING_STEPS,
 			due_counts: dueCounts,
 		};
 
@@ -2879,7 +2893,10 @@ describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
 
 		// 2. Sibling penalty: Sibling is due on Day 10
 		const paramsWithSibling: FsrsParams = {
-			enable_fuzz: true,
+			request_retention: DEFAULT_REQUEST_RETENTION,
+			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
+			learning_steps: DEFAULT_LEARNING_STEPS,
+			relearning_steps: DEFAULT_RELEARNING_STEPS,
 			sibling_due_offset: 10,
 		};
 

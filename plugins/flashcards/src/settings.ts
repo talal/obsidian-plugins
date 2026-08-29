@@ -1,8 +1,12 @@
 import { type App, Notice, PluginSettingTab, Setting } from 'obsidian';
 
 import type FlashcardsPlugin from './main.js';
-import type { FsrsParams } from './types.js';
-import { DEFAULT_RELEARNING_STEPS, parseStudySteps } from './utils/studySteps.js';
+import { DEFAULT_MAXIMUM_INTERVAL, DEFAULT_REQUEST_RETENTION, type FsrsParams } from './types.js';
+import {
+	DEFAULT_LEARNING_STEPS,
+	DEFAULT_RELEARNING_STEPS,
+	parseStudySteps,
+} from './utils/studySteps.js';
 import { WasmBridge } from './wasm.js';
 
 export class FlashcardsSettingTab extends PluginSettingTab {
@@ -77,10 +81,10 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Learning steps')
-			.setDesc('Step intervals for new cards. Default: 10m 1d.')
+			.setDesc('Step intervals for new cards. Default: 10m.')
 			.addText((text) => {
 				text
-					.setPlaceholder('10m 1d')
+					.setPlaceholder('10m')
 					.setValue(this.plugin.settings.learningSteps || '')
 					.onChange(async (val) => {
 						const trimmed = val.trim();
@@ -106,26 +110,6 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 							delete this.plugin.settings.relearningSteps;
 						} else {
 							this.plugin.settings.relearningSteps = trimmed;
-						}
-						await this.plugin.saveSettings();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('Interval fuzz')
-			.setDesc(
-				'Add small random variations to intervals to avoid due date spikes. Default: enabled.',
-			)
-			.addToggle((toggle) => {
-				toggle
-					.setValue(
-						this.plugin.settings.enableFuzz !== undefined ? this.plugin.settings.enableFuzz : true,
-					)
-					.onChange(async (val) => {
-						if (val === true) {
-							delete this.plugin.settings.enableFuzz;
-						} else {
-							this.plugin.settings.enableFuzz = val;
 						}
 						await this.plugin.saveSettings();
 					});
@@ -195,26 +179,6 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
-			.setName('Leech tag')
-			.setDesc(
-				'Tag automatically added to the note markdown when a card reaches the leech threshold. Default: #card/leech.',
-			)
-			.addText((text) => {
-				text
-					.setPlaceholder('#card/leech')
-					.setValue(this.plugin.settings.leechTag || '')
-					.onChange(async (val) => {
-						const trimmed = val.trim();
-						if (!trimmed || trimmed === '#card/leech') {
-							delete this.plugin.settings.leechTag;
-						} else {
-							this.plugin.settings.leechTag = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
-						}
-						await this.plugin.saveSettings();
-					});
-			});
-
 		const weightsDesc = this.plugin.settings.customWeights
 			? `Custom weights: ${this.plugin.settings.customWeights}`
 			: 'Using default FSRS-6 weights.';
@@ -269,10 +233,10 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 			const validWeights = rawWeights && rawWeights.length === 21 ? rawWeights : undefined;
 
 			const params: FsrsParams = {
-				request_retention: this.plugin.settings.requestRetention,
-				maximum_interval: this.plugin.settings.maximumInterval,
-				w: validWeights,
-				enable_fuzz: this.plugin.settings.enableFuzz,
+				request_retention: this.plugin.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
+				maximum_interval: this.plugin.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
+				weights: validWeights,
+				learning_steps: parseStudySteps(this.plugin.settings.learningSteps, DEFAULT_LEARNING_STEPS),
 				relearning_steps: parseStudySteps(
 					this.plugin.settings.relearningSteps,
 					DEFAULT_RELEARNING_STEPS,

@@ -126,13 +126,18 @@ export interface ObsidianSectionHint {
 	line_end: number;
 }
 
+export const DEFAULT_REQUEST_RETENTION = 0.9;
+export const DEFAULT_MAXIMUM_INTERVAL = 36500;
+export const DEFAULT_ROLLOVER_HOUR = 4;
+export const DEFAULT_LEECH_THRESHOLD = 4;
+export const DEFAULT_LEECH_TAG = '#card/leech';
+
 export interface FsrsParams {
-	request_retention?: number;
-	maximum_interval?: number;
-	w?: number[];
-	enable_fuzz?: boolean;
-	learning_steps?: number[];
-	relearning_steps?: number[];
+	request_retention: number;
+	maximum_interval: number;
+	learning_steps: number[];
+	relearning_steps: number[];
+	weights?: number[];
 	due_counts?: number[];
 	sibling_due_offset?: number;
 }
@@ -172,10 +177,8 @@ export interface FlashcardsPluginSettings {
 	learningSteps?: string;
 	relearningSteps?: string;
 	customWeights?: string;
-	enableFuzz?: boolean;
 	rolloverHour?: number;
 	leechThreshold?: number;
-	leechTag?: string;
 }
 
 export const DEFAULT_SETTINGS: FlashcardsPluginSettings = {};

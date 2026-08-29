@@ -111,68 +111,49 @@ impl<'de> Deserialize<'de> for State {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsrsParams {
+    pub request_retention: f64,
+    pub maximum_interval: f64,
+    pub learning_steps: Vec<i64>,   // Milliseconds
+    pub relearning_steps: Vec<i64>, // Milliseconds
     #[serde(default)]
-    pub request_retention: Option<f64>,
-    #[serde(default)]
-    pub maximum_interval: Option<f64>,
-    #[serde(default)]
-    pub w: Option<Vec<f64>>,
-    #[serde(default)]
-    pub enable_fuzz: Option<bool>,
-    #[serde(default)]
-    pub learning_steps: Option<Vec<i64>>, // Milliseconds
-    #[serde(default)]
-    pub relearning_steps: Option<Vec<i64>>, // Milliseconds
+    pub weights: Option<Vec<f64>>,
     #[serde(default)]
     pub due_counts: Option<Vec<u32>>,
     #[serde(default)]
     pub sibling_due_offset: Option<u32>,
 }
 
-impl FsrsParams {
-    pub fn retention(&self) -> f64 {
-        self.request_retention
-            .filter(|r| r.is_finite() && *r > 0.0 && *r < 1.0)
-            .unwrap_or(0.90)
-            .clamp(0.70, 0.99)
-    }
-
-    pub fn max_interval(&self) -> f64 {
-        self.maximum_interval
-            .filter(|ivl| ivl.is_finite() && *ivl >= 1.0)
-            .unwrap_or(36500.0)
-            .clamp(1.0, 36500.0)
-    }
-
-    pub fn is_fuzz_enabled(&self) -> bool {
-        self.enable_fuzz.unwrap_or(true)
-    }
-
-    pub fn learning_steps(&self) -> Vec<i64> {
-        valid_steps(
-            self.learning_steps.as_deref(),
-            &[10 * 60 * 1000, 24 * 60 * 60 * 1000],
-        )
-    }
-
-    pub fn relearning_steps(&self) -> Vec<i64> {
-        valid_steps(self.relearning_steps.as_deref(), &[10 * 60 * 1000])
+impl Default for FsrsParams {
+    fn default() -> Self {
+        Self {
+            request_retention: 0.90,
+            maximum_interval: 36500.0,
+            learning_steps: vec![10 * 60 * 1000],
+            relearning_steps: vec![10 * 60 * 1000],
+            weights: None,
+            due_counts: None,
+            sibling_due_offset: None,
+        }
     }
 }
 
-fn valid_steps(steps: Option<&[i64]>, defaults: &[i64]) -> Vec<i64> {
-    let valid: Vec<i64> = steps
-        .unwrap_or_default()
-        .iter()
-        .copied()
-        .filter(|step| *step > 0)
-        .collect();
-    if valid.is_empty() {
-        defaults.to_vec()
-    } else {
-        valid
+impl FsrsParams {
+    pub fn retention(&self) -> f64 {
+        if self.request_retention.is_finite() && self.request_retention > 0.0 {
+            self.request_retention.clamp(0.70, 0.99)
+        } else {
+            0.90
+        }
+    }
+
+    pub fn max_interval(&self) -> f64 {
+        if self.maximum_interval.is_finite() && self.maximum_interval >= 1.0 {
+            self.maximum_interval.clamp(1.0, 36500.0)
+        } else {
+            36500.0
+        }
     }
 }
 

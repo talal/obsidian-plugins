@@ -3,7 +3,13 @@ import { type Editor, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
 import { FlashcardsSettingTab } from './settings.js';
-import type { FlashcardsPluginSettings, FsrsParams, ReviewLogEntry } from './types.js';
+import {
+	DEFAULT_MAXIMUM_INTERVAL,
+	DEFAULT_REQUEST_RETENTION,
+	type FlashcardsPluginSettings,
+	type FsrsParams,
+	type ReviewLogEntry,
+} from './types.js';
 import { DashboardView, FLASHCARDS_DASHBOARD_VIEW_TYPE } from './ui/DashboardView.js';
 import { ReviewModal } from './ui/ReviewModal.js';
 import { TagPickerModal } from './ui/TagPickerModal.js';
@@ -206,10 +212,10 @@ export default class FlashcardsPlugin extends Plugin {
 					const validWeights = rawWeights && rawWeights.length === 21 ? rawWeights : undefined;
 
 					const params: FsrsParams = {
-						request_retention: this.settings.requestRetention,
-						maximum_interval: this.settings.maximumInterval,
-						w: validWeights,
-						enable_fuzz: this.settings.enableFuzz,
+						request_retention: this.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
+						maximum_interval: this.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
+						weights: validWeights,
+						learning_steps: parseStudySteps(this.settings.learningSteps, DEFAULT_LEARNING_STEPS),
 						relearning_steps: parseStudySteps(
 							this.settings.relearningSteps,
 							DEFAULT_RELEARNING_STEPS,

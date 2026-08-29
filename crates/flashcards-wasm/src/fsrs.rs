@@ -12,8 +12,8 @@ pub struct FsrsEngine {
 
 impl FsrsEngine {
     pub fn new(params: FsrsParams) -> Self {
-        let model = if let Some(w) = &params.w {
-            let f32_w: Vec<f32> = w.iter().map(|&x| x as f32).collect();
+        let model = if let Some(weights) = &params.weights {
+            let f32_w: Vec<f32> = weights.iter().map(|&x| x as f32).collect();
             FSRS::new(&f32_w).unwrap_or_default()
         } else {
             FSRS::default()
@@ -97,8 +97,8 @@ impl FsrsEngine {
         ];
 
         let max_ivl = self.params.max_interval();
-        let learning_steps = self.params.learning_steps();
-        let relearning_steps = self.params.relearning_steps();
+        let learning_steps = &self.params.learning_steps;
+        let relearning_steps = &self.params.relearning_steps;
         let mut candidates = Vec::with_capacity(4);
 
         for (rating, item_state) in rating_items {
@@ -179,12 +179,8 @@ impl FsrsEngine {
                 }
             };
 
-            // Apply FSRS interval fuzzing and load balancing for multi-day intervals if enabled
-            if step_duration_ms.is_none()
-                && rating != Rating::Again
-                && self.params.is_fuzz_enabled()
-                && interval_days >= 2.5
-            {
+            // Apply FSRS interval fuzzing and load balancing for multi-day intervals
+            if step_duration_ms.is_none() && rating != Rating::Again && interval_days >= 2.5 {
                 let seed = if current.stability.is_finite() {
                     ((current.stability * 1000.0) as u64)
                         ^ ((current.reps as u64) << 16)
@@ -426,7 +422,7 @@ mod tests {
         let first_step = 10 * 60 * 1000;
         let second_step = 2 * 24 * 60 * 60 * 1000;
         let engine = FsrsEngine::new(FsrsParams {
-            learning_steps: Some(vec![first_step, second_step]),
+            learning_steps: vec![first_step, second_step],
             ..FsrsParams::default()
         });
         let card = SchedulingCard {

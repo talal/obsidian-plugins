@@ -77,10 +77,6 @@ fuzz_target!(|data: &[u8]| {
         Ok(v) => v,
         Err(_) => return,
     };
-    let enable_fuzz: Option<bool> = match u.arbitrary() {
-        Ok(v) => v,
-        Err(_) => return,
-    };
     let due_counts: Option<Vec<u32>> = match u.arbitrary() {
         Ok(v) => v,
         Err(_) => return,
@@ -106,13 +102,21 @@ fuzz_target!(|data: &[u8]| {
         relearning_step,
     };
 
+    let learning_steps = match learning_steps {
+        Some(steps) if !steps.is_empty() => steps,
+        _ => vec![10 * 60 * 1000],
+    };
+    let relearning_steps = match relearning_steps {
+        Some(steps) if !steps.is_empty() => steps,
+        _ => vec![10 * 60 * 1000],
+    };
+
     let params = FsrsParams {
-        w: weights,
-        request_retention,
-        maximum_interval,
+        weights,
+        request_retention: request_retention.unwrap_or(0.90),
+        maximum_interval: maximum_interval.unwrap_or(36500.0),
         learning_steps,
         relearning_steps,
-        enable_fuzz,
         due_counts,
         sibling_due_offset,
     };

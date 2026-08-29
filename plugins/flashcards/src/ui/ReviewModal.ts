@@ -2,7 +2,14 @@ import { App, Modal, Notice, TFile } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
-import type { FsrsParams, ReviewItem, SchedulingCard } from '../types.js';
+import {
+	DEFAULT_LEECH_TAG,
+	DEFAULT_MAXIMUM_INTERVAL,
+	DEFAULT_REQUEST_RETENTION,
+	type FsrsParams,
+	type ReviewItem,
+	type SchedulingCard,
+} from '../types.js';
 import {
 	addCardLeechTagInMarkdown,
 	isLeechThresholdMet,
@@ -81,10 +88,9 @@ export class ReviewModal extends Modal {
 		}
 
 		const params: FsrsParams = {
-			request_retention: this.plugin.settings.requestRetention,
-			maximum_interval: this.plugin.settings.maximumInterval,
-			w: rawWeights && rawWeights.length === 21 ? rawWeights : undefined,
-			enable_fuzz: this.plugin.settings.enableFuzz,
+			request_retention: this.plugin.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
+			maximum_interval: this.plugin.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
+			weights: rawWeights && rawWeights.length === 21 ? rawWeights : undefined,
 			learning_steps: parseStudySteps(this.plugin.settings.learningSteps, DEFAULT_LEARNING_STEPS),
 			relearning_steps: parseStudySteps(
 				this.plugin.settings.relearningSteps,
@@ -202,13 +208,17 @@ export class ReviewModal extends Modal {
 		const file = this.app.vault.getAbstractFileByPath(item.notePath);
 		if (file instanceof TFile) {
 			const content = await this.app.vault.read(file);
-			const leechTag = this.plugin.settings.leechTag || '#card/leech';
-			const updated = addCardLeechTagInMarkdown(content, item.blockId, item.blockType, leechTag);
+			const updated = addCardLeechTagInMarkdown(
+				content,
+				item.blockId,
+				item.blockType,
+				DEFAULT_LEECH_TAG,
+			);
 			if (updated !== content) {
 				await this.app.vault.modify(file, updated);
 				await this.plugin.scanner.syncFile(file);
 				this.plugin.refreshDashboardIfOpen();
-				new Notice(`⚡ Card marked as leech (${leechTag}) after ${lapses} lapses.`);
+				new Notice(`⚡ Card marked as leech (${DEFAULT_LEECH_TAG}) after ${lapses} lapses.`);
 			}
 		}
 	}

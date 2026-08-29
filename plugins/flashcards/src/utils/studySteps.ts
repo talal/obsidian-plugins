@@ -2,7 +2,7 @@ const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-export const DEFAULT_LEARNING_STEPS = [10 * MINUTE_MS, DAY_MS];
+export const DEFAULT_LEARNING_STEPS = [10 * MINUTE_MS];
 export const DEFAULT_RELEARNING_STEPS = [10 * MINUTE_MS];
 
 /** Parse the settings format such as `10m 9h 2d` into millisecond durations. */

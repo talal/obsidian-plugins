@@ -6,7 +6,7 @@ use fsrs::{ComputeParametersInput, DEFAULT_PARAMETERS, FSRSItem, FSRSReview, com
 const MIN_TRAINING_ITEMS: usize = 8;
 
 fn fallback_parameters(params: &FsrsParams) -> Vec<f64> {
-    if let Some(weights) = &params.w
+    if let Some(weights) = &params.weights
         && weights.len() == DEFAULT_PARAMETERS.len()
         && weights.iter().all(|weight| weight.is_finite())
     {
@@ -86,7 +86,7 @@ pub fn optimize_weights(initial_params: &FsrsParams, logs: &[ReviewLogEntry]) ->
         train_set,
         card_ids: Some(card_ids),
         enable_short_term: true,
-        num_relearning_steps: Some(initial_params.relearning_steps().len()),
+        num_relearning_steps: Some(initial_params.relearning_steps.len()),
         ..Default::default()
     });
 

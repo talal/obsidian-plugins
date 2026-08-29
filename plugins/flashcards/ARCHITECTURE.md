@@ -506,11 +506,11 @@ Sparse configuration in `<vault>/.obsidian/plugins/flashcards/data.json` (only u
 | :--- | :--- | :--- | :--- |
 | **Desired retention** | Number (%) | `90` (90%) | Target retention rate (0.80 - 0.99, mapped to `request_retention: 0.90`). |
 | **Maximum interval** | Number (days) | `36500` (100 years) | Maximum interval cap in days. |
-| **Learning steps** | String | `10m 1d` | Space-separated durations for new cards (`m`=minutes, `h`=hours, `d`=days). |
+| **Learning steps** | String | `10m` | Space-separated durations for new cards (`m`=minutes, `h`=hours, `d`=days). |
 | **Relearning steps** | String | `10m` | Space-separated durations after lapsed/forgot cards. |
-| **Weights** | String | `""` (empty) | Custom 21 FSRS weights `w`. Empty uses FSRS-6 defaults. |
-| **Interval fuzz** | Boolean | `true` | Toggle small random variations to prevent review clustering. |
+| **Weights** | String | `""` (empty) | Custom 21 FSRS weights. Empty uses FSRS-6 defaults. |
 | **Next day starts at** | Number (hours) | `4` (4:00 AM) | Rollover hour past midnight for due queue and daily streak calculations. |
+| **Leech threshold** | Number (lapses) | `4` | Lapses before card is tagged with `#card/leech`. 0 disables. |
 
 ---
 

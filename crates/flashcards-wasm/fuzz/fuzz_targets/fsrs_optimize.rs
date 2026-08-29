@@ -57,13 +57,17 @@ fuzz_target!(|data: &[u8]| {
         });
     }
 
+    let relearning_steps = match relearning_steps {
+        Some(steps) if !steps.is_empty() => steps,
+        _ => vec![10 * 60 * 1000],
+    };
+
     let params = FsrsParams {
-        w: weights,
-        request_retention,
-        maximum_interval: None,
-        learning_steps: None,
+        weights,
+        request_retention: request_retention.unwrap_or(0.90),
+        maximum_interval: 36500.0,
+        learning_steps: vec![10 * 60 * 1000],
         relearning_steps,
-        enable_fuzz: None,
         due_counts: None,
         sibling_due_offset: None,
     };
