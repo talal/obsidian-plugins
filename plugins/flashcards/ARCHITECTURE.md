@@ -461,6 +461,10 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 - **Multi-Deck Queue Assembly**: Checkbox selection and row toggling allow assembling a custom multi-tag study queue, with a dynamic action button indicating total workload (`[ Study selected (X due • Y total) ]`).
 - **Interactive Column Sorting**: All table headers support bidirectional sorting (`Tag`, `Due`, `New`, `Total`).
 
+### 9.5 Right-to-Left (RTL) & Bidirectional Typography Support
+- **Logical CSS Properties**: Interface layouts, margins, paddings, and table alignments strictly utilize logical properties (`margin-inline-start`, `text-align: start`, `text-align: end`, `inset: 0`) ensuring native horizontal mirroring when `.mod-rtl` is active on `body`.
+- **Bidirectional Content Isolation (`unicode-bidi: plaintext` & `dir="auto"`)**: All single-line user-authored texts (note titles, breadcrumbs, tags, text previews, search inputs) specify `unicode-bidi: plaintext` and `dir="auto"` to prevent character reordering, punctuation flipping, and ellipsis (`…`) truncation anomalies across mixed LTR/RTL notes.
+
 ---
 
 ## 10. Registered Commands

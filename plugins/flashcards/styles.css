@@ -307,7 +307,7 @@
 	background: var(--background-modifier-border);
 	border-radius: var(--radius-s);
 	color: var(--text-muted);
-	margin-left: var(--size-4-1);
+	margin-inline-start: var(--size-4-1);
 }
 
 .fc-metric-sub {
@@ -377,7 +377,7 @@
 
 .fc-tag-table .fc-col-tag {
 	width: auto;
-	text-align: left;
+	text-align: start;
 	padding: var(--size-4-1) var(--size-4-3);
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -386,7 +386,7 @@
 
 .fc-tag-table .fc-col-num {
 	width: 60px;
-	text-align: right;
+	text-align: end;
 	padding: var(--size-4-1) var(--size-4-3);
 	font-variant-numeric: tabular-nums;
 	white-space: nowrap;
@@ -422,6 +422,9 @@
 .fc-note-link,
 .fc-text-preview,
 .fc-pill,
-.fc-search-box input {
+.fc-search-box input,
+.fc-crumb-deck,
+.fc-note-title,
+.fc-tag-table .fc-col-tag {
 	unicode-bidi: plaintext;
 }
