@@ -27,6 +27,15 @@ import {
 	type SchedulingCard,
 	type SessionRecord,
 } from '../src/types.ts';
+import {
+	addCardLeechTagInMarkdown,
+	addCardTag,
+	hasCardTag,
+	isLeechThresholdMet,
+	removeCardTag,
+	toggleCardTag,
+	toggleCardTodoInMarkdown,
+} from '../src/utils/cardTagModifier.ts';
 import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardCards.ts';
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
@@ -43,7 +52,6 @@ import {
 	parseStudySteps,
 } from '../src/utils/studySteps.ts';
 import { computeTagDeckStats } from '../src/utils/tagStats.ts';
-import { toggleCardTodoInMarkdown } from '../src/utils/todoTag.ts';
 import { WasmBridge } from '../src/wasm.ts';
 
 describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
@@ -853,39 +861,150 @@ describe('Settings Defaults & Review Metrics', () => {
 	});
 });
 
-describe('Markdown #todo/card Tag Toggling', () => {
-	it('appends #todo/card to the question line of block cards before the divider', () => {
-		const original = `%% card-start id=k9x2mp %%\nWhat is mitochondria?\n...\nPowerhouse of the cell\n%% card-end %%`;
-		const updated = toggleCardTodoInMarkdown(original, 'k9x2mp', 'block');
-		expect(updated).toBe(
-			`%% card-start id=k9x2mp %%\nWhat is mitochondria? #todo/card\n...\nPowerhouse of the cell\n%% card-end %%`,
+describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / toggleCardTag)', () => {
+	it('handles adding tags when NO tags exist across all card types', () => {
+		// 1. Inline card
+		const inlineNoTags = 'What is the powerhouse of the cell? :: Mitochondria ^pwr01';
+		const taggedInline = addCardTag(inlineNoTags, 'pwr01', 'inline', '#card/leech');
+		expect(taggedInline).toBe(
+			'What is the powerhouse of the cell? :: Mitochondria #card/leech ^pwr01',
+		);
+
+		// 2. Cloze card
+		const clozeNoTags = 'The speed of light is ==3x10^8 m/s== in vacuum. ^spd01';
+		const taggedCloze = addCardTag(clozeNoTags, 'spd01', 'cloze', '#card/todo');
+		expect(taggedCloze).toBe('The speed of light is ==3x10^8 m/s== in vacuum. #card/todo ^spd01');
+
+		// 3. Block card
+		const blockNoTags = `%% card-start id=blk01 %%\nWhat is photosynthesis?\n...\nProcess by which plants make food\n%% card-end %%`;
+		const taggedBlock = addCardTag(blockNoTags, 'blk01', 'block', '#card/leech');
+		expect(taggedBlock).toBe(
+			`%% card-start id=blk01 %%\nWhat is photosynthesis? #card/leech\n...\nProcess by which plants make food\n%% card-end %%`,
 		);
 	});
 
-	it('removes #todo/card from block card without modifying the header or answer', () => {
-		const tagged = `%% card-start id=k9x2mp %%\nWhat is mitochondria? #todo/card\n...\nPowerhouse of the cell\n%% card-end %%`;
-		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'block');
-		expect(untagged).toBe(
-			`%% card-start id=k9x2mp %%\nWhat is mitochondria?\n...\nPowerhouse of the cell\n%% card-end %%`,
+	it('handles adding tags when OTHER tags already exist', () => {
+		// 1. Single existing tag at end of inline card
+		const inlineOneTag = 'Capital of France :: Paris #geography ^geo01';
+		const taggedOne = addCardTag(inlineOneTag, 'geo01', 'inline', '#card/leech');
+		expect(taggedOne).toBe('Capital of France :: Paris #geography #card/leech ^geo01');
+
+		// 2. Multiple existing tags
+		const inlineMultiTag = 'Capital of Germany :: Berlin #geo #europe #capitals ^ger01';
+		const taggedMulti = addCardTag(inlineMultiTag, 'ger01', 'inline', '#card/leech');
+		expect(taggedMulti).toBe(
+			'Capital of Germany :: Berlin #geo #europe #capitals #card/leech ^ger01',
+		);
+
+		// 3. Existing tag in the question part of the card
+		const inlineQuestionTag = 'Derivative of #math sin(x)? :: cos(x) ^der01';
+		const taggedQuestion = addCardTag(inlineQuestionTag, 'der01', 'inline', '#card/leech');
+		expect(taggedQuestion).toBe('Derivative of #math sin(x)? :: cos(x) #card/leech ^der01');
+
+		// 4. Block card with existing tags on question line
+		const blockWithTag = `%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam\n...\nCell division\n%% card-end %%`;
+		const taggedBlock = addCardTag(blockWithTag, 'blk02', 'block', '#card/leech');
+		expect(taggedBlock).toBe(
+			`%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam #card/leech\n...\nCell division\n%% card-end %%`,
+		);
+
+		// 5. Block card with tag already in header line
+		const blockHeaderTag = `%% card-start id=blk03 #card/leech %%\nWhat is meiosis?\n...\nSexual cell division\n%% card-end %%`;
+		expect(hasCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(true);
+		expect(addCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(blockHeaderTag);
+	});
+
+	it('handles removing tags cleanly across all positions (first, middle, last, sole tag)', () => {
+		// 1. Sole tag
+		const sole = 'Concept :: Definition #card/leech ^s01';
+		expect(removeCardTag(sole, 's01', 'inline', '#card/leech')).toBe('Concept :: Definition ^s01');
+
+		// 2. First of multiple tags
+		const first = 'Concept :: Definition #card/leech #tagA #tagB ^s02';
+		expect(removeCardTag(first, 's02', 'inline', '#card/leech')).toBe(
+			'Concept :: Definition #tagA #tagB ^s02',
+		);
+
+		// 3. Middle tag
+		const middle = 'Concept :: Definition #tagA #card/leech #tagB ^s03';
+		expect(removeCardTag(middle, 's03', 'inline', '#card/leech')).toBe(
+			'Concept :: Definition #tagA #tagB ^s03',
+		);
+
+		// 4. Last tag of multiple
+		const last = 'Concept :: Definition #tagA #tagB #card/leech ^s04';
+		expect(removeCardTag(last, 's04', 'inline', '#card/leech')).toBe(
+			'Concept :: Definition #tagA #tagB ^s04',
+		);
+
+		// 5. Block card tag removal
+		const blockTagged = `%% card-start id=blk04 %%\nQuestion line #tagA #card/leech #tagB\n...\nAnswer\n%% card-end %%`;
+		const blockRemoved = removeCardTag(blockTagged, 'blk04', 'block', '#card/leech');
+		expect(blockRemoved).toBe(
+			`%% card-start id=blk04 %%\nQuestion line #tagA #tagB\n...\nAnswer\n%% card-end %%`,
 		);
 	});
 
-	it('toggles #todo/card before ^id for inline cards', () => {
-		const original = `Capital of France :: Paris ^k9x2mp`;
-		const tagged = toggleCardTodoInMarkdown(original, 'k9x2mp', 'inline');
-		expect(tagged).toBe(`Capital of France :: Paris #todo/card ^k9x2mp`);
+	it('preserves leading indentation, markdown bullet prefixes, and exponent carets', () => {
+		// 1. Bullet list item
+		const bullet = '- What is IPv6? :: 128-bit IP address ^ip01';
+		const taggedBullet = addCardTag(bullet, 'ip01', 'inline', '#card/leech');
+		expect(taggedBullet).toBe('- What is IPv6? :: 128-bit IP address #card/leech ^ip01');
 
-		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'inline');
-		expect(untagged).toBe(`Capital of France :: Paris ^k9x2mp`);
+		const untaggedBullet = removeCardTag(taggedBullet, 'ip01', 'inline', '#card/leech');
+		expect(untaggedBullet).toBe('- What is IPv6? :: 128-bit IP address ^ip01');
+
+		// 2. Indented item (e.g. 4 spaces)
+		const indented = '    Indented concept :: Indented explanation ^ind01';
+		const taggedIndented = addCardTag(indented, 'ind01', 'inline', '#card/leech');
+		expect(taggedIndented).toBe('    Indented concept :: Indented explanation #card/leech ^ind01');
+
+		// 3. Math exponents containing caret symbols
+		const mathCaret = 'Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles ^mth01';
+		const taggedMath = addCardTag(mathCaret, 'mth01', 'inline', '#card/leech');
+		expect(taggedMath).toBe(
+			'Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles #card/leech ^mth01',
+		);
+
+		const untaggedMath = removeCardTag(taggedMath, 'mth01', 'inline', '#card/leech');
+		expect(untaggedMath).toBe('Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles ^mth01');
 	});
 
-	it('toggles #todo/card before ^id for cloze cards', () => {
-		const original = `The {{c1::mitochondria}} is powerhouse. ^k9x2mp`;
-		const tagged = toggleCardTodoInMarkdown(original, 'k9x2mp', 'cloze');
-		expect(tagged).toBe(`The {{c1::mitochondria}} is powerhouse. #todo/card ^k9x2mp`);
+	it('strictly enforces word boundary safety for substring tag names', () => {
+		// Content has substring tags: #card/leech2, #card/leech-review, #my-card/leech
+		const doc = 'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech ^sub01';
 
-		const untagged = toggleCardTodoInMarkdown(tagged, 'k9x2mp', 'cloze');
-		expect(untagged).toBe(`The {{c1::mitochondria}} is powerhouse. ^k9x2mp`);
+		// Target: #card/leech
+		expect(hasCardTag(doc, 'sub01', 'inline', '#card/leech')).toBe(false);
+
+		// Adding #card/leech places it properly
+		const added = addCardTag(doc, 'sub01', 'inline', '#card/leech');
+		expect(added).toBe(
+			'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech #card/leech ^sub01',
+		);
+		expect(hasCardTag(added, 'sub01', 'inline', '#card/leech')).toBe(true);
+
+		// Removing #card/leech does not disturb the substring tags
+		const removed = removeCardTag(added, 'sub01', 'inline', '#card/leech');
+		expect(removed).toBe(
+			'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech ^sub01',
+		);
+	});
+
+	it('handles multiline block cards with blank lines or comments before divider', () => {
+		const multilineBlock = `%% card-start id=blk05 %%
+First line of multiline question
+Second line of question
+
+...
+Answer content
+%% card-end %%`;
+
+		const tagged = addCardTag(multilineBlock, 'blk05', 'block', '#card/leech');
+		expect(tagged).toContain('Second line of question #card/leech\n\n...');
+
+		const untagged = removeCardTag(tagged, 'blk05', 'block', '#card/leech');
+		expect(untagged).toBe(multilineBlock);
 	});
 });
 
@@ -1334,7 +1453,7 @@ describe('Advanced Metrics & Edge Case Boundaries', () => {
 		const original = `%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n...\nAnswer content\n%% card-end %%`;
 		const tagged = toggleCardTodoInMarkdown(original, 'x89z12', 'block');
 		expect(tagged).toBe(
-			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #todo/card\n...\nAnswer content\n%% card-end %%`,
+			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #card/todo\n...\nAnswer content\n%% card-end %%`,
 		);
 
 		const untagged = toggleCardTodoInMarkdown(tagged, 'x89z12', 'block');
@@ -2431,44 +2550,92 @@ describe('Dual-Slot Snapshot Binary Fuzzing & Corruption Resilience', () => {
 	});
 });
 
-describe('Todo Tag (#todo/card) Property Fuzzing & Unicode Invariants', () => {
-	it('fuzzes toggling on arbitrary markdown and maintains idempotency and block ID placement', () => {
-		const sampleBlockIds = ['abc123', '9x2k0p', 'zzz999', '000000'];
+describe('Generic Card Tag Modifier Property Fuzzing & Unicode Invariants', () => {
+	it('fuzzes adding and removing arbitrary tags across all card types with strict placement and parser invariants', () => {
+		const sampleBlockIds = ['abc123', '9x2k0p', 'zzz999', '000000', 'k8m2qp'];
+		const sampleTags = [
+			'#card/todo',
+			'#card/leech',
+			'#custom/nested/topic',
+			'#math-tag',
+			'tagWithoutHash',
+		];
 		const sampleTexts = [
 			'Simple question :: Simple answer',
 			'What is the capital of Japan? ::: Tokyo',
 			'The speed of light is {{299,792,458 m/s}} in vacuum.',
 			'پانی ::: Water #ذخیرہ',
 			'Multiple clozes {{one}} and {{two}} in sentence.',
-			'Question with `code::here` :: Answer with $x::y$',
+			'Question with `code::here` and math $E=mc^2$ :: Answer with $x::y$',
+			'Exponent formula $f(x) = x^2 + y^3$ :: Quadratic function',
 			'Question with existing tags #vocab #important :: Answer',
 		];
 
 		for (const text of sampleTexts) {
 			for (const blockId of sampleBlockIds) {
-				const inlineDoc = `${text} ^${blockId}\n`;
+				for (const tag of sampleTags) {
+					const normalizedTag = tag.startsWith('#') ? tag : `#${tag}`;
+					const cleanTag = normalizedTag.replace(/^#/, '');
 
-				// Toggle ON
-				const tagged = toggleCardTodoInMarkdown(inlineDoc, blockId, 'inline');
-				expect(tagged).toContain('#todo/card');
-				expect(tagged.trimEnd().endsWith(`^${blockId}`)).toBe(true);
+					// 1. Inline & Cloze Cards Placement Invariants
+					const inlineDoc = `${text} ^${blockId}\n`;
+					const taggedInline = addCardTag(inlineDoc, blockId, 'inline', tag);
 
-				// Toggle OFF
-				const untagged = toggleCardTodoInMarkdown(tagged, blockId, 'inline');
-				expect(untagged).not.toContain('#todo/card');
-				expect(untagged.trimEnd().endsWith(`^${blockId}`)).toBe(true);
+					// Invariant 1: Tag is present
+					expect(hasCardTag(taggedInline, blockId, 'inline', tag)).toBe(true);
 
-				// Block card toggle ON and OFF
-				const blockDoc = `%% card-start id=${blockId} %%\n${text}\n...\nAnswer content\n%% card-end %%\n`;
-				const taggedBlock = toggleCardTodoInMarkdown(blockDoc, blockId, 'block');
-				expect(taggedBlock).toContain('#todo/card');
-				expect(taggedBlock).toContain(`%% card-start id=${blockId}`);
-				expect(taggedBlock).toContain('%% card-end %%');
+					// Invariant 2: Line ends strictly with `^${blockId}`
+					const trimmedInline = taggedInline.trimEnd();
+					expect(trimmedInline.endsWith(`^${blockId}`)).toBe(true);
 
-				const untaggedBlock = toggleCardTodoInMarkdown(taggedBlock, blockId, 'block');
-				expect(untaggedBlock).not.toContain('#todo/card');
-				expect(untaggedBlock).toContain(`%% card-start id=${blockId}`);
-				expect(untaggedBlock).toContain('%% card-end %%');
+					// Invariant 3: Tag is located immediately before `^${blockId}`
+					expect(trimmedInline).toContain(`${normalizedTag} ^${blockId}`);
+
+					// Invariant 4: Idempotency
+					expect(addCardTag(taggedInline, blockId, 'inline', tag)).toBe(taggedInline);
+
+					// Invariant 5: Removal restores clean document without mangling block ID
+					const untaggedInline = removeCardTag(taggedInline, blockId, 'inline', tag);
+					expect(hasCardTag(untaggedInline, blockId, 'inline', tag)).toBe(false);
+					expect(untaggedInline.trimEnd().endsWith(`^${blockId}`)).toBe(true);
+
+					// Invariant 6: WASM Parser round-trip includes tag in parsed block
+					const parsedInline = WasmBridge.syncDocument(taggedInline, new Set<string>(), []);
+					expect(parsedInline.blocks.length).toBeGreaterThanOrEqual(1);
+					const matchedInlineBlock = parsedInline.blocks.find((b) => b.id === blockId);
+					expect(matchedInlineBlock).toBeDefined();
+					expect(matchedInlineBlock!.tags).toContain(cleanTag);
+
+					// 2. Block Cards Placement Invariants
+					const blockDoc = `%% card-start id=${blockId} %%\n${text}\n...\nAnswer content\n%% card-end %%\n`;
+					const taggedBlock = addCardTag(blockDoc, blockId, 'block', tag);
+
+					// Invariant 1: Tag is present
+					expect(hasCardTag(taggedBlock, blockId, 'block', tag)).toBe(true);
+
+					// Invariant 2: Block delimiters are preserved
+					expect(taggedBlock).toContain(`%% card-start id=${blockId} %%`);
+					expect(taggedBlock).toContain('%% card-end %%');
+
+					// Invariant 3: Tag is placed before the divider `...`
+					expect(taggedBlock).toContain(`${normalizedTag}\n...`);
+
+					// Invariant 4: Idempotency
+					expect(addCardTag(taggedBlock, blockId, 'block', tag)).toBe(taggedBlock);
+
+					// Invariant 5: Removal
+					const untaggedBlock = removeCardTag(taggedBlock, blockId, 'block', tag);
+					expect(hasCardTag(untaggedBlock, blockId, 'block', tag)).toBe(false);
+					expect(untaggedBlock).toContain(`%% card-start id=${blockId} %%`);
+					expect(untaggedBlock).toContain('%% card-end %%');
+
+					// Invariant 6: WASM Parser round-trip includes tag in parsed block
+					const parsedBlock = WasmBridge.syncDocument(taggedBlock, new Set<string>(), []);
+					expect(parsedBlock.blocks.length).toBeGreaterThanOrEqual(1);
+					const matchedBlock = parsedBlock.blocks.find((b) => b.id === blockId);
+					expect(matchedBlock).toBeDefined();
+					expect(matchedBlock!.tags).toContain(cleanTag);
+				}
 			}
 		}
 	});
@@ -3082,5 +3249,131 @@ describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
 		const stats = dbManager2.getDashboardStats(4);
 		expect(stats.studiedToday).toBe(1);
 		expect(stats.dailyRetention).toBe(100);
+	});
+
+	describe('Leech Detection & Auto-Tagging (#card/leech)', () => {
+		it('calculates leech threshold triggers accurately according to lapse formula', () => {
+			// Threshold = 4 (default): triggers at 4, 6, 8, 10...
+			expect(isLeechThresholdMet(0, 4)).toBe(false);
+			expect(isLeechThresholdMet(1, 4)).toBe(false);
+			expect(isLeechThresholdMet(2, 4)).toBe(false);
+			expect(isLeechThresholdMet(3, 4)).toBe(false);
+			expect(isLeechThresholdMet(4, 4)).toBe(true);
+			expect(isLeechThresholdMet(5, 4)).toBe(false);
+			expect(isLeechThresholdMet(6, 4)).toBe(true);
+			expect(isLeechThresholdMet(7, 4)).toBe(false);
+			expect(isLeechThresholdMet(8, 4)).toBe(true);
+
+			// Threshold = 8 (Anki default): triggers at 8, 12, 16...
+			expect(isLeechThresholdMet(7, 8)).toBe(false);
+			expect(isLeechThresholdMet(8, 8)).toBe(true);
+			expect(isLeechThresholdMet(9, 8)).toBe(false);
+			expect(isLeechThresholdMet(10, 8)).toBe(false);
+			expect(isLeechThresholdMet(11, 8)).toBe(false);
+			expect(isLeechThresholdMet(12, 8)).toBe(true);
+
+			// Threshold = 1: triggers at every lapse (1, 2, 3...)
+			expect(isLeechThresholdMet(0, 1)).toBe(false);
+			expect(isLeechThresholdMet(1, 1)).toBe(true);
+			expect(isLeechThresholdMet(2, 1)).toBe(true);
+
+			// Threshold = 0: disabled
+			expect(isLeechThresholdMet(0, 0)).toBe(false);
+			expect(isLeechThresholdMet(4, 0)).toBe(false);
+			expect(isLeechThresholdMet(8, 0)).toBe(false);
+		});
+
+		it('adds #card/leech tag to inline, block, and cloze cards correctly', () => {
+			// 1. Inline card
+			const inlineMd = 'What is the capital of France? :: Paris ^in01';
+			const taggedInline = addCardLeechTagInMarkdown(inlineMd, 'in01', 'inline', '#card/leech');
+			expect(taggedInline).toBe('What is the capital of France? :: Paris #card/leech ^in01');
+
+			// Idempotency: second call returns identical content
+			expect(addCardLeechTagInMarkdown(taggedInline, 'in01', 'inline', '#card/leech')).toBe(
+				taggedInline,
+			);
+
+			// 2. Cloze card
+			const clozeMd = 'The capital of France is ==Paris==. ^cl01';
+			const taggedCloze = addCardLeechTagInMarkdown(clozeMd, 'cl01', 'cloze', '#card/leech');
+			expect(taggedCloze).toBe('The capital of France is ==Paris==. #card/leech ^cl01');
+
+			// 3. Block card
+			const blockMd = `%% card-start id=blk01 %%
+What is the powerhouse
+of the cell?
+---
+Mitochondria
+%% card-end %%`;
+			const taggedBlock = addCardLeechTagInMarkdown(blockMd, 'blk01', 'block', '#card/leech');
+			expect(taggedBlock).toContain('of the cell? #card/leech\n---');
+
+			// Idempotency
+			expect(addCardLeechTagInMarkdown(taggedBlock, 'blk01', 'block', '#card/leech')).toBe(
+				taggedBlock,
+			);
+		});
+
+		it('removes and toggles card tags cleanly without breaking block IDs or formatting', () => {
+			const inlineMd = 'What is DNS? :: Domain Name System #card/leech ^dns01';
+			expect(hasCardTag(inlineMd, 'dns01', 'inline', '#card/leech')).toBe(true);
+			expect(hasCardTag(inlineMd, 'dns01', 'inline', '#card/todo')).toBe(false);
+
+			// Word boundary safety: does not match substring tag
+			const falseTagMd = 'What is DNS? :: Domain Name System #card/leech2 ^dns01';
+			expect(hasCardTag(falseTagMd, 'dns01', 'inline', '#card/leech')).toBe(false);
+
+			// Remove tag
+			const removed = removeCardTag(inlineMd, 'dns01', 'inline', '#card/leech');
+			expect(removed).toBe('What is DNS? :: Domain Name System ^dns01');
+
+			// Toggle tag
+			const toggledOn = toggleCardTag(removed, 'dns01', 'inline', '#card/leech');
+			expect(toggledOn).toBe('What is DNS? :: Domain Name System #card/leech ^dns01');
+
+			const toggledOff = toggleCardTag(toggledOn, 'dns01', 'inline', '#card/leech');
+			expect(toggledOff).toBe('What is DNS? :: Domain Name System ^dns01');
+		});
+
+		it('syncs #card/leech into database blocks table when note is modified', () => {
+			const rawDb = new SQL.Database();
+			const db = DatabaseManager.createInMemory(rawDb);
+			const filePath = 'Notes/LeechTest.md';
+
+			// 1. Initial sync without leech tag
+			db.syncNoteBlocks(filePath, [
+				{
+					id: 'l01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Hard concept?',
+					back: 'Answer',
+					tags: ['biology'],
+					line_start: 1,
+					line_end: 1,
+				},
+			]);
+
+			let cards = db.getAllCards();
+			expect(cards[0]!.tags).toEqual(['biology']);
+
+			// 2. Add #card/leech and re-sync
+			db.syncNoteBlocks(filePath, [
+				{
+					id: 'l01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Hard concept?',
+					back: 'Answer',
+					tags: ['biology', 'card/leech'],
+					line_start: 1,
+					line_end: 1,
+				},
+			]);
+
+			cards = db.getAllCards();
+			expect(cards[0]!.tags).toContain('card/leech');
+		});
 	});
 });

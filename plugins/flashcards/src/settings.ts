@@ -163,6 +163,58 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 					});
 			});
 
+		new Setting(containerEl)
+			.setName('Leech threshold')
+			.setDesc(
+				'Number of lapses (times Again is pressed on a review card) before the card is marked as a leech. Set to 0 to disable. Default: 4.',
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder('4')
+					.setValue(
+						this.plugin.settings.leechThreshold !== undefined
+							? String(this.plugin.settings.leechThreshold)
+							: '',
+					)
+					.onChange(async (val) => {
+						const trimmed = val.trim();
+						if (!trimmed) {
+							delete this.plugin.settings.leechThreshold;
+							await this.plugin.saveSettings();
+						} else {
+							const num = parseInt(trimmed, 10);
+							if (!isNaN(num) && num >= 0) {
+								if (num === 4) {
+									delete this.plugin.settings.leechThreshold;
+								} else {
+									this.plugin.settings.leechThreshold = num;
+								}
+								await this.plugin.saveSettings();
+							}
+						}
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Leech tag')
+			.setDesc(
+				'Tag automatically added to the note markdown when a card reaches the leech threshold. Default: #card/leech.',
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder('#card/leech')
+					.setValue(this.plugin.settings.leechTag || '')
+					.onChange(async (val) => {
+						const trimmed = val.trim();
+						if (!trimmed || trimmed === '#card/leech') {
+							delete this.plugin.settings.leechTag;
+						} else {
+							this.plugin.settings.leechTag = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+						}
+						await this.plugin.saveSettings();
+					});
+			});
+
 		const weightsDesc = this.plugin.settings.customWeights
 			? `Custom weights: ${this.plugin.settings.customWeights}`
 			: 'Using default FSRS-6 weights.';

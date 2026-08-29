@@ -54,7 +54,7 @@ Capital of Pakistan? ::: Islamabad ^k9x2mp
 Wrapped inside Obsidian comment markers `%% ... %%` so metadata is completely invisible in Reading View and Live Preview:
 ```markdown
 %% card-start id=k9x2mp reversible=true %%
-What are the largest cities of Pakistan? #todo/card
+What are the largest cities of Pakistan? #card/todo
 
 ...
 
@@ -88,7 +88,7 @@ Card syntax is parsed with AST source protection:
 2. Inline code spans, fenced code blocks, display math, tables, blockquotes, callouts, raw HTML, and YAML metadata are strictly protected from matching card separators or cloze markers.
 3. Non-card prose in notes is ignored gracefully without causing parser errors or aborting scans.
 
-### 2.6 Tag Composition & `#todo/card` Mechanics
+### 2.6 Tag Composition & `#card/todo` Mechanics
 A block's effective tags are the union of its containing note's YAML frontmatter tags and any inline `#tags` found inside the block:
 
 ```markdown
@@ -103,21 +103,21 @@ Capital of California :: San Francisco #cs ^xyz102
 <!-- Tags: geography, cs -->
 
 %% card-start id=xyz103 %%
-Why is Silicon Valley called that? #silicon #todo/card
+Why is Silicon Valley called that? #silicon #card/todo
 
 ...
 
 Because it's got that Silicon #chips ;)
 %% card-end %%
-<!-- Tags: geography, silicon, todo/card, chips -->
+<!-- Tags: geography, silicon, card/todo, chips -->
 ```
 
 - **Tag Scope**: For block cards, all `#tags` appearing between `%% card-start %%` and `%% card-end %%` (in both front and back) are associated with the block.
-- **`#todo/card` Toggle Mechanics (Hotkey <kbd>T</kbd> during review)**:
-  - **Removal (Toggle Off)**: Searches and removes `#todo/card` wherever it appears in the block's text, normalizing whitespace.
+- **`#card/todo` Toggle Mechanics (Hotkey <kbd>T</kbd> during review)**:
+  - **Removal (Toggle Off)**: Searches and removes `#card/todo` wherever it appears in the block's text, normalizing whitespace.
   - **Addition (Toggle On)**:
-    - **Inline & Cloze Cards**: Appended at the end of the line right before the `^<id>` block identifier (e.g. `Question :: Answer #todo/card ^xyz101`).
-    - **Block Cards**: Appended at the **end of the question line/section** (e.g. `Why is X? #todo/card\n...\nAnswer` or `Q: Why is X? #todo/card\nAnswer`).
+    - **Inline & Cloze Cards**: Appended at the end of the line right before the `^<id>` block identifier (e.g. `Question :: Answer #card/todo ^xyz101`).
+    - **Block Cards**: Appended at the **end of the question line/section** (e.g. `Why is X? #card/todo\n...\nAnswer` or `Q: Why is X? #card/todo\nAnswer`).
     - **Why Question Placement**: Tags must **never** be placed on the `%% card-start %%` comment line because Obsidian's native tag indexer and global search ignore tags enclosed inside Markdown comment brackets `%%`. Placing it in the visible question ensures it is indexed natively across Obsidian.
 
 ---
@@ -346,11 +346,25 @@ Rather than blindly applying random jitter, the Rust WASM core (`calculate_load_
 
 ---
 
-## 8. Dual-Slot Recoverable Persistence Protocol (`cards.a.db` / `cards.b.db`)
+## 8. Leech Management & Automatic Tagging (`#card/leech`)
+
+Cards that fail repeatedly ("leeches") consume disproportionate study time. The plugin provides automated leech tagging directly within the user's Markdown notes:
+
+1. **Mathematical Threshold Detection**:
+   Using the formula $L \ge T \land (L - T) \pmod{\lceil T/2 \rceil} = 0$, when a review card lapses to the configured threshold $T$ (default: 4), or every half-threshold thereafter ($4, 6, 8, 10\dots$), a leech event triggers.
+2. **Markdown Auto-Tagging**:
+   - The plugin automatically appends `#card/leech` to the card line or question block in Markdown using `addCardLeechTagInMarkdown`.
+   - Single-pass note synchronization updates the SQLite database blocks table with the `card/leech` tag.
+3. **Non-Blocking UI Notice**:
+   An Obsidian notice informs the user (`⚡ Card marked as leech (#card/leech) after 4 lapses`) without blocking their study flow.
+
+---
+
+## 9. Dual-Slot Recoverable Persistence Protocol (`cards.a.db` / `cards.b.db`)
 
 Obsidian mobile and desktop storage adapters do not expose POSIX `fsync` or guaranteed atomic file replacement on `rename`. Rather than assuming atomicity, the plugin uses a **Dual-Slot Alternating Snapshot Protocol**:
 
-### 7.1 Slot Header Structure
+### 9.1 Slot Header Structure
 
 Each snapshot file (`cards.a.db` and `cards.b.db`) starts with a fixed 48-byte header:
 
@@ -367,7 +381,7 @@ flowchart TD
     end
 ```
 
-### 7.2 Write Lifecycle
+### 9.2 Write Lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -541,6 +555,7 @@ plugins/flashcards/
 │   │       ├── ReviewModal.svelte
 │   │       └── TagPickerModal.svelte
 │   └── utils/
+│       ├── cardTagModifier.ts    # Generic card tag adding, removing, and toggling
 │       ├── dashboardCards.ts     # Block grouping & reverse metrics consolidation
 │       ├── dashboardFilter.ts    # Tag matching & text search filters
 │       ├── reviewMetrics.ts      # Progress & retention calculations
@@ -548,8 +563,7 @@ plugins/flashcards/
 │       ├── siblingBurying.ts     # Anti-priming priority ranking & queue filtering
 │       ├── studyDay.ts           # 4:00 AM rollover & streak date calculations
 │       ├── studySteps.ts         # Duration string parsing
-│       ├── tagStats.ts           # Tag deck statistics aggregation
-│       └── todoTag.ts            # #todo/card tag toggling in Markdown
+│       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (70 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (76 tests)
 ```

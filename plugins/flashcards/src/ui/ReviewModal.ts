@@ -1,15 +1,19 @@
-import { App, Modal, TFile } from 'obsidian';
+import { App, Modal, Notice, TFile } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
 import type { FsrsParams, ReviewItem, SchedulingCard } from '../types.js';
+import {
+	addCardLeechTagInMarkdown,
+	isLeechThresholdMet,
+	toggleCardTodoInMarkdown,
+} from '../utils/cardTagModifier.js';
 import { ReviewSessionCache } from '../utils/ReviewSessionCache.js';
 import {
 	DEFAULT_LEARNING_STEPS,
 	DEFAULT_RELEARNING_STEPS,
 	parseStudySteps,
 } from '../utils/studySteps.js';
-import { toggleCardTodoInMarkdown } from '../utils/todoTag.js';
 import { WasmBridge } from '../wasm.js';
 import ReviewModalComponent from './components/ReviewModal.svelte';
 
@@ -101,6 +105,16 @@ export class ReviewModal extends Modal {
 		this.hasUnsavedChanges = true;
 
 		this.applySchedulingCard(item, candidate.card);
+
+		// Check Leech threshold on lapses (Forgot on review/relearning card)
+		const leechThreshold = this.plugin.settings.leechThreshold ?? 4;
+		if (
+			ratingStr === 'forgot' &&
+			(previousCard.state === 'review' || previousCard.state === 'relearning') &&
+			isLeechThresholdMet(candidate.card.lapses, leechThreshold)
+		) {
+			void this.handleCardLeech(item, candidate.card.lapses);
+		}
 	}
 
 	private handleCardUndo(_item: ReviewItem): void {
@@ -178,6 +192,21 @@ export class ReviewModal extends Modal {
 				await this.app.vault.modify(file, updated);
 				await this.plugin.scanner.syncFile(file);
 				this.plugin.refreshDashboardIfOpen();
+			}
+		}
+	}
+
+	private async handleCardLeech(item: ReviewItem, lapses: number): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(item.notePath);
+		if (file instanceof TFile) {
+			const content = await this.app.vault.read(file);
+			const leechTag = this.plugin.settings.leechTag || '#card/leech';
+			const updated = addCardLeechTagInMarkdown(content, item.blockId, item.blockType, leechTag);
+			if (updated !== content) {
+				await this.app.vault.modify(file, updated);
+				await this.plugin.scanner.syncFile(file);
+				this.plugin.refreshDashboardIfOpen();
+				new Notice(`⚡ Card marked as leech (${leechTag}) after ${lapses} lapses.`);
 			}
 		}
 	}

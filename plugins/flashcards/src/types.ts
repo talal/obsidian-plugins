@@ -174,6 +174,8 @@ export interface FlashcardsPluginSettings {
 	customWeights?: string;
 	enableFuzz?: boolean;
 	rolloverHour?: number;
+	leechThreshold?: number;
+	leechTag?: string;
 }
 
 export const DEFAULT_SETTINGS: FlashcardsPluginSettings = {};

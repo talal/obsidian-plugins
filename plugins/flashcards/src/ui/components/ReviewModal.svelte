@@ -214,13 +214,13 @@
 
 	function handleToggleTodoTag() {
 		if (!currentCard || isProcessing || isFinished) return;
-		const hasTodo = currentCard.tags.includes('todo/card');
+		const hasTodo = currentCard.tags.includes('card/todo');
 		if (hasTodo) {
-			currentCard.tags = currentCard.tags.filter((t) => t !== 'todo/card');
-			showToast('Removed #todo/card tag');
+			currentCard.tags = currentCard.tags.filter((t) => t !== 'card/todo');
+			showToast('Removed #card/todo tag');
 		} else {
-			currentCard.tags.push('todo/card');
-			showToast('Added #todo/card tag');
+			currentCard.tags.push('card/todo');
+			showToast('Added #card/todo tag');
 		}
 		void onToggleTodo?.(currentCard);
 	}
@@ -389,7 +389,7 @@
 							{#if currentCard.direction === 'reverse'}
 								<span class="fc-badge fc-badge-reverse">Reverse</span>
 							{/if}
-							{#if currentCard.tags.includes('todo/card')}
+							{#if currentCard.tags.includes('card/todo')}
 								<span class="fc-badge fc-badge-todo">Todo</span>
 							{/if}
 							<span class="fc-card-due" dir="auto">{currentCard.dueHuman}</span>

@@ -208,7 +208,7 @@ Later question :: Later answer ^8a1b2c
     #[test]
     fn test_extract_tag_from_block_header() {
         let content = r#"
-%% card-start id=37066d reversible=false #todo/card %%
+%% card-start id=37066d reversible=false #card/todo %%
 Question here
 ...
 Answer here
@@ -216,7 +216,7 @@ Answer here
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert!(blocks[0].tags.contains(&"todo/card".to_string()));
+        assert!(blocks[0].tags.contains(&"card/todo".to_string()));
     }
 
     #[test]
