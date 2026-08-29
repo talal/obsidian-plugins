@@ -229,9 +229,9 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 			})
 			.addButton((btn) => {
 				btn.setButtonText('Reset to defaults').onClick(async () => {
-					this.plugin.settings = {};
+					delete this.plugin.settings.customWeights;
 					await this.plugin.saveSettings();
-					new Notice('Settings reset to defaults.');
+					new Notice('FSRS weights reset to defaults.');
 					this.display();
 				});
 			});

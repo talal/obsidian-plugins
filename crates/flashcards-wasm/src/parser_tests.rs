@@ -102,6 +102,19 @@ Answer
     }
 
     #[test]
+    fn test_reject_block_card_without_ellipsis_divider() {
+        let content = r#"
+%% card-start %%
+Q: Capital of France
+
+Paris
+%% card-end %%
+"#;
+        let blocks = parse_markdown_blocks(content, &[]);
+        assert_eq!(blocks.len(), 0, "Block cards require explicit ... divider");
+    }
+
+    #[test]
     fn test_parse_cloze_card() {
         let content = "The register {{%rax}} holds the return value. ^e3d2c1\n";
         let tags = vec!["cs".to_string()];
@@ -138,6 +151,13 @@ Answer
         assert_eq!(blocks[0].id, "123456");
         assert_eq!(blocks[0].front, "The C++ namespace is {{std::vector}}");
         assert_eq!(blocks[0].back, "");
+    }
+
+    #[test]
+    fn test_reject_highlights_and_anki_clozes() {
+        let content = "Obsidian ==highlights== are not flashcards\nRegular text without colons\n";
+        let blocks = parse_markdown_blocks(content, &[]);
+        assert_eq!(blocks.len(), 0, "Only {{...}} syntax is accepted as a cloze");
     }
 
     #[test]
@@ -539,6 +559,102 @@ Real Cloze with {{valid cloze}} here.
         println!("SYNC1 updated:\n{}", synced_text);
         let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
         println!("SYNC2 blocks: {:?}", sync2.blocks);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_trailing_block_id_inside_code_is_ignored() {
+        // Line ends with inline code containing `^abc123`
+        let input = "Question :: Answer with `inline code ^abc123`";
+        let blocks = parse_markdown_blocks(input, &[]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id, ""); // No valid block ID because it is inside code
+        assert_eq!(blocks[0].back, "Answer with `inline code ^abc123`");
+
+        // Line ends with valid block ID outside code
+        let input2 = "Question :: Answer with `inline code` ^abc123";
+        let blocks2 = parse_markdown_blocks(input2, &[]);
+        assert_eq!(blocks2.len(), 1);
+        assert_eq!(blocks2[0].id, "abc123");
+        assert_eq!(blocks2[0].back, "Answer with `inline code`");
+    }
+
+    #[test]
+    fn test_trailing_block_id_inside_math_is_ignored() {
+        // Cloze card with trailing math containing caret
+        let input = "The formula is {{energy}} with math $E = mc^2$";
+        let blocks = parse_markdown_blocks(input, &[]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id, "");
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_rescan_block_count_mismatch_4() {
+        let data: &[u8] = &[
+            61, 8, 116, 10, 60, 115, 116, 58, 96, 116, 105, 0, 10, 116, 10, 8, 116, 10, 60, 115,
+            116, 58, 96, 116, 105, 0, 10, 116, 10, 10, 10, 8, 116, 10, 60, 115, 116, 58, 96, 116,
+            58, 110, 32, 61, 61, 32, 97, 114, 100, 107, 36, 58, 58, 110, 32, 61, 61, 32, 97, 114,
+            10, 10, 114, 10, 10, 114, 10, 10, 10, 10, 10, 10, 10, 114, 10, 10, 10, 10, 42, 10,
+            10, 10, 10, 10, 10, 10, 10, 10, 10, 114, 10, 10, 10, 65, 57, 57, 57, 123, 123, 58, 58,
+            40, 32, 45, 32, 101, 10, 61, 32, 97, 114, 10, 10, 114, 10, 10, 114, 10, 10, 10, 10,
+            10, 10, 10, 105, 0, 10, 10, 8, 116, 10, 60, 115, 116, 58, 96, 114, 10, 10, 10, 10,
+            42, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 114, 10, 58, 58, 96, 10, 58, 58, 10, 10,
+            10, 122, 10, 60, 73, 90, 90, 90, 122, 90, 90, 69, 32, 58, 58, 110, 73, 61, 10, 97,
+            48, 61, 10, 32, 100, 58, 58, 58, 74, 10, 100, 45, 39, 58, 93, 58, 118, 58, 10, 10,
+            91, 61, 45, 39, 58, 93, 58, 118, 60, 74, 109, 97, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+            9, 9, 100, 111, 93, 10, 10, 32, 61, 46, 58, 58, 96, 10, 58, 58, 10, 10, 10, 122, 10,
+            60, 73, 90, 90, 90, 90, 90, 122, 90, 90, 69, 32, 58, 58, 110, 73, 61, 10, 97, 48, 61,
+            10, 32, 100, 58, 10, 58, 62, 74, 10, 100, 58, 42,
+        ];
+        let input = std::str::from_utf8(data).unwrap();
+        let tags: Vec<String> = data
+            .chunks(5)
+            .take(4)
+            .filter_map(|chunk| std::str::from_utf8(chunk).ok().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty() && !s.contains(char::is_whitespace) && !s.contains('#'))
+            .collect();
+        let line_count = input.lines().count();
+        let hints: Vec<_> = data
+            .chunks(3)
+            .take(32)
+            .map(|chunk| {
+                let start = usize::from(chunk.first().copied().unwrap_or_default())
+                    .checked_rem(line_count.max(1))
+                    .unwrap_or_default();
+                let end = usize::from(chunk.get(1).copied().unwrap_or_default())
+                    .checked_rem(line_count.max(1))
+                    .unwrap_or(start);
+                ObsidianSectionHint {
+                    section_type: match chunk.get(2).copied().unwrap_or_default() % 6 {
+                        0 => "code",
+                        1 => "blockquote",
+                        2 => "table",
+                        3 => "yaml",
+                        4 => "html",
+                        _ => "paragraph",
+                    }
+                    .to_string(),
+                    line_start: start.min(end),
+                    line_end: start.max(end),
+                }
+            })
+            .collect();
+
+        let mut external_ids = HashSet::new();
+        for chunk in data.chunks(6).take(8) {
+            if let Ok(s) = std::str::from_utf8(chunk) {
+                let candidate: String =
+                    s.chars().filter(|c| c.is_ascii_alphanumeric()).take(6).collect();
+                if candidate.len() == 6 && syntax::is_valid_block_id(&candidate) {
+                    external_ids.insert(candidate);
+                }
+            }
+        }
+
+        let sync1 = sync_document(input, &external_ids, &tags, &hints);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
+        let sync2 = sync_document(synced_text, &external_ids, &tags, &hints);
         assert_eq!(sync1.blocks.len(), sync2.blocks.len());
         assert_eq!(sync2.updated_content, None);
     }

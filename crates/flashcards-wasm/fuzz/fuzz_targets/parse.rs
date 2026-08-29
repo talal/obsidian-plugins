@@ -14,7 +14,8 @@ use std::collections::HashSet;
 use std::str;
 
 fn assert_valid_blocks(input: &str, blocks: &[ParsedBlock], require_valid_id: bool) {
-    let line_count = input.lines().count();
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    let line_count = normalized.lines().count().max(1);
     let mut seen_ids = HashSet::new();
 
     for block in blocks {

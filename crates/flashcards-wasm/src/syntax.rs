@@ -97,12 +97,52 @@ pub(crate) fn scan_clozes(line: &str, base_offset: usize, context: &MarkdownCont
     ClozeScan { spans }
 }
 
+pub(crate) fn is_inside_brackets(prefix: &str, initial_depth: usize) -> bool {
+    let mut depth = initial_depth as isize;
+    for c in prefix.chars() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth = (depth - 1).max(0);
+        }
+    }
+    depth > 0
+}
+
+pub(crate) fn has_unmatched_closing_bracket(suffix: &str) -> bool {
+    let mut depth = 0isize;
+    for c in suffix.chars() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth < 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn bracket_depth_delta(line: &str) -> isize {
+    let mut delta = 0isize;
+    for c in line.chars() {
+        if c == '[' {
+            delta += 1;
+        } else if c == ']' {
+            delta -= 1;
+        }
+    }
+    delta
+}
+
 pub(crate) fn split_once_outside_clozes<'a>(
     line: &'a str,
     base_offset: usize,
     separator: &str,
     context: &MarkdownContext,
     cloze_spans: &[Range<usize>],
+    initial_bracket_depth: usize,
 ) -> Option<(&'a str, &'a str)> {
     for (index, _) in line.char_indices() {
         if separator == "::" && line[index..].starts_with(":::") {
@@ -114,7 +154,8 @@ pub(crate) fn split_once_outside_clozes<'a>(
 
         let separator_end = index + separator.len();
         if !context.is_eligible(base_offset + index..base_offset + separator_end)
-            || is_inside_brackets(&line[..index])
+            || is_inside_brackets(&line[..index], initial_bracket_depth)
+            || has_unmatched_closing_bracket(&line[separator_end..])
             || cloze_spans
                 .iter()
                 .any(|span| span.start <= index && index < span.end)
@@ -127,20 +168,7 @@ pub(crate) fn split_once_outside_clozes<'a>(
     None
 }
 
-fn is_inside_brackets(prefix: &str) -> bool {
-    let mut depth = 0isize;
-    for c in prefix.chars() {
-        if c == '[' {
-            depth += 1;
-        } else if c == ']' {
-            depth = (depth - 1).max(0);
-        }
-    }
-    depth > 0
-}
-
-/// Extract a trailing 6-character lowercase base-36 block ID only when
-/// the ID itself belongs to ordinary Markdown text.
+/// Extract a trailing 6-character lowercase base-36 block ID from the end of a line.
 pub(crate) fn split_trailing_block_id<'a>(
     line: &'a str,
     _base_offset: usize,
@@ -159,4 +187,40 @@ pub(crate) fn split_trailing_block_id<'a>(
     }
 
     (trimmed_end[..position].trim_end(), id.to_string())
+}
+
+pub(crate) fn has_unclosed_inline_code(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let run_len = i - start;
+            let mut found_closing = false;
+            while i < bytes.len() {
+                if bytes[i] == b'`' {
+                    let close_start = i;
+                    while i < bytes.len() && bytes[i] == b'`' {
+                        i += 1;
+                    }
+                    let close_run_len = i - close_start;
+                    if close_run_len == run_len {
+                        found_closing = true;
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if !found_closing {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
 }

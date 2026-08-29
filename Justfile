@@ -33,12 +33,12 @@ install-flashcards:
 
 # run fuzzing across the repository
 fuzz:
-    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run parse seeds/parse --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
-    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run protected_syntax --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
-    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run fsrs_schedule --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
-    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run fsrs_optimize --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
-    cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run format --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
-    cd crates/typst-math-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run compile_math --release -- -max_total_time=${FUZZ_TIME:-120} -detect_leaks=0
+    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run parse seeds/parse --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
+    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run protected_syntax --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
+    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run fsrs_schedule --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
+    cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run fsrs_optimize --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
+    cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run format --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
+    cd crates/typst-math-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run compile_math --release -- -max_total_time=${FUZZ_TIME:-300} -detect_leaks=0
     npm run fuzz -w typst-math
     cargo test -p typst-math-wasm --release -- --ignored
 

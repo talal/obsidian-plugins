@@ -156,8 +156,12 @@ export default class FlashcardsPlugin extends Plugin {
 				new Notice('🔍 Scanning entire vault for flashcards...');
 				try {
 					const res = await this.scanner.fullScan();
+					const failureNotice =
+						res.failedFiles.length > 0
+							? ` (${res.failedFiles.length} note(s) had errors, see console)`
+							: '';
 					new Notice(
-						`⚡ Vault scan complete: ${res.totalBlocks} cards across ${res.filesScanned} notes.`,
+						`⚡ Vault scan complete: ${res.totalBlocks} cards across ${res.filesScanned} notes${failureNotice}.`,
 					);
 					this.refreshDashboardIfOpen();
 				} catch (error) {

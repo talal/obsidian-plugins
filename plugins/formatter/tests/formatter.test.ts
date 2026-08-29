@@ -70,4 +70,12 @@ describe('Prettier Formatter', () => {
 		const afterContent = fs.readFileSync(afterPath, 'utf-8');
 		expect(formatted).toBe(afterContent);
 	});
+
+	it('preserves and formats flashcards syntax (inline, cloze, and block cards)', async () => {
+		const beforeContent = fs.readFileSync(path.join(FIXTURES_DIR, 'flashcards_before.md'), 'utf-8');
+		const formatted = await formatMarkdown(beforeContent, mockPlugin);
+		const afterPath = path.join(FIXTURES_DIR, 'flashcards_after.md');
+		const afterContent = fs.readFileSync(afterPath, 'utf-8');
+		expect(formatted).toBe(afterContent);
+	});
 });

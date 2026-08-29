@@ -22,30 +22,39 @@ import type {
 export class WasmBridge {
 	private static isWasmInitialized = false;
 	private static sqlJs: SqlJsStatic | null = null;
+	private static initPromise: Promise<void> | null = null;
 
 	public static initForTest(sqlJs: SqlJsStatic): void {
 		this.sqlJs = sqlJs;
 	}
 
 	public static async initialize(app: App, manifest: PluginManifest): Promise<void> {
-		const dir = manifest.dir ?? '.obsidian/plugins/flashcards';
+		if (!this.initPromise) {
+			this.initPromise = (async () => {
+				const dir = manifest.dir ?? '.obsidian/plugins/flashcards';
 
-		if (!this.isWasmInitialized) {
-			const flashcardsWasmPath = `${dir}/flashcards_wasm_bg.wasm`;
-			const flashcardsWasmBuffer = await app.vault.adapter.readBinary(flashcardsWasmPath);
-			await initWasm({ module_or_path: flashcardsWasmBuffer });
-			init();
-			this.isWasmInitialized = true;
-		}
+				if (!this.isWasmInitialized) {
+					const flashcardsWasmPath = `${dir}/flashcards_wasm_bg.wasm`;
+					const flashcardsWasmBuffer = await app.vault.adapter.readBinary(flashcardsWasmPath);
+					await initWasm({ module_or_path: flashcardsWasmBuffer });
+					init();
+					this.isWasmInitialized = true;
+				}
 
-		if (!this.sqlJs) {
-			const sqlWasmPath = `${dir}/sql-wasm.wasm`;
-			const sqlWasmBuffer = await app.vault.adapter.readBinary(sqlWasmPath);
+				if (!this.sqlJs) {
+					const sqlWasmPath = `${dir}/sql-wasm.wasm`;
+					const sqlWasmBuffer = await app.vault.adapter.readBinary(sqlWasmPath);
 
-			this.sqlJs = await initSqlJs({
-				wasmBinary: sqlWasmBuffer,
+					this.sqlJs = await initSqlJs({
+						wasmBinary: sqlWasmBuffer,
+					});
+				}
+			})().catch((err) => {
+				this.initPromise = null;
+				throw err;
 			});
 		}
+		return this.initPromise;
 	}
 
 	public static createDatabase(binaryData?: Uint8Array): Database {

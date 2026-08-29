@@ -104,36 +104,53 @@ export class NoteScanner {
 	public async fullScan(filesToScan?: TFile[]): Promise<{
 		filesScanned: number;
 		totalBlocks: number;
+		failedFiles: string[];
 	}> {
 		const files = filesToScan ?? this.app.vault.getMarkdownFiles();
 		const validPaths = new Set(files.map((f) => f.path));
 		const ownershipMap = this.db.getBlockFileOwnershipMap();
 		let totalBlocks = 0;
+		const failedFiles: string[] = [];
+
+		// Index block IDs for fast O(1) external set resolution
+		const allBlockIds = new Set<string>();
+		const fileToBlockIds = new Map<string, Set<string>>();
+		for (const [id, ownerPath] of ownershipMap.entries()) {
+			allBlockIds.add(id);
+			let set = fileToBlockIds.get(ownerPath);
+			if (!set) {
+				set = new Set();
+				fileToBlockIds.set(ownerPath, set);
+			}
+			set.add(id);
+		}
 
 		for (const file of files) {
 			try {
-				// External collision set: all IDs claimed by notes other than the current file
-				const externalIds = new Set<string>();
-				for (const [id, ownerPath] of ownershipMap.entries()) {
-					if (ownerPath !== file.path) {
-						externalIds.add(id);
-					}
+				const existingFileIds = fileToBlockIds.get(file.path) ?? new Set<string>();
+
+				// externalIds = allBlockIds without the current file's existing IDs
+				const externalIds = new Set(allBlockIds);
+				for (const id of existingFileIds) {
+					externalIds.delete(id);
 				}
 
 				const blocks = await this.syncFile(file, externalIds, true);
 				totalBlocks += blocks.length;
 
-				// Update ownership map: remove old blocks for this file, register new ones
-				for (const [id, ownerPath] of Array.from(ownershipMap.entries())) {
-					if (ownerPath === file.path) {
-						ownershipMap.delete(id);
-					}
+				// Update index: remove old IDs for this file, insert newly synced IDs
+				for (const id of existingFileIds) {
+					allBlockIds.delete(id);
 				}
+				const newFileIds = new Set<string>();
 				for (const block of blocks) {
-					ownershipMap.set(block.id, file.path);
+					allBlockIds.add(block.id);
+					newFileIds.add(block.id);
 				}
+				fileToBlockIds.set(file.path, newFileIds);
 			} catch (error) {
 				console.error(`[Flashcards] Failed to sync note "${file.path}":`, error);
+				failedFiles.push(file.path);
 			}
 		}
 
@@ -141,9 +158,17 @@ export class NoteScanner {
 		this.db.pruneDeletedNotes(validPaths);
 		await this.db.persist();
 
+		if (failedFiles.length > 0) {
+			console.warn(
+				`[Flashcards] Full vault scan completed with ${failedFiles.length} failed note(s):`,
+				failedFiles,
+			);
+		}
+
 		return {
 			filesScanned: files.length,
 			totalBlocks,
+			failedFiles,
 		};
 	}
 

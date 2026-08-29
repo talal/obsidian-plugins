@@ -276,6 +276,12 @@ pub fn constrained_fuzz_bounds(interval_days: f64, max_ivl: f64) -> (u32, u32) {
 }
 
 /// Computes penalty modifier for days close to sibling due date.
+///
+/// Dispersion penalties prevent sibling cards (e.g. forward and reverse directions
+/// of the same fact) from being reviewed together, preventing priming bias:
+/// - Same day (Δ = 0): 10⁻⁶ multiplier effectively forbids co-scheduling.
+/// - Adjacent days (Δ = 1..4): Graded linear penalty (20% -> 40% -> 60% -> 80%).
+/// - Distant days (Δ >= 5): Full weight (1.0).
 fn sibling_penalty(day: u32, sibling_due_offset: Option<u32>) -> f64 {
     if let Some(sibling_day) = sibling_due_offset {
         let diff = (day as i32 - sibling_day as i32).abs();
@@ -313,13 +319,14 @@ pub fn calculate_load_balanced_interval(
             .and_then(|counts| counts.get(day as usize).copied())
             .unwrap_or(0);
 
+        // Super-linear (p=2.15) inverse load dampening heavily penalizes busy days
         let count_weight = if count == 0 {
             1.0
         } else {
             (1.0 / count as f64).powf(2.15)
         };
 
-        // Slight bias towards earlier intervals to prevent runaway interval expansion
+        // Cubic (1/d³)—bias favors days closer to the target interval, preventing upward interval drift
         let interval_bias = (1.0 / (day as f64)).powi(3);
         let sib_penalty = sibling_penalty(day, sibling_due_offset);
         let weight = (count_weight * interval_bias * sib_penalty).max(1e-12);

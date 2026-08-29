@@ -20,6 +20,7 @@ import {
 } from '../src/db/snapshot.ts';
 import {
 	DEFAULT_SETTINGS,
+	type FlashcardsPluginSettings,
 	type FsrsParams,
 	type ParsedBlock,
 	type ReviewItem,
@@ -36,6 +37,7 @@ import {
 	toggleCardTag,
 	toggleCardTodoInMarkdown,
 } from '../src/utils/cardTagModifier.ts';
+import { formatClozeText } from '../src/utils/clozeFormat.ts';
 import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardCards.ts';
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
@@ -3374,6 +3376,160 @@ Mitochondria
 
 			cards = db.getAllCards();
 			expect(cards[0]!.tags).toContain('card/leech');
+		});
+	});
+
+	describe('Review Findings Regression & Correctness Invariants', () => {
+		it('safely formats cloze deletion text and prevents raw HTML tag injection', () => {
+			const textWithHtml = 'In JavaScript, {{<img src=x onerror=alert(1)>}} is dangerous.';
+
+			// Unrevealed: masked
+			const masked = formatClozeText(textWithHtml, false);
+			expect(masked).toBe(
+				'In JavaScript, <span class="fc-cloze-mask">[ ... ]</span> is dangerous.',
+			);
+			expect(masked).not.toContain('<img');
+
+			// Revealed: escaped HTML inside <mark>
+			const revealed = formatClozeText(textWithHtml, true);
+			expect(revealed).toContain(
+				'<mark class="fc-cloze-revealed">&lt;img src=x onerror=alert(1)&gt;</mark>',
+			);
+			expect(revealed).not.toContain('<img src=x');
+
+			// Standard markdown formatting preserved
+			const markdownCloze = 'The result of {{**strong** & $x < y$}} calculation.';
+			const revealedMd = formatClozeText(markdownCloze, true);
+			expect(revealedMd).toBe(
+				'The result of <mark class="fc-cloze-revealed">**strong** &amp; $x &lt; y$</mark> calculation.',
+			);
+		});
+
+		it('preserves other user settings when resetting FSRS weights', () => {
+			const settings: FlashcardsPluginSettings = {
+				...DEFAULT_SETTINGS,
+				rolloverHour: 5,
+				requestRetention: 0.95,
+				customWeights: '0.1, 0.2, 0.3',
+			};
+
+			// Reset weights only
+			delete settings.customWeights;
+
+			expect(settings.customWeights).toBeUndefined();
+			expect(settings.rolloverHour).toBe(5);
+			expect(settings.requestRetention).toBe(0.95);
+		});
+
+		it('guarantees WasmBridge.initialize handles concurrent callers without racing', async () => {
+			let readCount = 0;
+			const mockApp = {
+				vault: {
+					adapter: {
+						readBinary: async (p: string) => {
+							readCount++;
+							const wasmPath = p.includes('sql')
+								? path.resolve(__dirname, '../../../node_modules/sql.js/dist/sql-wasm.wasm')
+								: path.resolve(
+										__dirname,
+										'../../../crates/flashcards-wasm/pkg/flashcards_wasm_bg.wasm',
+									);
+							return fs.readFileSync(wasmPath);
+						},
+					},
+				},
+			} as any;
+
+			// Call initialize concurrently
+			const manifest = { dir: '.obsidian/plugins/flashcards' } as any;
+			await Promise.all([
+				WasmBridge.initialize(mockApp, manifest),
+				WasmBridge.initialize(mockApp, manifest),
+				WasmBridge.initialize(mockApp, manifest),
+			]);
+
+			// Each file is read at most once
+			expect(readCount).toBeLessThanOrEqual(2);
+		});
+
+		it('buckets upcoming due counts accurately according to 4:00 AM study-day boundaries', () => {
+			const rawDb = new SQL.Database();
+			const db = DatabaseManager.createInMemory(rawDb);
+
+			// Reference time: 2026-05-15 at 23:00 (11 PM)
+			// Study day start: 2026-05-15 04:00 AM
+			const nowMs = new Date(2026, 4, 15, 23, 0, 0, 0).getTime();
+			const studyDayStart = getStudyDayStart(4, new Date(nowMs));
+
+			// Card 1: Due tonight at 23:30 (today's study day) -> offset 0
+			const dueDay0 = new Date(2026, 4, 15, 23, 30, 0, 0).getTime();
+
+			// Card 2: Due tomorrow at 05:00 AM (next study day) -> offset 1
+			const dueDay1 = studyDayStart + 1 * 86400000 + 3600000; // 05:00 AM tomorrow
+
+			// Card 3: Due 5 days later -> offset 5
+			const dueDay5 = studyDayStart + 5 * 86400000 + 3600000;
+
+			db.syncNoteBlocks('Notes/Histogram.md', [
+				{
+					id: 'h01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'H1?',
+					back: 'A1',
+					tags: [],
+					line_start: 1,
+					line_end: 1,
+				},
+				{
+					id: 'h02',
+					block_type: 'inline',
+					reversible: false,
+					front: 'H2?',
+					back: 'A2',
+					tags: [],
+					line_start: 2,
+					line_end: 2,
+				},
+				{
+					id: 'h03',
+					block_type: 'inline',
+					reversible: false,
+					front: 'H3?',
+					back: 'A3',
+					tags: [],
+					line_start: 3,
+					line_end: 3,
+				},
+			]);
+
+			expect(db.getAllCards()).toHaveLength(3);
+			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h01"', [dueDay0]);
+			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h02"', [dueDay1]);
+			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h03"', [dueDay5]);
+
+			const counts = db.getUpcomingDueCounts(10, nowMs, 4);
+			expect(counts[0]).toBe(1); // Today
+			expect(counts[1]).toBe(1); // Tomorrow
+			expect(counts[2]).toBe(0);
+			expect(counts[5]).toBe(1); // 5 days out
+		});
+
+		it('ignores trailing block IDs inside inline code or math during WASM parsing', () => {
+			const mdWithCode = 'What is the syntax? :: Use `let x = ^abc123` in code';
+			const blocks = WasmBridge.parseMarkdownBlocks(mdWithCode, []);
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]!.id).toBe(''); // Trailing block ID inside code is rejected
+
+			const mdWithMath = 'What is the formula? :: Given $E = mc^2$';
+			const blocksMath = WasmBridge.parseMarkdownBlocks(mdWithMath, []);
+			expect(blocksMath).toHaveLength(1);
+			expect(blocksMath[0]!.id).toBe('');
+
+			const mdValid = 'What is the syntax? :: Use `let x = 1` ^abc123';
+			const blocksValid = WasmBridge.parseMarkdownBlocks(mdValid, []);
+			expect(blocksValid).toHaveLength(1);
+			expect(blocksValid[0]!.id).toBe('abc123');
 		});
 	});
 });

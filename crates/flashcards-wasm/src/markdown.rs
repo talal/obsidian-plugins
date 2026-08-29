@@ -75,10 +75,12 @@ impl MarkdownContext {
                 Event::DisplayMath(_) => {
                     context.mark_range_lines(&source_range);
                 }
-                Event::Html(raw) | Event::InlineHtml(raw)
-                    if raw.trim_start().starts_with("<!--") =>
-                {
-                    context.mark_range_lines(&source_range);
+                Event::Html(raw) | Event::InlineHtml(raw) => {
+                    if raw.trim_start().starts_with("<!--") {
+                        context.mark_range_lines(&source_range);
+                    } else if protected_depth == 0 {
+                        context.mark_eligible(&source_range);
+                    }
                 }
                 _ if protected_depth > 0 => {
                     context.mark_range_lines(&source_range);

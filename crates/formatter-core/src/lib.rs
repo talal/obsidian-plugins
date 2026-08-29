@@ -71,4 +71,25 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn preserves_flashcards_inline_syntax() {
+        let input = "## Flashcards\n\nWhat is the capital of France? :: Paris ^fc0001\n\nWhat is the capital of Germany? ::: Berlin ^fc0002\n";
+        let output = format(input).unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn preserves_flashcards_cloze_syntax() {
+        let input = "The chemical symbol for water is {{H2O}} and table salt is {{NaCl}}. ^fc0003\n";
+        let output = format(input).unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn preserves_flashcards_block_cards_syntax() {
+        let input = "%% card-start id=fc0004 reversible=true %%\nWhat are the primary colors? #card/todo\n\n...\n\n- Red\n- Green\n- Blue\n\n%% card-end %%\n";
+        let output = format(input).unwrap();
+        assert_eq!(output, input);
+    }
 }

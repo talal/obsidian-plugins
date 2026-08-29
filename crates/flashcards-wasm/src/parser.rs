@@ -156,6 +156,10 @@ fn parse_block_card(
         target.push_str(line);
     }
 
+    if !is_back {
+        return None;
+    }
+
     let front = front.trim().to_string();
     let back = back.trim().to_string();
     if front.is_empty() || back.is_empty() {
@@ -217,16 +221,26 @@ pub fn parse_markdown_blocks(content: &str, note_inherited_tags: &[String]) -> V
     parse_markdown_blocks_with_sections(content, note_inherited_tags, &[])
 }
 
+fn normalize_newlines(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains('\r') {
+        std::borrow::Cow::Borrowed(content)
+    } else {
+        std::borrow::Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+    }
+}
+
 /// Parse flashcards with block-level ranges observed by Obsidian (without modifying the note).
 pub fn parse_markdown_blocks_with_sections(
     content: &str,
     note_inherited_tags: &[String],
     section_hints: &[ObsidianSectionHint],
 ) -> Vec<ParsedBlock> {
-    let lines: Vec<&str> = content.lines().collect();
-    let context = MarkdownContext::new(content, lines.len(), section_hints);
+    let normalized = normalize_newlines(content);
+    let lines: Vec<&str> = normalized.lines().collect();
+    let context = MarkdownContext::new(&normalized, lines.len(), section_hints);
     let mut blocks = Vec::new();
     let mut line_number = 0;
+    let mut paragraph_bracket_depth = 0usize;
 
     while line_number < lines.len() {
         if context.is_ignored_line(line_number) {
@@ -240,7 +254,14 @@ pub fn parse_markdown_blocks_with_sections(
         let logical_line = line.trim_start().trim_end();
         let logical_start = line_start + leading_whitespace;
 
+        if logical_line.is_empty() {
+            paragraph_bracket_depth = 0;
+            line_number += 1;
+            continue;
+        }
+
         if let Some((block_id, reversible)) = parse_block_header(logical_line) {
+            paragraph_bracket_depth = 0;
             if let Some((block, end_line)) = parse_block_card(
                 &lines,
                 line_number,
@@ -258,38 +279,60 @@ pub fn parse_markdown_blocks_with_sections(
             continue;
         }
 
+        if syntax::has_unclosed_inline_code(logical_line) {
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
+            line_number += 1;
+            continue;
+        }
+
         let (raw_line, block_id) = split_trailing_block_id(logical_line, logical_start, &context);
         let cloze_scan = scan_clozes(raw_line, logical_start, &context);
 
-        if let Some((front, back)) =
-            split_once_outside_clozes(raw_line, logical_start, ":::", &context, &cloze_scan.spans)
-            && let Some(block) = make_inline_block(
-                front,
-                back,
-                block_id.clone(),
-                true,
-                note_inherited_tags,
-                raw_line,
-                line_number,
-            )
-        {
+        if let Some((front, back)) = split_once_outside_clozes(
+            raw_line,
+            logical_start,
+            ":::",
+            &context,
+            &cloze_scan.spans,
+            paragraph_bracket_depth,
+        ) && let Some(block) = make_inline_block(
+            front,
+            back,
+            block_id.clone(),
+            true,
+            note_inherited_tags,
+            raw_line,
+            line_number,
+        ) {
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
             blocks.push(block);
             line_number += 1;
             continue;
         }
 
-        if let Some((front, back)) =
-            split_once_outside_clozes(raw_line, logical_start, "::", &context, &cloze_scan.spans)
-            && let Some(block) = make_inline_block(
-                front,
-                back,
-                block_id.clone(),
-                false,
-                note_inherited_tags,
-                raw_line,
-                line_number,
-            )
-        {
+        if let Some((front, back)) = split_once_outside_clozes(
+            raw_line,
+            logical_start,
+            "::",
+            &context,
+            &cloze_scan.spans,
+            paragraph_bracket_depth,
+        ) && let Some(block) = make_inline_block(
+            front,
+            back,
+            block_id.clone(),
+            false,
+            note_inherited_tags,
+            raw_line,
+            line_number,
+        ) {
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
             blocks.push(block);
             line_number += 1;
             continue;
@@ -311,10 +354,35 @@ pub fn parse_markdown_blocks_with_sections(
             });
         }
 
+        paragraph_bracket_depth = (paragraph_bracket_depth as isize
+            + syntax::bracket_depth_delta(logical_line))
+        .max(0) as usize;
         line_number += 1;
     }
 
     blocks
+}
+
+fn claim_or_mint_id(
+    raw_block_id: &str,
+    external_ids: &HashSet<String>,
+    used_ids: &mut HashSet<String>,
+    all_known_ids: &mut HashSet<String>,
+) -> (String, bool) {
+    if !raw_block_id.is_empty()
+        && syntax::is_valid_block_id(raw_block_id)
+        && !external_ids.contains(raw_block_id)
+        && !used_ids.contains(raw_block_id)
+    {
+        used_ids.insert(raw_block_id.to_string());
+        all_known_ids.insert(raw_block_id.to_string());
+        (raw_block_id.to_string(), false)
+    } else {
+        let new_id = syntax::generate_unique_block_id(all_known_ids);
+        used_ids.insert(new_id.clone());
+        all_known_ids.insert(new_id.clone());
+        (new_id, true)
+    }
 }
 
 /// Single-pass note document transformer:
@@ -327,14 +395,16 @@ pub fn sync_document(
     note_inherited_tags: &[String],
     section_hints: &[ObsidianSectionHint],
 ) -> DocumentSyncResult {
-    let raw_lines: Vec<&str> = content.lines().collect();
-    let context = MarkdownContext::new(content, raw_lines.len(), section_hints);
+    let normalized = normalize_newlines(content);
+    let raw_lines: Vec<&str> = normalized.lines().collect();
+    let context = MarkdownContext::new(&normalized, raw_lines.len(), section_hints);
     let mut out_lines: Vec<String> = raw_lines.iter().map(|s| s.to_string()).collect();
     let mut used_ids: HashSet<String> = HashSet::new();
     let mut all_known_ids: HashSet<String> = external_ids.clone();
     let mut blocks = Vec::new();
     let mut modified = false;
     let mut line_number = 0;
+    let mut paragraph_bracket_depth = 0usize;
 
     while line_number < raw_lines.len() {
         if context.is_ignored_line(line_number) {
@@ -348,7 +418,14 @@ pub fn sync_document(
         let logical_line = line.trim_start().trim_end();
         let logical_start = line_start + leading_whitespace;
 
+        if logical_line.is_empty() {
+            paragraph_bracket_depth = 0;
+            line_number += 1;
+            continue;
+        }
+
         if let Some((raw_block_id, reversible)) = parse_block_header(logical_line) {
+            paragraph_bracket_depth = 0;
             if let Some((mut block, end_line)) = parse_block_card(
                 &raw_lines,
                 line_number,
@@ -358,22 +435,16 @@ pub fn sync_document(
                 note_inherited_tags,
                 &context,
             ) {
-                let id = if !raw_block_id.is_empty()
-                    && syntax::is_valid_block_id(&raw_block_id)
-                    && !external_ids.contains(&raw_block_id)
-                    && !used_ids.contains(&raw_block_id)
-                {
-                    used_ids.insert(raw_block_id.clone());
-                    all_known_ids.insert(raw_block_id.clone());
-                    raw_block_id
-                } else {
-                    let new_id = syntax::generate_unique_block_id(&all_known_ids);
-                    used_ids.insert(new_id.clone());
-                    all_known_ids.insert(new_id.clone());
-                    out_lines[line_number] = rewrite_block_header(&out_lines[line_number], &new_id);
+                let (id, newly_minted) = claim_or_mint_id(
+                    &raw_block_id,
+                    external_ids,
+                    &mut used_ids,
+                    &mut all_known_ids,
+                );
+                if newly_minted {
+                    out_lines[line_number] = rewrite_block_header(&out_lines[line_number], &id);
                     modified = true;
-                    new_id
-                };
+                }
 
                 block.id = id;
                 blocks.push(block);
@@ -384,78 +455,88 @@ pub fn sync_document(
             continue;
         }
 
-        let (raw_line, raw_block_id) =
-            split_trailing_block_id(logical_line, logical_start, &context);
-        let cloze_scan = scan_clozes(raw_line, logical_start, &context);
-
-        if let Some((front, back)) =
-            split_once_outside_clozes(raw_line, logical_start, ":::", &context, &cloze_scan.spans)
-            && let Some(mut block) = make_inline_block(
-                front,
-                back,
-                raw_block_id.clone(),
-                true,
-                note_inherited_tags,
-                raw_line,
-                line_number,
-            )
-        {
-            let id = if !raw_block_id.is_empty()
-                && syntax::is_valid_block_id(&raw_block_id)
-                && !external_ids.contains(&raw_block_id)
-                && !used_ids.contains(&raw_block_id)
-            {
-                used_ids.insert(raw_block_id.clone());
-                all_known_ids.insert(raw_block_id.clone());
-                raw_block_id
-            } else {
-                let new_id = syntax::generate_unique_block_id(&all_known_ids);
-                used_ids.insert(new_id.clone());
-                all_known_ids.insert(new_id.clone());
-                out_lines[line_number] =
-                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
-                modified = true;
-                new_id
-            };
-
-            block.id = id;
-            blocks.push(block);
+        if syntax::has_unclosed_inline_code(logical_line) {
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
             line_number += 1;
             continue;
         }
 
-        if let Some((front, back)) =
-            split_once_outside_clozes(raw_line, logical_start, "::", &context, &cloze_scan.spans)
-            && let Some(mut block) = make_inline_block(
-                front,
-                back,
-                raw_block_id.clone(),
-                false,
-                note_inherited_tags,
-                raw_line,
-                line_number,
-            )
-        {
-            let id = if !raw_block_id.is_empty()
-                && syntax::is_valid_block_id(&raw_block_id)
-                && !external_ids.contains(&raw_block_id)
-                && !used_ids.contains(&raw_block_id)
-            {
-                used_ids.insert(raw_block_id.clone());
-                all_known_ids.insert(raw_block_id.clone());
-                raw_block_id
-            } else {
-                let new_id = syntax::generate_unique_block_id(&all_known_ids);
-                used_ids.insert(new_id.clone());
-                all_known_ids.insert(new_id.clone());
+        let (raw_line, raw_block_id) =
+            split_trailing_block_id(logical_line, logical_start, &context);
+        let cloze_scan = scan_clozes(raw_line, logical_start, &context);
+
+        if let Some((front, back)) = split_once_outside_clozes(
+            raw_line,
+            logical_start,
+            ":::",
+            &context,
+            &cloze_scan.spans,
+            paragraph_bracket_depth,
+        ) && let Some(mut block) = make_inline_block(
+            front,
+            back,
+            raw_block_id.clone(),
+            true,
+            note_inherited_tags,
+            raw_line,
+            line_number,
+        ) {
+            let (id, newly_minted) = claim_or_mint_id(
+                &raw_block_id,
+                external_ids,
+                &mut used_ids,
+                &mut all_known_ids,
+            );
+            if newly_minted {
                 out_lines[line_number] =
-                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
+                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
                 modified = true;
-                new_id
-            };
+            }
 
             block.id = id;
             blocks.push(block);
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
+            line_number += 1;
+            continue;
+        }
+
+        if let Some((front, back)) = split_once_outside_clozes(
+            raw_line,
+            logical_start,
+            "::",
+            &context,
+            &cloze_scan.spans,
+            paragraph_bracket_depth,
+        ) && let Some(mut block) = make_inline_block(
+            front,
+            back,
+            raw_block_id.clone(),
+            false,
+            note_inherited_tags,
+            raw_line,
+            line_number,
+        ) {
+            let (id, newly_minted) = claim_or_mint_id(
+                &raw_block_id,
+                external_ids,
+                &mut used_ids,
+                &mut all_known_ids,
+            );
+            if newly_minted {
+                out_lines[line_number] =
+                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
+                modified = true;
+            }
+
+            block.id = id;
+            blocks.push(block);
+            paragraph_bracket_depth = (paragraph_bracket_depth as isize
+                + syntax::bracket_depth_delta(logical_line))
+            .max(0) as usize;
             line_number += 1;
             continue;
         }
@@ -465,23 +546,17 @@ pub fn sync_document(
             add_tags(&mut tags, extract_inline_tags(raw_line));
             let front = raw_line.trim().to_string();
 
-            let id = if !raw_block_id.is_empty()
-                && syntax::is_valid_block_id(&raw_block_id)
-                && !external_ids.contains(&raw_block_id)
-                && !used_ids.contains(&raw_block_id)
-            {
-                used_ids.insert(raw_block_id.clone());
-                all_known_ids.insert(raw_block_id.clone());
-                raw_block_id
-            } else {
-                let new_id = syntax::generate_unique_block_id(&all_known_ids);
-                used_ids.insert(new_id.clone());
-                all_known_ids.insert(new_id.clone());
+            let (id, newly_minted) = claim_or_mint_id(
+                &raw_block_id,
+                external_ids,
+                &mut used_ids,
+                &mut all_known_ids,
+            );
+            if newly_minted {
                 out_lines[line_number] =
-                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &new_id);
+                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
                 modified = true;
-                new_id
-            };
+            }
 
             blocks.push(ParsedBlock {
                 id,
@@ -495,6 +570,9 @@ pub fn sync_document(
             });
         }
 
+        paragraph_bracket_depth = (paragraph_bracket_depth as isize
+            + syntax::bracket_depth_delta(logical_line))
+        .max(0) as usize;
         line_number += 1;
     }
 

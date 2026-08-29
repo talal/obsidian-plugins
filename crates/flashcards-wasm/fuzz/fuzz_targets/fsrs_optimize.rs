@@ -64,6 +64,8 @@ fuzz_target!(|data: &[u8]| {
         learning_steps: None,
         relearning_steps,
         enable_fuzz: None,
+        due_counts: None,
+        sibling_due_offset: None,
     };
 
     let optimized = optimize_weights(&params, &logs);

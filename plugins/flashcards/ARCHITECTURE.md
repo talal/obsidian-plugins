@@ -413,7 +413,7 @@ sequenceDiagram
    - Verify SQLite header matches `SQLite format 3`.
 7. Mark Slot B (Gen 15) as the active generation in memory.
 
-### 7.3 Startup Recovery Lifecycle
+### 9.3 Startup Recovery Lifecycle
 1. On plugin `onload()`, attempt to read both `cards.a.db` and `cards.b.db`.
 2. Validate header, generation, and SHA-256 checksum for both files:
    - **Both Valid**: Load the slot with the **higher generation number** (Gen_B > Gen_A).
@@ -422,7 +422,7 @@ sequenceDiagram
 
 ---
 
-## 8. UI Architecture & Native Obsidian Design System (Svelte 5)
+## 10. UI Architecture & Native Obsidian Design System (Svelte 5)
 
 The study interface uses a **focused 3-tier layout** built in Svelte 5 with official Obsidian design tokens:
 
@@ -445,45 +445,45 @@ The study interface uses a **focused 3-tier layout** built in Svelte 5 with offi
 └────────────────────────────────────────────────────────────┘
 ```
 
-### 9.1 Review Modal (3-Tier Canvas Layout)
-1. **Top Header**:
+### 10.1 Review Modal (3-Tier Canvas Layout)
+1. **Top Header (`ReviewTopBar.svelte`)**:
    - **`[Undo]`**: Reverts previous rating from in-memory session stack (<kbd>Ctrl+Z</kbd> / <kbd>U</kbd>).
    - **Breadcrumbs & 4px Progress Track**: Minimal deck label with current card counter and thin progress fill.
    - **`[End]`**: Saves session state and exits modal (<kbd>Esc</kbd>).
-2. **Centered Card Canvas**:
+2. **Centered Card Canvas (`ReviewCardCanvas.svelte`)**:
    - Centered card (`max-width: 760px`) styled with `var(--background-primary)`, `var(--radius-l)`, `var(--shadow-l)`.
    - High legibility clamp typography (`clamp(1.15rem, 2vw, 1.35rem)`) with `line-height: 1.6`.
-   - In-place cloze unmasking (`.fc-cloze-mask` → `.fc-cloze-revealed` using `var(--text-accent)`).
-3. **Docked Bottom Action Bar**:
+   - In-place safe cloze unmasking (`formatClozeText`: `.fc-cloze-mask` → `.fc-cloze-revealed` using `var(--text-accent)`).
+3. **Docked Bottom Action Bar (`ReviewBottomBar.svelte`)**:
    - **Queue Navigation**: `[Back]` (<kbd>←</kbd>) and `[Next]` (<kbd>→</kbd>) allow browsing through the queue without altering card scheduling.
    - **Assessment Actions**:
      - *Unrevealed*: Dominant `[Show Answer]` (<kbd>Space</kbd> / <kbd>Enter</kbd>).
      - *Revealed*: `[Forgot]` (Left half, <kbd>F</kbd> / <kbd>1</kbd>) and `[Remembered]` (Right half, `mod-cta`, <kbd>Space</kbd> / <kbd>3</kbd>).
 
-### 9.2 Streamlined Completion Screen
+### 10.2 Streamlined Completion Screen (`ReviewCompletionScreen.svelte`)
 Displays motivational feedback and session metrics upon finishing all due cards:
 - **Summary**: *"Reviewed X cards in Y seconds."*
 - **Stats Grid**: Cards Studied, Retention Rate (%), Pace (s/card), Total Duration.
 
-### 9.3 Dashboard View (Metric Bar, Token-Based Table & Block Grouping)
+### 10.3 Dashboard View (Metric Bar, Token-Based Table & Block Grouping)
 - **Top Overview Metric Bar**: Displays four core operational stats (`Studied today`, `Retention`, `🔥 Streak`, `Total cards`) and quick CTA launch buttons (`Study all (X due)` and `Study deck`).
 - **1:1 Block Row Grouping (`groupCardsByBlock`)**: Consolidates bidirectional cards into a single Markdown block row displaying the primary forward Question and Answer. Independent reverse scheduling metrics sit directly underneath in a muted `⇄` sub-row under **Due**, **Reviews**, and **Last Practiced**.
 - **Interactive Toolbar & Table Filters**: Filter pills (`All`, `Due today`, `New`, `Learning`, `Review`) and real-time search box (`note` text or `#tag`). Filter pill counts accurately reflect matching table rows.
 - **Obsidian Design Tokens**: Strict reliance on native Obsidian table variables (`--table-border-color`, `--table-header-background`, `--table-row-alt-background`, `var(--font-ui-small)`, `var(--font-bold)`).
 
-### 9.4 Tag Picker Modal (Hashcards-Inspired Deck Stats Table)
+### 10.4 Tag Picker Modal (Hashcards-Inspired Deck Stats Table)
 - **Compact Deck Statistics Table**: Lists all tag decks with detailed columns for `[Tag]`, `[Due]`, `[New]`, and `[Total]` (`computeTagDeckStats`).
 - **Active Deck Sorting & Visual Contrast**: Automatically sorts active/due decks to the top. Due counts highlight in theme accent color (`var(--text-accent)`), while zero counts are muted in `var(--text-faint)`.
 - **Multi-Deck Queue Assembly**: Checkbox selection and row toggling allow assembling a custom multi-tag study queue, with a dynamic action button indicating total workload (`[ Study selected (X due • Y total) ]`).
 - **Interactive Column Sorting**: All table headers support bidirectional sorting (`Tag`, `Due`, `New`, `Total`).
 
-### 9.5 Right-to-Left (RTL) & Bidirectional Typography Support
+### 10.5 Right-to-Left (RTL) & Bidirectional Typography Support
 - **Logical CSS Properties**: Interface layouts, margins, paddings, and table alignments strictly utilize logical properties (`margin-inline-start`, `text-align: start`, `text-align: end`, `inset: 0`) ensuring native horizontal mirroring when `.mod-rtl` is active on `body`.
 - **Bidirectional Content Isolation (`unicode-bidi: plaintext` & `dir="auto"`)**: All single-line user-authored texts (note titles, breadcrumbs, tags, text previews, search inputs) specify `unicode-bidi: plaintext` and `dir="auto"` to prevent character reordering, punctuation flipping, and ellipsis (`…`) truncation anomalies across mixed LTR/RTL notes.
 
 ---
 
-## 10. Registered Commands
+## 11. Registered Commands
 
 | Command Name | Scope | Description |
 | :--- | :--- | :--- |
@@ -498,7 +498,7 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 
 ---
 
-## 11. Plugin Settings (`data.json`) & Configuration
+## 12. Plugin Settings (`data.json`) & Configuration
 
 Sparse configuration in `<vault>/.obsidian/plugins/flashcards/data.json` (only user overrides are stored):
 
@@ -514,7 +514,7 @@ Sparse configuration in `<vault>/.obsidian/plugins/flashcards/data.json` (only u
 
 ---
 
-## 12. Directory Structure
+## 13. Directory Structure
 
 ```
 crates/flashcards-wasm/
@@ -526,7 +526,7 @@ crates/flashcards-wasm/
 │   ├── optimizer.rs     # On-device weight training over review logs
 │   ├── parser.rs        # Single-pass sync_document & block extraction
 │   ├── parser_tests.rs  # Unit tests for parser and transformer
-│   ├── syntax.rs        # Base-36 ID generation & cloze parsing
+│   ├── syntax.rs        # Base-36 ID generation, cloze parsing & inline code guard
 │   └── types.rs         # Domain types & Serde serializers
 └── fuzz/
     └── fuzz_targets/parse.rs # libFuzzer target for sync_document
@@ -539,23 +539,33 @@ plugins/flashcards/
 │   ├── main.ts              # Lightweight plugin lifecycle & commands (<300 lines)
 │   ├── settings.ts          # Settings tab & FSRS optimizer UI
 │   ├── types.ts             # TypeScript interfaces matching schema.sql
-│   ├── wasm.ts              # WASM bridge loader & typed wrappers
+│   ├── wasm.ts              # WASM bridge loader & serialized initialize promise
 │   ├── db/
-│   │   ├── DatabaseManager.ts # SQLite queries & card reconciliation
+│   │   ├── DatabaseManager.ts # SQLite coordinator (<300 lines)
+│   │   ├── formatters.ts      # State and timestamp humanization utilities
+│   │   ├── queries/
+│   │   │   ├── CardRetrievalQueries.ts # Due cards, tags, upcoming due histogram
+│   │   │   ├── CardSyncQueries.ts      # Block & card upsert, sync, prune, vacuum
+│   │   │   └── SessionQueries.ts       # Review session commits & dashboard metrics
 │   │   ├── schema.sql         # Canonical STRICT SQLite schema
 │   │   └── snapshot.ts        # 48-byte header packing & SHA-256 verification
 │   ├── scanner/
-│   │   └── NoteScanner.ts     # Single-pass vault & note scanner
+│   │   └── NoteScanner.ts     # Single-pass vault & note scanner (O(M) ID index)
 │   ├── ui/
 │   │   ├── DashboardView.ts   # Inventory & stats leaf view
 │   │   ├── ReviewModal.ts     # Review modal shell & in-memory session
 │   │   ├── TagPickerModal.ts  # Deck/tag selector modal
 │   │   └── components/
 │   │       ├── DashboardView.svelte
+│   │       ├── ReviewBottomBar.svelte
+│   │       ├── ReviewCardCanvas.svelte
+│   │       ├── ReviewCompletionScreen.svelte
 │   │       ├── ReviewModal.svelte
+│   │       ├── ReviewTopBar.svelte
 │   │       └── TagPickerModal.svelte
 │   └── utils/
 │       ├── cardTagModifier.ts    # Generic card tag adding, removing, and toggling
+│       ├── clozeFormat.ts        # Safe HTML-escaped cloze text formatting
 │       ├── dashboardCards.ts     # Block grouping & reverse metrics consolidation
 │       ├── dashboardFilter.ts    # Tag matching & text search filters
 │       ├── reviewMetrics.ts      # Progress & retention calculations
@@ -565,5 +575,6 @@ plugins/flashcards/
 │       ├── studySteps.ts         # Duration string parsing
 │       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (76 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (81 tests)
 ```
+

@@ -35,6 +35,7 @@ export class ReviewModal extends Modal {
 
 	onOpen() {
 		this.plugin.activeReviewModal = this;
+		this.containerEl.addClass('fc-review-modal-container');
 		this.modalEl.addClass('fc-review-modal-window');
 		this.contentEl.empty();
 		this.contentEl.addClass('fc-modal-content-reset');
@@ -71,7 +72,8 @@ export class ReviewModal extends Modal {
 					.filter((n) => !isNaN(n))
 			: undefined;
 		const now = Date.now();
-		const dueCounts = this.plugin.db.getUpcomingDueCounts(90, now);
+		const rolloverHour = this.plugin.settings.rolloverHour ?? 4;
+		const dueCounts = this.plugin.db.getUpcomingDueCounts(90, now, rolloverHour);
 		const sibling = this.plugin.db.getSiblingCard(item.cardId, item.blockId);
 		let siblingDueOffset: number | undefined = undefined;
 		if (sibling && sibling.due_at > now) {
