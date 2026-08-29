@@ -150,7 +150,7 @@ flowchart TD
 ### Properties & Benefits:
 1. **6-Character Lowercase Base-36 Space**:
    - Character set: `[0-9a-z]` (36 lowercase alphanumeric symbols).
-   - Total space: $36^6 = 2,176,782,336$ (~2.17 billion combinations).
+   - Total space: 36⁶ = 2,176,782,336 (~2.17 billion combinations).
    - An in-memory live `existing_ids` Set check guarantees 100% collision-free generation during note scans.
 2. **Native Obsidian Case-Folding Resolver Immunity**:
    - While Obsidian's block search/autocomplete UI displays case-distinct blocks, Obsidian's underlying link and embed resolver (`![[note#^anchor]]`) normalizes and folds block anchors case-insensitively.
@@ -315,8 +315,8 @@ To prevent artificial recall priming and avoid study burnout from review spikes,
 ### 7.1 Queue-Level Anti-Priming (Sibling Burying)
 When multiple cards generated from the same Markdown block (e.g. `forward` and `reverse` of a bidirectional card `:::`) are eligible for review on the same day, the queue assembler (`DatabaseManager.getDueCards` and `applySiblingBurying`) enforces a strict **4-tier cognitive priority hierarchy**:
 
-1. **Intraday Learning (Rank 4, Highest)**: Cards in short-term learning/relearning steps ($< 1\text{ day}$, e.g. 10m). **Never buried** to guarantee same-day memory trace consolidation.
-2. **Interday Learning (Rank 3)**: Cards in multi-day learning steps ($\ge 1\text{ day}$, e.g. 1d). Prioritized over mature reviews to stabilize fragile memories.
+1. **Intraday Learning (Rank 4, Highest)**: Cards in short-term learning/relearning steps (< 1 day, e.g. 10m). **Never buried** to guarantee same-day memory trace consolidation.
+2. **Interday Learning (Rank 3)**: Cards in multi-day learning steps (≥ 1 day, e.g. 1d). Prioritized over mature reviews to stabilize fragile memories.
 3. **Review Cards (Rank 2)**: Mature cards with FSRS intervals. Prioritized over new cards to protect existing retention.
 4. **New Cards (Rank 1, Lowest)**: Unstudied cards.
 
@@ -334,15 +334,15 @@ flowchart TD
 Rather than blindly applying random jitter, the Rust WASM core (`calculate_load_balanced_interval`) acts as a **closed-loop load smoother**:
 
 1. **FSRS Constrained Fuzz Window**:
-   - Interval $< 2.5\text{ days}$: Exact integer (no fuzz).
-   - $2.5 \le \text{Interval} < 7\text{ days}$: $\pm 1\text{ day}$ range.
-   - $7 \le \text{Interval} < 30\text{ days}$: $\pm 15\%$ range ($[0.85 \times I, 1.15 \times I]$).
-   - $\text{Interval} \ge 30\text{ days}$: $\pm 5\%$ range ($[0.95 \times I, 1.05 \times I]$).
+   - Interval < 2.5 days: Exact integer (no fuzz).
+   - 2.5 ≤ Interval < 7 days: ±1 day range.
+   - 7 ≤ Interval < 30 days: ±15% range ([0.85 × I, 1.15 × I]).
+   - Interval ≥ 30 days: ±5% range ([0.95 × I, 1.05 × I]).
 2. **Load Balancing via Due Histogram**:
    The TypeScript shell passes a 90-day histogram of upcoming daily due counts from SQLite (`getUpcomingDueCounts`). Candidate days within the fuzz window are weighted:
    $$\text{Weight}(d) = \left(\frac{1}{\max(1, \text{due\_count}[d])}\right)^{2.15} \times \left(\frac{1}{d}\right)^3 \times \text{SiblingPenalty}(d)$$
 3. **Inter-Day Sibling Dispersion**:
-   If a sibling card has a scheduled future due date, candidate days close to the sibling are heavily penalized ($\Delta = 0 \implies 10^{-6}, \Delta = 1 \implies 0.20, \Delta = 2 \implies 0.40$), permanently dispersing siblings into distinct review cycles.
+   If a sibling card has a scheduled future due date, candidate days close to the sibling are heavily penalized (Δ = 0 → 10⁻⁶, Δ = 1 → 0.20, Δ = 2 → 0.40), permanently dispersing siblings into distinct review cycles.
 
 ---
 
@@ -351,7 +351,7 @@ Rather than blindly applying random jitter, the Rust WASM core (`calculate_load_
 Cards that fail repeatedly ("leeches") consume disproportionate study time. The plugin provides automated leech tagging directly within the user's Markdown notes:
 
 1. **Mathematical Threshold Detection**:
-   Using the formula $L \ge T \land (L - T) \pmod{\lceil T/2 \rceil} = 0$, when a review card lapses to the configured threshold $T$ (default: 4), or every half-threshold thereafter ($4, 6, 8, 10\dots$), a leech event triggers.
+   Using the formula $L \ge T \land (L - T) \pmod{\lceil T/2 \rceil} = 0$, when a review card lapses to the configured threshold $T$ (default: 4), or every half-threshold thereafter (4, 6, 8, 10, …), a leech event triggers.
 2. **Markdown Auto-Tagging**:
    - The plugin automatically appends `#card/leech` to the card line or question block in Markdown using `addCardLeechTagInMarkdown`.
    - Single-pass note synchronization updates the SQLite database blocks table with the `card/leech` tag.
@@ -453,7 +453,7 @@ The study interface uses a **focused 3-tier layout** built in Svelte 5 with offi
 2. **Centered Card Canvas**:
    - Centered card (`max-width: 760px`) styled with `var(--background-primary)`, `var(--radius-l)`, `var(--shadow-l)`.
    - High legibility clamp typography (`clamp(1.15rem, 2vw, 1.35rem)`) with `line-height: 1.6`.
-   - In-place cloze unmasking (`.fc-cloze-mask` $\to$ `.fc-cloze-revealed` using `var(--text-accent)`).
+   - In-place cloze unmasking (`.fc-cloze-mask` → `.fc-cloze-revealed` using `var(--text-accent)`).
 3. **Docked Bottom Action Bar**:
    - **Queue Navigation**: `[Back]` (<kbd>←</kbd>) and `[Next]` (<kbd>→</kbd>) allow browsing through the queue without altering card scheduling.
    - **Assessment Actions**:
