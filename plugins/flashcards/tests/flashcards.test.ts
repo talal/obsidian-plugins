@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import type { App } from 'obsidian';
 import initSqlJs, { type SqlJsStatic } from 'sql.js';
 import { beforeAll, describe, expect, it } from 'vitest';
 
@@ -3623,6 +3624,176 @@ Mitochondria
 			expect(cards).toHaveLength(1);
 			expect(cards[0]!.front).toBe('تسی حج وی کیتی جاندے او');
 			expect(cards[0]!.back).toBe('لہو وی پیتی جاندے او');
+		});
+	});
+
+	describe('Scan-Scoped Collision Registry & Block ID Handling', () => {
+		it('manages CollisionRegistry lifecycle (insert, contains, allocate_id, size, free)', () => {
+			const registry = WasmBridge.createCollisionRegistry();
+			try {
+				expect(registry.size()).toBe(0);
+				expect(registry.contains('k9x2mp')).toBe(false);
+
+				// Insert valid ID
+				expect(registry.insert('k9x2mp')).toBe(true);
+				expect(registry.size()).toBe(1);
+				expect(registry.contains('k9x2mp')).toBe(true);
+
+				// Duplicate insert returns false
+				expect(registry.insert('k9x2mp')).toBe(false);
+				expect(registry.size()).toBe(1);
+
+				// Reject invalid IDs on insert / contains
+				expect(registry.insert('INVALID')).toBe(false);
+				expect(registry.insert('123')).toBe(false);
+				expect(registry.contains('INVALID')).toBe(false);
+
+				// Allocate unique ID
+				const allocated = registry.allocate_id();
+				expect(allocated).toMatch(/^[0-9a-z]{6}$/);
+				expect(registry.size()).toBe(2);
+				expect(registry.contains(allocated)).toBe(true);
+			} finally {
+				registry.free();
+			}
+		});
+
+		it('bulk initializes CollisionRegistry from existing IDs array or set', () => {
+			const existing = new Set(['dup001', 'dup002', 'w7n3rk']);
+			const registry = WasmBridge.createCollisionRegistry(existing);
+			try {
+				expect(registry.size()).toBe(3);
+				expect(registry.contains('dup001')).toBe(true);
+				expect(registry.contains('dup002')).toBe(true);
+				expect(registry.contains('w7n3rk')).toBe(true);
+				expect(registry.contains('other0')).toBe(false);
+
+				// Allocation does not collide with initialized IDs
+				const newId = registry.allocate_id();
+				expect(existing.has(newId)).toBe(false);
+				expect(registry.size()).toBe(4);
+			} finally {
+				registry.free();
+			}
+		});
+
+		it('persists registry across multiple syncDocumentWithRegistry calls', () => {
+			const registry = WasmBridge.createCollisionRegistry();
+			try {
+				const doc1 = 'Capital of France? :: Paris ^k9x2mp\nCapital of Spain? :: Madrid\n';
+				const res1 = WasmBridge.syncDocumentWithRegistry(doc1, registry, []);
+				expect(res1.blocks).toHaveLength(2);
+				expect(res1.blocks[0]!.id).toBe('k9x2mp');
+				const generatedId1 = res1.blocks[1]!.id;
+				expect(generatedId1).toMatch(/^[0-9a-z]{6}$/);
+				expect(registry.size()).toBe(2);
+
+				// Doc 2 has duplicate 'k9x2mp' (from Doc 1) and a fresh ID 'w7n3rk'
+				const doc2 = 'Capital of Italy? :: Rome ^k9x2mp\nCapital of Germany? :: Berlin ^w7n3rk\n';
+				const res2 = WasmBridge.syncDocumentWithRegistry(doc2, registry, []);
+				expect(res2.blocks).toHaveLength(2);
+				expect(res2.updated_content).not.toBeNull();
+
+				// 'k9x2mp' in Doc 2 was regenerated to avoid cross-document collision
+				expect(res2.blocks[0]!.id).not.toBe('k9x2mp');
+				expect(res2.blocks[0]!.id).toMatch(/^[0-9a-z]{6}$/);
+				// 'w7n3rk' in Doc 2 was preserved
+				expect(res2.blocks[1]!.id).toBe('w7n3rk');
+				expect(registry.size()).toBe(4);
+			} finally {
+				registry.free();
+			}
+		});
+
+		it('ensures single-note sync does not falsely treat own IDs as collisions', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			const mockApp = {
+				vault: {
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			// Note 1 has blocks ^id0001 and ^id0002
+			fileVault.set('Note1.md', 'Q1 :: A1 ^id0001\nQ2 ::: A2 ^id0002\n');
+			const blocks1 = await scanner.syncFile({ path: 'Note1.md' } as any);
+			expect(blocks1).toHaveLength(2);
+			expect(blocks1[0]!.id).toBe('id0001');
+			expect(blocks1[1]!.id).toBe('id0002');
+
+			// Syncing Note 1 again (incremental single-file sync) must retain own IDs
+			const resync1 = await scanner.syncFile({ path: 'Note1.md' } as any);
+			expect(resync1).toHaveLength(2);
+			expect(resync1[0]!.id).toBe('id0001');
+			expect(resync1[1]!.id).toBe('id0002');
+			expect(fileVault.get('Note1.md')).toBe('Q1 :: A1 ^id0001\nQ2 ::: A2 ^id0002\n');
+		});
+
+		it('fullScan uses scan-scoped registry and treats Markdown as authoritative source of truth', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('FileA.md', 'Capital of France :: Paris ^dup100\n');
+			fileVault.set('FileB.md', 'Capital of Italy :: Rome ^dup100\n');
+			fileVault.set('FileC.md', 'Capital of Spain :: Madrid ^dup100\n');
+
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => [
+						{ path: 'FileA.md' },
+						{ path: 'FileB.md' },
+						{ path: 'FileC.md' },
+					],
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			const scanResult = await scanner.fullScan();
+			expect(scanResult.filesScanned).toBe(3);
+			expect(scanResult.totalBlocks).toBe(3);
+			expect(scanResult.failedFiles).toHaveLength(0);
+
+			// FileA was scanned first and retained 'dup100'
+			expect(fileVault.get('FileA.md')).toBe('Capital of France :: Paris ^dup100\n');
+
+			// FileB and FileC collided with 'dup100' and were assigned fresh unique IDs
+			const contentB = fileVault.get('FileB.md')!;
+			const contentC = fileVault.get('FileC.md')!;
+			expect(contentB).not.toContain('^dup100');
+			expect(contentC).not.toContain('^dup100');
+
+			const allDbIds = db.getAllBlockIds();
+			expect(allDbIds.size).toBe(3);
+			expect(allDbIds.has('dup100')).toBe(true);
 		});
 	});
 });

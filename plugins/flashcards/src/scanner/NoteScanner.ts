@@ -1,8 +1,8 @@
 import type { App, CachedMetadata, TFile } from 'obsidian';
 
 import type { DatabaseManager } from '../db/DatabaseManager.js';
-import type { ObsidianSectionHint, ParsedBlock } from '../types.js';
-import { WasmBridge } from '../wasm.js';
+import type { DocumentSyncResult, ObsidianSectionHint, ParsedBlock } from '../types.js';
+import { CollisionRegistry, WasmBridge } from '../wasm.js';
 
 function parseFrontMatterTags(
 	frontmatter: Record<string, unknown> | null | undefined,
@@ -59,7 +59,7 @@ export class NoteScanner {
 
 	public async syncFile(
 		file: TFile,
-		externalCollisionIds?: Set<string>,
+		externalCollisionIds?: Set<string> | CollisionRegistry,
 		skipPersist = false,
 	): Promise<ParsedBlock[]> {
 		const fileCache = this.app.metadataCache.getFileCache(file);
@@ -81,10 +81,29 @@ export class NoteScanner {
 		const content = await this.app.vault.cachedRead(file);
 		const inheritedTags = getInheritedTags(fileCache);
 		const sectionHints = getSectionHints(fileCache);
-		const externalIds = externalCollisionIds ?? this.db.getBlockIdsExcludingFile(file.path);
 
-		// Single-pass sync via Rust WASM (validates block IDs against external collision set)
-		const result = WasmBridge.syncDocument(content, externalIds, inheritedTags, sectionHints);
+		let result: DocumentSyncResult;
+		if (externalCollisionIds instanceof CollisionRegistry) {
+			result = WasmBridge.syncDocumentWithRegistry(
+				content,
+				externalCollisionIds,
+				inheritedTags,
+				sectionHints,
+			);
+		} else {
+			const externalIds = externalCollisionIds ?? this.db.getBlockIdsExcludingFile(file.path);
+			const registry = WasmBridge.createCollisionRegistry(externalIds);
+			try {
+				result = WasmBridge.syncDocumentWithRegistry(
+					content,
+					registry,
+					inheritedTags,
+					sectionHints,
+				);
+			} finally {
+				registry.free();
+			}
+		}
 
 		// If missing IDs were generated or duplicate IDs replaced, write updated Markdown once
 		if (result.updated_content !== null && result.updated_content !== content) {
@@ -108,55 +127,29 @@ export class NoteScanner {
 	}> {
 		const files = filesToScan ?? this.app.vault.getMarkdownFiles();
 		const validPaths = new Set(files.map((f) => f.path));
-		const ownershipMap = this.db.getBlockFileOwnershipMap();
 		let totalBlocks = 0;
 		const failedFiles: string[] = [];
 
-		// Index block IDs for fast O(1) external set resolution
-		const allBlockIds = new Set<string>();
-		const fileToBlockIds = new Map<string, Set<string>>();
-		for (const [id, ownerPath] of ownershipMap.entries()) {
-			allBlockIds.add(id);
-			let set = fileToBlockIds.get(ownerPath);
-			if (!set) {
-				set = new Set();
-				fileToBlockIds.set(ownerPath, set);
+		// Scan-scoped registry: lives for the entire duration of the vault scan.
+		// Markdown is the authoritative source of truth for block IDs.
+		const registry = WasmBridge.createCollisionRegistry();
+		try {
+			for (const file of files) {
+				try {
+					const blocks = await this.syncFile(file, registry, true);
+					totalBlocks += blocks.length;
+				} catch (error) {
+					console.error(`[Flashcards] Failed to sync note "${file.path}":`, error);
+					failedFiles.push(file.path);
+				}
 			}
-			set.add(id);
+
+			// Prune any deleted notes from database
+			this.db.pruneDeletedNotes(validPaths);
+			await this.db.persist();
+		} finally {
+			registry.free();
 		}
-
-		for (const file of files) {
-			try {
-				const existingFileIds = fileToBlockIds.get(file.path) ?? new Set<string>();
-
-				// externalIds = allBlockIds without the current file's existing IDs
-				const externalIds = new Set(allBlockIds);
-				for (const id of existingFileIds) {
-					externalIds.delete(id);
-				}
-
-				const blocks = await this.syncFile(file, externalIds, true);
-				totalBlocks += blocks.length;
-
-				// Update index: remove old IDs for this file, insert newly synced IDs
-				for (const id of existingFileIds) {
-					allBlockIds.delete(id);
-				}
-				const newFileIds = new Set<string>();
-				for (const block of blocks) {
-					allBlockIds.add(block.id);
-					newFileIds.add(block.id);
-				}
-				fileToBlockIds.set(file.path, newFileIds);
-			} catch (error) {
-				console.error(`[Flashcards] Failed to sync note "${file.path}":`, error);
-				failedFiles.push(file.path);
-			}
-		}
-
-		// Prune any deleted notes from database
-		this.db.pruneDeletedNotes(validPaths);
-		await this.db.persist();
 
 		if (failedFiles.length > 0) {
 			console.warn(

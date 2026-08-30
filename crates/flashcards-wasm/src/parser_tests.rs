@@ -1,18 +1,91 @@
     use super::*;
 
     #[test]
-    fn test_valid_block_id() {
+    fn test_valid_block_id_parsing() {
         assert!(syntax::is_valid_block_id("k9x2mp"));
         assert!(syntax::is_valid_block_id("012345"));
         assert!(syntax::is_valid_block_id("abcdef"));
         assert!(syntax::is_valid_block_id("zzzzzz"));
+        assert!(syntax::is_valid_block_id("000000"));
+        assert!(syntax::is_valid_block_id("\u{200E}k9x2mp\u{200F}"));
+        assert_eq!(syntax::decode_block_id("000000"), Some(0));
+        assert_eq!(syntax::decode_block_id("zzzzzz"), Some(syntax::MAX_BLOCK_ID - 1));
+    }
 
-        // Invalid: uppercase, wrong length, special characters
-        assert!(!syntax::is_valid_block_id("K9X2MP"));
+    #[test]
+    fn test_invalid_length_block_id() {
+        assert_eq!(syntax::decode_block_id(""), None);
+        assert_eq!(syntax::decode_block_id("a"), None);
+        assert_eq!(syntax::decode_block_id("12345"), None);
+        assert_eq!(syntax::decode_block_id("1234567"), None);
+        assert_eq!(syntax::decode_block_id("1234567890"), None);
         assert!(!syntax::is_valid_block_id("k9x2m"));
         assert!(!syntax::is_valid_block_id("k9x2mp7"));
-        assert!(!syntax::is_valid_block_id("k9-2mp"));
         assert!(!syntax::is_valid_block_id(""));
+    }
+
+    #[test]
+    fn test_invalid_uppercase_characters() {
+        assert_eq!(syntax::decode_block_id("K9X2MP"), None);
+        assert_eq!(syntax::decode_block_id("k9x2mP"), None);
+        assert_eq!(syntax::decode_block_id("K9x2mp"), None);
+        assert_eq!(syntax::decode_block_id("ZZZZZZ"), None);
+        assert_eq!(syntax::decode_block_id("01234A"), None);
+        assert!(!syntax::is_valid_block_id("K9X2MP"));
+        assert!(!syntax::is_valid_block_id("k9x2Mp"));
+    }
+
+    #[test]
+    fn test_invalid_non_base36_characters() {
+        assert_eq!(syntax::decode_block_id("k9-2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9_2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9.2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9 2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9!2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9#2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9$2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9@2mp"), None);
+        assert_eq!(syntax::decode_block_id("k9\n2mp"), None);
+        assert!(!syntax::is_valid_block_id("k9-2mp"));
+        assert!(!syntax::is_valid_block_id("k9_2mp"));
+    }
+
+    #[test]
+    fn test_encode_decode_round_trip() {
+        // Test boundary values
+        let min_id: syntax::BlockId = 0;
+        let max_id: syntax::BlockId = syntax::MAX_BLOCK_ID - 1;
+        assert_eq!(syntax::encode_block_id(min_id), "000000");
+        assert_eq!(syntax::decode_block_id("000000"), Some(min_id));
+        assert_eq!(syntax::encode_block_id(max_id), "zzzzzz");
+        assert_eq!(syntax::decode_block_id("zzzzzz"), Some(max_id));
+
+        // Test round trip across various values
+        let sample_ids = [
+            0,
+            1,
+            35,
+            36,
+            1296,
+            46656,
+            1679616,
+            60466176,
+            1000000000,
+            2176782335,
+        ];
+        for id in sample_ids {
+            let encoded = syntax::encode_block_id(id);
+            assert_eq!(encoded.len(), 6);
+            assert_eq!(syntax::decode_block_id(&encoded), Some(id));
+        }
+
+        // Test round trip for specific known strings
+        let sample_strs = ["k9x2mp", "012345", "abcdef", "w7n3rk", "8a1b2c", "37066d"];
+        for s in sample_strs {
+            let decoded = syntax::decode_block_id(s).expect("valid string");
+            let re_encoded = syntax::encode_block_id(decoded);
+            assert_eq!(re_encoded, s);
+        }
     }
 
     #[test]
@@ -25,6 +98,117 @@
         let id2 = syntax::generate_unique_block_id(&existing);
         assert!(syntax::is_valid_block_id(&id2));
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_collision_registry_operations() {
+        let mut registry = syntax::CollisionRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+
+        let id1 = syntax::decode_block_id("k9x2mp").unwrap();
+        let id2 = syntax::decode_block_id("w7n3rk").unwrap();
+
+        // First insert succeeds
+        assert!(registry.insert(id1));
+        assert!(registry.contains(id1));
+        assert!(!registry.contains(id2));
+        assert_eq!(registry.len(), 1);
+
+        // Duplicate insert returns false
+        assert!(!registry.insert(id1));
+        assert_eq!(registry.len(), 1);
+
+        // Second ID insert succeeds
+        assert!(registry.insert(id2));
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn test_forced_collision_deterministic_regeneration() {
+        let mut registry = syntax::CollisionRegistry::new();
+        let target_collision = syntax::decode_block_id("dup001").unwrap();
+        let target_unique = syntax::decode_block_id("uniq99").unwrap();
+
+        // Reserve target_collision first
+        assert!(registry.insert(target_collision));
+
+        // Inject RNG sequence: target_collision (collides), target_collision (collides again), target_unique (succeeds)
+        let mut attempts = vec![target_unique, target_collision, target_collision];
+        let allocated = registry.allocate_unique_with_rng(|| {
+            attempts.pop().expect("RNG sequence exhausted")
+        });
+
+        assert_eq!(allocated, target_unique);
+        assert!(registry.contains(target_unique));
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_scoped_registry_across_multiple_documents() {
+        let mut registry = syntax::CollisionRegistry::new();
+
+        // Doc 1: Has one card with ID 'dup001' and one missing ID
+        let doc1 = "Question 1 :: Answer 1 ^dup001\nQuestion 2 :: Answer 2\n";
+        let res1 = sync_document_with_reg(doc1, &mut registry, &[], &[]);
+        assert_eq!(res1.blocks.len(), 2);
+        assert_eq!(res1.blocks[0].id, "dup001");
+        assert!(syntax::is_valid_block_id(&res1.blocks[1].id));
+        assert_ne!(res1.blocks[1].id, "dup001");
+        assert_eq!(registry.len(), 2);
+
+        // Doc 2: Has a card that collides with doc1's 'dup001', and one card with fresh 'uniq01'
+        let doc2 = "Question 3 :: Answer 3 ^dup001\nQuestion 4 :: Answer 4 ^uniq01\n";
+        let res2 = sync_document_with_reg(doc2, &mut registry, &[], &[]);
+        assert_eq!(res2.blocks.len(), 2);
+        assert!(res2.updated_content.is_some());
+        let updated2 = res2.updated_content.unwrap();
+
+        // Collision 'dup001' in Doc 2 was regenerated, while 'uniq01' was preserved!
+        assert_ne!(res2.blocks[0].id, "dup001");
+        assert!(syntax::is_valid_block_id(&res2.blocks[0].id));
+        assert_eq!(res2.blocks[1].id, "uniq01");
+        assert!(updated2.contains(&res2.blocks[0].id));
+        assert!(updated2.contains("uniq01"));
+
+        // Registry now holds all 4 unique IDs from both documents
+        assert_eq!(registry.len(), 4);
+    }
+
+    #[test]
+    fn test_block_retaining_own_existing_id_without_false_collision() {
+        let mut registry = syntax::CollisionRegistry::new();
+        let doc = "Q1 :: A1 ^own001\nQ2 ::: A2 ^own002\nThe capital is {{Paris}} ^own003\n";
+        let res = sync_document_with_reg(doc, &mut registry, &[], &[]);
+
+        // None of the blocks should be modified or considered collisions
+        assert_eq!(res.updated_content, None);
+        assert_eq!(res.blocks.len(), 3);
+        assert_eq!(res.blocks[0].id, "own001");
+        assert_eq!(res.blocks[1].id, "own002");
+        assert_eq!(res.blocks[2].id, "own003");
+        assert_eq!(registry.len(), 3);
+    }
+
+    #[test]
+    fn test_multiple_generated_ids_during_same_scan() {
+        let mut registry = syntax::CollisionRegistry::new();
+        let mut doc = String::new();
+        for i in 0..50 {
+            doc.push_str(&format!("Question {i} :: Answer {i}\n"));
+        }
+
+        let res = sync_document_with_reg(&doc, &mut registry, &[], &[]);
+        assert!(res.updated_content.is_some());
+        assert_eq!(res.blocks.len(), 50);
+        assert_eq!(registry.len(), 50);
+
+        let mut seen = HashSet::new();
+        for b in &res.blocks {
+            assert!(syntax::is_valid_block_id(&b.id));
+            assert!(seen.insert(b.id.clone()), "Every generated ID must be unique");
+            assert!(registry.contains(syntax::decode_block_id(&b.id).unwrap()));
+        }
     }
 
     #[test]

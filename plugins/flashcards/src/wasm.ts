@@ -3,11 +3,12 @@ import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 
 import initWasm, {
 	calculate_schedule,
-	generate_block_id,
+	CollisionRegistry,
+	generate_block_id_with_registry,
 	init,
 	optimize_fsrs_weights,
 	parse_blocks,
-	sync_document_wasm,
+	sync_document_with_registry,
 } from '../../../crates/flashcards-wasm/pkg/flashcards_wasm.js';
 import type {
 	DocumentSyncResult,
@@ -18,6 +19,8 @@ import type {
 	SchedulingCard,
 	SchedulingInfo,
 } from './types.js';
+
+export { CollisionRegistry };
 
 export class WasmBridge {
 	private static isWasmInitialized = false;
@@ -64,19 +67,49 @@ export class WasmBridge {
 		return binaryData ? new this.sqlJs.Database(binaryData) : new this.sqlJs.Database();
 	}
 
-	public static syncDocument(
+	public static createCollisionRegistry(
+		existingIds?: Set<string> | string[] | Iterable<string>,
+	): CollisionRegistry {
+		if (!existingIds) {
+			return new CollisionRegistry();
+		}
+		const arr = Array.from(existingIds);
+		if (arr.length === 0) {
+			return new CollisionRegistry();
+		}
+		return CollisionRegistry.from_json(JSON.stringify(arr));
+	}
+
+	public static syncDocumentWithRegistry(
 		markdown: string,
-		existingIds: Set<string>,
+		registry: CollisionRegistry,
 		inheritedTags: string[],
 		sectionHints: ObsidianSectionHint[] = [],
 	): DocumentSyncResult {
-		const json = sync_document_wasm(
+		const json = sync_document_with_registry(
 			markdown,
-			JSON.stringify(Array.from(existingIds)),
+			registry,
 			JSON.stringify(inheritedTags),
 			JSON.stringify(sectionHints),
 		);
 		return JSON.parse(json) as DocumentSyncResult;
+	}
+
+	public static syncDocument(
+		markdown: string,
+		existingIds: Set<string> | CollisionRegistry,
+		inheritedTags: string[],
+		sectionHints: ObsidianSectionHint[] = [],
+	): DocumentSyncResult {
+		if (existingIds instanceof CollisionRegistry) {
+			return this.syncDocumentWithRegistry(markdown, existingIds, inheritedTags, sectionHints);
+		}
+		const registry = this.createCollisionRegistry(existingIds);
+		try {
+			return this.syncDocumentWithRegistry(markdown, registry, inheritedTags, sectionHints);
+		} finally {
+			registry.free();
+		}
 	}
 
 	public static parseMarkdownBlocks(
@@ -92,8 +125,20 @@ export class WasmBridge {
 		return JSON.parse(json) as ParsedBlock[];
 	}
 
-	public static generateBlockId(existingIds: Set<string> = new Set()): string {
-		return generate_block_id(JSON.stringify(Array.from(existingIds)));
+	public static generateBlockId(existingIds: Set<string> | CollisionRegistry = new Set()): string {
+		if (existingIds instanceof CollisionRegistry) {
+			return generate_block_id_with_registry(existingIds);
+		}
+		const registry = this.createCollisionRegistry(existingIds);
+		try {
+			return generate_block_id_with_registry(registry);
+		} finally {
+			registry.free();
+		}
+	}
+
+	public static generateBlockIdWithRegistry(registry: CollisionRegistry): string {
+		return generate_block_id_with_registry(registry);
 	}
 
 	public static calculateSchedule(

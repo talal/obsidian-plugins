@@ -3,6 +3,8 @@ use std::ops::Range;
 
 use super::markdown::MarkdownContext;
 
+pub type BlockId = u32;
+pub const MAX_BLOCK_ID: BlockId = 36 * 36 * 36 * 36 * 36 * 36; // 2_176_782_336
 const BASE36_CHARS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Check if a character is a BiDi control, zero-width, or formatting mark.
@@ -42,40 +44,130 @@ pub fn trim_end_whitespace_and_invisible(s: &str) -> &str {
     s.trim_end_matches(is_whitespace_or_invisible)
 }
 
+/// Decode a 6-character lowercase base-36 string ([0-9a-z]) into a compact BlockId (u32).
+/// Enforces exactly 6 characters and rejects uppercase or invalid characters.
+pub fn decode_block_id(s: &str) -> Option<BlockId> {
+    let clean = trim_whitespace_and_invisible(s);
+    if clean.len() != 6 {
+        return None;
+    }
+    let mut val: u32 = 0;
+    for b in clean.bytes() {
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as u32,
+            b'a'..=b'z' => (b - b'a' + 10) as u32,
+            _ => return None,
+        };
+        val = val * 36 + digit;
+    }
+    Some(val)
+}
+
+/// Encode a compact BlockId (u32) into a 6-character lowercase base-36 string ([0-9a-z]).
+pub fn encode_block_id(mut id: BlockId) -> String {
+    assert!(id < MAX_BLOCK_ID, "BlockId out of range: {id}");
+    let mut buf = [b'0'; 6];
+    for i in (0..6).rev() {
+        buf[i] = BASE36_CHARS[(id % 36) as usize];
+        id /= 36;
+    }
+    // Safety: buf contains only ASCII characters from BASE36_CHARS
+    unsafe { String::from_utf8_unchecked(buf.to_vec()) }
+}
+
 /// Check if a block ID is exactly 6 lowercase base-36 characters ([0-9a-z]).
 pub fn is_valid_block_id(id: &str) -> bool {
-    let clean = trim_whitespace_and_invisible(id);
-    clean.len() == 6
-        && clean
-            .chars()
-            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
+    decode_block_id(id).is_some()
+}
+
+/// Generate a uniform random BlockId in 0..MAX_BLOCK_ID using rejection sampling.
+pub fn random_block_id() -> BlockId {
+    let mut bytes = [0u8; 4];
+    loop {
+        if getrandom::fill(&mut bytes).is_err() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEED: AtomicU64 = AtomicU64::new(0x853c49e6748fea9b);
+            let val = SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed);
+            let be = val.to_be_bytes();
+            bytes.copy_from_slice(&be[..4]);
+        }
+        let raw = u32::from_ne_bytes(bytes);
+        if raw < MAX_BLOCK_ID {
+            return raw;
+        }
+    }
+}
+
+/// Scan-scoped collision registry holding all active/reserved BlockIds as a compact HashSet<u32>.
+#[derive(Debug, Clone, Default)]
+pub struct CollisionRegistry {
+    used: HashSet<BlockId>,
+}
+
+impl CollisionRegistry {
+    pub fn new() -> Self {
+        Self {
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            used: HashSet::with_capacity(capacity),
+        }
+    }
+
+    /// Test and reserve an ID. Returns true if newly inserted, false if already owned/colliding.
+    pub fn insert(&mut self, id: BlockId) -> bool {
+        self.used.insert(id)
+    }
+
+    /// Check if an ID is currently registered.
+    pub fn contains(&self, id: BlockId) -> bool {
+        self.used.contains(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.used.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.used.is_empty()
+    }
+
+    /// Allocate a random unique BlockId that does not collide with any currently registered ID.
+    pub fn allocate_unique(&mut self) -> BlockId {
+        self.allocate_unique_with_rng(random_block_id)
+    }
+
+    /// Allocate a unique BlockId using an injectable RNG for deterministic testing.
+    pub fn allocate_unique_with_rng<F>(&mut self, mut rng: F) -> BlockId
+    where
+        F: FnMut() -> BlockId,
+    {
+        loop {
+            let id = rng();
+            if self.used.insert(id) {
+                return id;
+            }
+        }
+    }
 }
 
 /// Generate a fresh 6-character lowercase base-36 string ([0-9a-z]).
 pub fn gen_base36_len6() -> String {
-    let mut bytes = [0u8; 6];
-    if getrandom::fill(&mut bytes).is_err() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEED: AtomicU64 = AtomicU64::new(0x853c49e6748fea9b);
-        let val = SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed);
-        let be = val.to_be_bytes();
-        bytes.copy_from_slice(&be[..6]);
-    }
-    let mut result = String::with_capacity(6);
-    for b in bytes {
-        result.push(BASE36_CHARS[(b as usize) % 36] as char);
-    }
-    result
+    encode_block_id(random_block_id())
 }
 
 /// Generate a unique 6-character lowercase base-36 block ID that does not collide with existing_ids.
 pub fn generate_unique_block_id(existing_ids: &HashSet<String>) -> String {
-    loop {
-        let id = gen_base36_len6();
-        if !existing_ids.contains(&id) {
-            return id;
+    let mut reg = CollisionRegistry::with_capacity(existing_ids.len() + 1);
+    for s in existing_ids {
+        if let Some(id) = decode_block_id(s) {
+            reg.insert(id);
         }
     }
+    encode_block_id(reg.allocate_unique())
 }
 
 #[derive(Debug, Default)]

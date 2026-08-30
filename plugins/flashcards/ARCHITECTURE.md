@@ -12,7 +12,7 @@ The Flashcards plugin enables spaced repetition learning directly within Obsidia
 - **Fat Rust Core (`crates/flashcards-wasm`)**:
   - Official `fsrs` crate from crates.io (`version 6.6.1`) for scheduling and on-device weight optimization.
   - AST-aware Markdown parser with `pulldown-cmark` offset events (protecting code blocks, math, tables, callouts).
-  - In-Rust 6-character lowercase base-36 ID generation, deduplication, and single-pass note text transformation.
+  - Compact `BlockId = u32` representation with scan-scoped `CollisionRegistry` (`HashSet<BlockId>`) for O(1) deduplication without repeated serialization.
 - **Thin TypeScript Shell (`plugins/flashcards`)**:
   - Obsidian UI views built in Svelte 5 with native Obsidian CSS design tokens.
   - In-memory SQLite runtime via `sql.js` for instant queries.
@@ -151,7 +151,8 @@ flowchart TD
 1. **6-Character Lowercase Base-36 Space**:
    - Character set: `[0-9a-z]` (36 lowercase alphanumeric symbols).
    - Total space: 36⁶ = 2,176,782,336 (~2.17 billion combinations).
-   - An in-memory live `existing_ids` Set check guarantees 100% collision-free generation during note scans.
+   - Internally represented as `type BlockId = u32` ($36^6 < 2^{32}$).
+   - A scan-scoped `CollisionRegistry` (`HashSet<BlockId>`) guarantees O(1) collision testing and reservation across the entire vault scan without per-document JSON serialization overhead.
 2. **Native Obsidian Case-Folding Resolver Immunity**:
    - While Obsidian's block search/autocomplete UI displays case-distinct blocks, Obsidian's underlying link and embed resolver (`![[note#^anchor]]`) normalizes and folds block anchors case-insensitively.
    - Enforcing strictly lowercase Base-36 (`[0-9a-z]`) guarantees that every block link and embed in Obsidian resolves unambiguously to the exact card.
@@ -249,30 +250,35 @@ sequenceDiagram
     autonumber
     participant Obs as Obsidian Vault
     participant Scanner as NoteScanner (TS)
-    participant WASM as sync_document (Rust WASM)
+    participant Reg as CollisionRegistry (Rust WASM)
+    participant WASM as sync_document_with_registry (Rust WASM)
     participant DB as SQLite DB (sql.js)
 
-    Obs->>Scanner: Note opened / Vault scan triggered
-    Scanner->>Obs: app.vault.cachedRead(file)
-    Obs-->>Scanner: Note markdown content
-    Scanner->>WASM: sync_document(content, existingIds, tags, sectionHints)
-    Note over WASM: AST byte-masking (pulldown-cmark)<br/>Parse cards, clozes & blocks<br/>Generate 6-char Base-36 IDs if missing
-    WASM-->>Scanner: DocumentSyncResult { updated_content, blocks }
-    
-    alt If updated_content != null (IDs generated)
-        Scanner->>Obs: app.vault.modify(file, updated_content)
-    end
+    Note over Scanner,Reg: Start Scan: Initialize scan-scoped CollisionRegistry
+    loop For each note in vault
+        Scanner->>Obs: app.vault.cachedRead(file)
+        Obs-->>Scanner: Note markdown content
+        Scanner->>WASM: sync_document_with_registry(content, registry, tags, sectionHints)
+        Note over WASM,Reg: AST byte-masking (pulldown-cmark)<br/>Parse cards, clozes & blocks<br/>O(1) test & reserve IDs in CollisionRegistry<br/>Generate 6-char Base-36 IDs if missing or duplicate
+        WASM-->>Scanner: DocumentSyncResult { updated_content, blocks }
+        
+        alt If updated_content != null (IDs generated / replaced)
+            Scanner->>Obs: app.vault.modify(file, updated_content)
+        end
 
-    Scanner->>DB: syncNoteBlocks(filePath, blocks)
-    Note over DB: Upsert blocks & reconcile cards in SQLite
+        Scanner->>DB: syncNoteBlocks(filePath, blocks)
+        Note over DB: Upsert blocks & reconcile cards in SQLite
+    end
+    Note over Scanner,Reg: Finish Scan: registry.free()
 ```
 
 ### Vault Scan Lifecycle
-1. **Iterate Files via `cachedRead`**: For each markdown file in the vault, read cached content via `app.vault.cachedRead(file)`.
-2. **Pass into Rust WASM (`sync_document`)**: Rust parses cards, masks AST, generates fresh 6-char lowercase base-36 IDs (checking against `existingIds`), and rebuilds the modified Markdown text in Rust.
-3. **File Write (if modified)**: If `updated_content` is present, TypeScript calls `app.vault.modify(file, updated_content)` once.
-4. **Incremental In-Memory DB Update**: Upsert `blocks` and reconcile `cards` into the in-memory SQLite database immediately per file, updating the live `existingIds` Set.
-5. **Final Snapshot Persistence**: Once all files in the vault have completed scanning, execute a single snapshot save to disk via the **Dual-Slot Persistence Protocol**.
+1. **Initialize Scan-Scoped `CollisionRegistry`**: Create a single `CollisionRegistry` instance in Rust WASM for the entire vault scan (O(1) lookup/reservation, zero per-file JSON serialization overhead). Markdown is treated as the authoritative source of truth.
+2. **Iterate Files via `cachedRead`**: For each markdown file in the vault, read cached content via `app.vault.cachedRead(file)`.
+3. **Pass into Rust WASM (`sync_document_with_registry`)**: Rust parses cards, masks AST, reserves valid existing IDs or generates fresh 6-char lowercase base-36 IDs directly in the shared `CollisionRegistry`, and rebuilds the modified Markdown text in Rust.
+4. **File Write (if modified)**: If `updated_content` is present, TypeScript calls `app.vault.modify(file, updated_content)` once.
+5. **Incremental In-Memory DB Update**: Upsert `blocks` and reconcile `cards` into the in-memory SQLite database immediately per file.
+6. **Prune & Persist**: Once all files in the vault have completed scanning, prune deleted notes and execute a single snapshot save to disk via the **Dual-Slot Persistence Protocol**. Free the scan-scoped `CollisionRegistry`.
 
 ---
 
@@ -521,12 +527,12 @@ crates/flashcards-wasm/
 ├── Cargo.toml
 ├── src/
 │   ├── fsrs.rs          # FSRS-6 core scheduling engine, load balancing & item calculations
-│   ├── lib.rs           # WebAssembly exports with Fallible<T> / fail()
+│   ├── lib.rs           # WebAssembly exports with CollisionRegistry & Fallible<T> / fail()
 │   ├── markdown.rs      # pulldown-cmark AST byte-masking
 │   ├── optimizer.rs     # On-device weight training over review logs
-│   ├── parser.rs        # Single-pass sync_document & block extraction
-│   ├── parser_tests.rs  # Unit tests for parser and transformer
-│   ├── syntax.rs        # Base-36 ID generation, cloze parsing & inline code guard
+│   ├── parser.rs        # Single-pass sync_document_with_reg & block extraction
+│   ├── parser_tests.rs  # Unit tests for parser and transformer (57 tests)
+│   ├── syntax.rs        # BlockId (u32), CollisionRegistry, base-36 encode/decode, cloze parsing
 │   └── types.rs         # Domain types & Serde serializers
 └── fuzz/
     └── fuzz_targets/parse.rs # libFuzzer target for sync_document
@@ -550,7 +556,7 @@ plugins/flashcards/
 │   │   ├── schema.sql         # Canonical STRICT SQLite schema
 │   │   └── snapshot.ts        # 48-byte header packing & SHA-256 verification
 │   ├── scanner/
-│   │   └── NoteScanner.ts     # Single-pass vault & note scanner (O(M) ID index)
+│   │   └── NoteScanner.ts     # Scan-scoped vault & note scanner using CollisionRegistry
 │   ├── ui/
 │   │   ├── DashboardView.ts   # Inventory & stats leaf view
 │   │   ├── ReviewModal.ts     # Review modal shell & in-memory session
@@ -575,6 +581,6 @@ plugins/flashcards/
 │       ├── studySteps.ts         # Duration string parsing
 │       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (81 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (88 tests)
 ```
 
