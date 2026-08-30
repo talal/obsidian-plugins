@@ -1,4 +1,4 @@
-import type { Database } from 'sql.js';
+import type { Database, Statement } from 'sql.js';
 
 import type {
 	CardPerformanceUpdate,
@@ -23,6 +23,9 @@ export function commitSession(
 ): number {
 	db.run('BEGIN TRANSACTION');
 	let sessionId = existingSessionId ?? 0;
+	let insertReviewStmt: Statement | null = null;
+	let updateCardStmt: Statement | null = null;
+
 	try {
 		if (sessionId > 0) {
 			db.run(
@@ -57,11 +60,14 @@ export function commitSession(
 			idStmt.free();
 		}
 
-		for (const r of reviews) {
-			db.run(
+		if (reviews.length > 0) {
+			insertReviewStmt = db.prepare(
 				`INSERT INTO reviews (session_id, card_id, rating, state, due_at, stability, difficulty, reviewed_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
+			);
+			for (let i = 0; i < reviews.length; i++) {
+				const r = reviews[i]!;
+				insertReviewStmt.run([
 					sessionId,
 					r.card_id,
 					r.rating,
@@ -70,17 +76,20 @@ export function commitSession(
 					r.stability,
 					r.difficulty,
 					r.reviewed_at,
-				],
-			);
+				]);
+			}
 		}
 
-		for (const c of cardUpdates) {
-			db.run(
+		if (cardUpdates.length > 0) {
+			updateCardStmt = db.prepare(
 				`UPDATE cards
 				 SET state = ?, due_at = ?, stability = ?, difficulty = ?, reps = ?, lapses = ?,
 				     last_review = ?, learning_step = ?, relearning_step = ?
 				 WHERE id = ?`,
-				[
+			);
+			for (let i = 0; i < cardUpdates.length; i++) {
+				const c = cardUpdates[i]!;
+				updateCardStmt.run([
 					c.state,
 					c.due_at,
 					c.stability,
@@ -91,14 +100,17 @@ export function commitSession(
 					c.learning_step,
 					c.relearning_step,
 					c.id,
-				],
-			);
+				]);
+			}
 		}
 
 		db.run('COMMIT');
 	} catch (error) {
 		db.run('ROLLBACK');
 		throw error;
+	} finally {
+		insertReviewStmt?.free();
+		updateCardStmt?.free();
 	}
 
 	return sessionId;

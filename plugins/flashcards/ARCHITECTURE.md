@@ -296,6 +296,11 @@ sequenceDiagram
 - **Race Condition Prevention**: Prevents concurrent SQLite transactions (`BEGIN TRANSACTION`), overlapping note updates, or race conditions between full vault scans and file events (`rename`, `delete`).
 - **Resilience**: Errors in one operation reject only the caller's promise and never wedge the queue, allowing subsequent queued operations to proceed immediately.
 
+### 5.3 Prepared Statement Lifecycle & Batched SQLite Transactions
+- **O(1) SQL Preparation**: Hot statements (`upsertBlock`, `insertCard`, `deleteNonClozeCards`, `deleteNonForwardCards`, `deleteNullDirectionCards`, `deleteBlock`) are prepared once per file synchronization or review commit rather than once per row.
+- **Single Atomic Transaction**: Each synchronization runs within a `BEGIN TRANSACTION ... COMMIT` boundary. If an error occurs, the transaction rolls back cleanly without leaving orphan records.
+- **Immediate Statement Finalization**: All prepared statements are allocated on demand and finalized inside `finally` blocks, preventing memory leaks in the WebAssembly SQLite heap.
+
 ---
 
 ## 6. Review Workflow & In-Memory Session Cache
@@ -598,6 +603,6 @@ plugins/flashcards/
 │       ├── studySteps.ts         # Duration string parsing
 │       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (98 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (102 tests)
 ```
 

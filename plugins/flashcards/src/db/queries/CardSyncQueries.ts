@@ -1,4 +1,4 @@
-import type { Database } from 'sql.js';
+import type { Database, Statement } from 'sql.js';
 
 import type { Block, CardBlockType, FileSyncState, ParsedBlock } from '../../types.js';
 
@@ -59,44 +59,103 @@ export function reconcileCards(db: Database, block: Block): void {
 
 export function syncNoteBlocks(db: Database, filePath: string, parsedBlocks: ParsedBlock[]): void {
 	const now = Date.now();
-	const incomingIds = new Set(parsedBlocks.map((b) => b.id));
+	const incomingIds = new Set<string>();
+	for (let i = 0; i < parsedBlocks.length; i++) {
+		incomingIds.add(parsedBlocks[i]!.id);
+	}
 
 	db.run('BEGIN TRANSACTION');
+
+	let selectOldBlocksStmt: Statement | null = null;
+	let deleteBlockStmt: Statement | null = null;
+	let upsertBlockStmt: Statement | null = null;
+	let insertCardStmt: Statement | null = null;
+	let deleteNonClozeCardsStmt: Statement | null = null;
+	let deleteNonForwardCardsStmt: Statement | null = null;
+	let deleteNullDirectionCardsStmt: Statement | null = null;
+
 	try {
-		const stmt = db.prepare('SELECT id FROM blocks WHERE file_path = ?');
-		stmt.bind([filePath]);
-		const toDelete: string[] = [];
-		while (stmt.step()) {
-			const id = stmt.getAsObject().id as string;
-			if (!incomingIds.has(id)) {
-				toDelete.push(id);
+		selectOldBlocksStmt = db.prepare('SELECT id FROM blocks WHERE file_path = ?');
+		deleteBlockStmt = db.prepare('DELETE FROM blocks WHERE id = ?');
+		upsertBlockStmt = db.prepare(
+			`INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   file_path = excluded.file_path,
+			   block_type = excluded.block_type,
+			   reversible = excluded.reversible,
+			   front = excluded.front,
+			   back = excluded.back,
+			   tags = excluded.tags,
+			   updated_at = excluded.updated_at`,
+		);
+		insertCardStmt = db.prepare(
+			`INSERT OR IGNORE INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
+			 VALUES (?, ?, 0, ?, 0.0, 0.0, 0, 0, NULL, 0, 0)`,
+		);
+		deleteNonClozeCardsStmt = db.prepare(
+			'DELETE FROM cards WHERE block_id = ? AND direction IS NOT NULL',
+		);
+		deleteNonForwardCardsStmt = db.prepare(
+			"DELETE FROM cards WHERE block_id = ? AND (direction IS NULL OR direction != 'forward')",
+		);
+		deleteNullDirectionCardsStmt = db.prepare(
+			'DELETE FROM cards WHERE block_id = ? AND direction IS NULL',
+		);
+
+		// 1. Process obsolete blocks
+		selectOldBlocksStmt.bind([filePath]);
+		while (selectOldBlocksStmt.step()) {
+			const oldId = selectOldBlocksStmt.getAsObject().id as string;
+			if (!incomingIds.has(oldId)) {
+				deleteBlockStmt.run([oldId]);
 			}
 		}
-		stmt.free();
 
-		for (const oldId of toDelete) {
-			db.run('DELETE FROM blocks WHERE id = ?', [oldId]);
-		}
+		// 2. Process incoming blocks & card changes
+		for (let i = 0; i < parsedBlocks.length; i++) {
+			const b = parsedBlocks[i]!;
+			const tagsStr = b.tags.length > 0 ? b.tags.join(' ') : '';
+			const reversibleInt = b.reversible ? 1 : 0;
 
-		for (const b of parsedBlocks) {
-			const blockRecord: Block = {
-				id: b.id,
-				file_path: filePath,
-				block_type: b.block_type as CardBlockType,
-				reversible: b.reversible ? 1 : 0,
-				front: b.front,
-				back: b.back,
-				tags: b.tags.join(' '),
-				updated_at: now,
-			};
-			upsertBlock(db, blockRecord);
-			reconcileCards(db, blockRecord);
+			// Upsert block
+			upsertBlockStmt.run([
+				b.id,
+				filePath,
+				b.block_type,
+				reversibleInt,
+				b.front,
+				b.back,
+				tagsStr,
+				now,
+			]);
+
+			// Reconcile cards for block
+			if (b.block_type === 'cloze') {
+				deleteNonClozeCardsStmt.run([b.id]);
+				insertCardStmt.run([b.id, null, now]);
+			} else if (b.reversible) {
+				deleteNullDirectionCardsStmt.run([b.id]);
+				insertCardStmt.run([b.id, 'forward', now]);
+				insertCardStmt.run([b.id, 'reverse', now]);
+			} else {
+				deleteNonForwardCardsStmt.run([b.id]);
+				insertCardStmt.run([b.id, 'forward', now]);
+			}
 		}
 
 		db.run('COMMIT');
 	} catch (error) {
 		db.run('ROLLBACK');
 		throw error;
+	} finally {
+		selectOldBlocksStmt?.free();
+		deleteBlockStmt?.free();
+		upsertBlockStmt?.free();
+		insertCardStmt?.free();
+		deleteNonClozeCardsStmt?.free();
+		deleteNonForwardCardsStmt?.free();
+		deleteNullDirectionCardsStmt?.free();
 	}
 }
 
@@ -112,11 +171,6 @@ export function pruneDeletedNotes(db: Database, validFilePaths: Set<string>): nu
 	}
 	stmt.free();
 
-	for (const path of toDelete) {
-		db.run('DELETE FROM blocks WHERE file_path = ?', [path]);
-		prunedCount++;
-	}
-
 	const stmtFiles = db.prepare('SELECT file_path FROM file_sync_state');
 	const toDeleteFiles: string[] = [];
 	while (stmtFiles.step()) {
@@ -127,8 +181,30 @@ export function pruneDeletedNotes(db: Database, validFilePaths: Set<string>): nu
 	}
 	stmtFiles.free();
 
-	for (const path of toDeleteFiles) {
-		db.run('DELETE FROM file_sync_state WHERE file_path = ?', [path]);
+	if (toDelete.length === 0 && toDeleteFiles.length === 0) {
+		return 0;
+	}
+
+	db.run('BEGIN TRANSACTION');
+	let deleteBlocksStmt: Statement | null = null;
+	let deleteFilesStmt: Statement | null = null;
+	try {
+		deleteBlocksStmt = db.prepare('DELETE FROM blocks WHERE file_path = ?');
+		deleteFilesStmt = db.prepare('DELETE FROM file_sync_state WHERE file_path = ?');
+		for (const path of toDelete) {
+			deleteBlocksStmt.run([path]);
+			prunedCount++;
+		}
+		for (const path of toDeleteFiles) {
+			deleteFilesStmt.run([path]);
+		}
+		db.run('COMMIT');
+	} catch (error) {
+		db.run('ROLLBACK');
+		throw error;
+	} finally {
+		deleteBlocksStmt?.free();
+		deleteFilesStmt?.free();
 	}
 
 	return prunedCount;

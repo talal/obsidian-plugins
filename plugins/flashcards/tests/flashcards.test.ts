@@ -4288,4 +4288,304 @@ Mitochondria
 			expect(hUnicode).toMatch(/^[0-9a-f]{16}$/);
 		});
 	});
+
+	describe('Batch 3: Prepared Statement Reuse & Atomic Synchronization', () => {
+		it('prepares hot statements once per synchronization regardless of block count', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			// Generate 50 test parsed blocks
+			const parsedBlocks: ParsedBlock[] = [];
+			for (let i = 1; i <= 50; i++) {
+				const isCloze = i % 3 === 0;
+				parsedBlocks.push({
+					id: `blk${i.toString().padStart(3, '0')}`,
+					block_type: isCloze ? 'cloze' : 'inline',
+					reversible: isCloze ? false : i % 2 === 0,
+					front: `Question ${i}`,
+					back: isCloze ? '' : `Answer ${i}`,
+					tags: ['test', `topic${i}`],
+					line_start: i * 2,
+					line_end: i * 2 + 1,
+				});
+			}
+
+			// Instrument db.prepare to count how many times SQL is compiled
+			let prepareCount = 0;
+			const originalPrepare = rawDb.prepare.bind(rawDb);
+			rawDb.prepare = (sql: string) => {
+				prepareCount++;
+				return originalPrepare(sql);
+			};
+
+			try {
+				dbManager.syncNoteBlocks('BatchTest.md', parsedBlocks);
+
+				// For 50 blocks with old db.run per-row pattern, prepare would be called 150+ times.
+				// With prepared statement reuse, hot statements are prepared exactly 7 times!
+				expect(prepareCount).toBe(7);
+
+				// Verify all 50 blocks and their cards were inserted correctly
+				const allCards = dbManager.getAllCards();
+				expect(allCards.length).toBeGreaterThan(50); // Reversible cards produce 2 cards per block
+				const blocksForFile = dbManager.getBlocksForFile('BatchTest.md');
+				expect(blocksForFile).toHaveLength(50);
+			} finally {
+				rawDb.prepare = originalPrepare;
+			}
+		});
+
+		it('handles multiple blocks, obsolete block deletion, and card reconciliation in one transaction', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			// Sync initial 3 blocks (1 forward, 1 reversible, 1 cloze)
+			dbManager.syncNoteBlocks('Notes.md', [
+				{
+					id: 'card01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Front 1',
+					back: 'Back 1',
+					tags: ['tag1'],
+					line_start: 1,
+					line_end: 1,
+				},
+				{
+					id: 'card02',
+					block_type: 'inline',
+					reversible: true,
+					front: 'Front 2',
+					back: 'Back 2',
+					tags: ['tag2'],
+					line_start: 2,
+					line_end: 2,
+				},
+				{
+					id: 'card03',
+					block_type: 'cloze',
+					reversible: false,
+					front: '==Cloze== text',
+					back: '',
+					tags: ['tag3'],
+					line_start: 3,
+					line_end: 3,
+				},
+			]);
+
+			let cards = dbManager.getAllCards();
+			expect(cards).toHaveLength(4); // 1 forward + 2 reversible (fwd+rev) + 1 cloze
+
+			// Review card01 to establish review state
+			const card1 = cards.find((c) => c.blockId === 'card01')!;
+			await dbManager.commitSession(
+				{
+					started_at: 1000,
+					ended_at: 2000,
+					card_count: 1,
+					forgot_count: 0,
+					remembered_count: 1,
+				},
+				[
+					{
+						card_id: card1.cardId,
+						rating: 3,
+						state: 2,
+						due_at: 8000,
+						stability: 4.5,
+						difficulty: 2.1,
+						reviewed_at: 2000,
+					},
+				],
+				[
+					{
+						id: card1.cardId,
+						state: 2,
+						due_at: 8000,
+						stability: 4.5,
+						difficulty: 2.1,
+						reps: 1,
+						lapses: 0,
+						last_review: 2000,
+						learning_step: 0,
+						relearning_step: 0,
+					},
+				],
+			);
+
+			// Resync with:
+			// - card01 modified question text (scheduling must be preserved)
+			// - card02 changed from reversible to non-reversible (reverse card must be pruned)
+			// - card03 deleted (obsolete block deleted via CASCADE)
+			// - card04 added (new block)
+			dbManager.syncNoteBlocks('Notes.md', [
+				{
+					id: 'card01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Modified Front 1',
+					back: 'Back 1',
+					tags: ['tag1', 'updated'],
+					line_start: 1,
+					line_end: 1,
+				},
+				{
+					id: 'card02',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Front 2',
+					back: 'Back 2',
+					tags: ['tag2'],
+					line_start: 2,
+					line_end: 2,
+				},
+				{
+					id: 'card04',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Front 4',
+					back: 'Back 4',
+					tags: ['tag4'],
+					line_start: 4,
+					line_end: 4,
+				},
+			]);
+
+			cards = dbManager.getAllCards();
+			expect(cards).toHaveLength(3); // card01, card02 (fwd only), card04
+
+			// Verify card01 preserved its FSRS review metrics
+			const updatedCard1 = cards.find((c) => c.blockId === 'card01')!;
+			expect(updatedCard1.front).toBe('Modified Front 1');
+			expect(updatedCard1.stateNum).toBe(2);
+			expect(updatedCard1.stability).toBe(4.5);
+			expect(updatedCard1.reps).toBe(1);
+
+			// Verify card02 now has only forward direction
+			const card2List = cards.filter((c) => c.blockId === 'card02');
+			expect(card2List).toHaveLength(1);
+			expect(card2List[0]!.direction).toBe('forward');
+
+			// Verify card03 was completely pruned
+			expect(cards.find((c) => c.blockId === 'card03')).toBeUndefined();
+		});
+
+		it('rolls back atomically on synchronization error without corrupting database', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			// Sync valid initial block
+			dbManager.syncNoteBlocks('Stable.md', [
+				{
+					id: 'init01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Initial Question',
+					back: 'Initial Answer',
+					tags: [],
+					line_start: 1,
+					line_end: 1,
+				},
+			]);
+
+			expect(dbManager.getAllCards()).toHaveLength(1);
+
+			// Attempt invalid sync that fails (e.g. violating cloze reversible constraint)
+			const invalidBlocks: ParsedBlock[] = [
+				{
+					id: 'bad001',
+					block_type: 'cloze',
+					reversible: true, // Violates CHECK (block_type != 'cloze' OR reversible = 0)
+					front: 'Invalid Cloze',
+					back: '',
+					tags: [],
+					line_start: 1,
+					line_end: 1,
+				},
+			];
+
+			expect(() => {
+				dbManager.syncNoteBlocks('Stable.md', invalidBlocks);
+			}).toThrow();
+
+			// Verify previous state was completely preserved and rollback succeeded
+			const cardsAfterRollback = dbManager.getAllCards();
+			expect(cardsAfterRollback).toHaveLength(1);
+			expect(cardsAfterRollback[0]!.blockId).toBe('init01');
+		});
+
+		it('reuses prepared statements during review session commit', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			// Sync 10 cards
+			const blocks: ParsedBlock[] = Array.from({ length: 10 }, (_, i) => ({
+				id: `card${i.toString().padStart(2, '0')}`,
+				block_type: 'inline',
+				reversible: false,
+				front: `Q${i}`,
+				back: `A${i}`,
+				tags: [],
+				line_start: i + 1,
+				line_end: i + 1,
+			}));
+			dbManager.syncNoteBlocks('SessionTest.md', blocks);
+
+			const cards = dbManager.getAllCards();
+			const reviews = cards.map((c, i) => ({
+				card_id: c.cardId,
+				rating: 3,
+				state: 2,
+				due_at: 10000 + i * 1000,
+				stability: 3.0,
+				difficulty: 2.0,
+				reviewed_at: 5000 + i * 100,
+			}));
+			const cardUpdates = cards.map((c, i) => ({
+				id: c.cardId,
+				state: 2,
+				due_at: 10000 + i * 1000,
+				stability: 3.0,
+				difficulty: 2.0,
+				reps: 1,
+				lapses: 0,
+				last_review: 5000 + i * 100,
+				learning_step: 0,
+				relearning_step: 0,
+			}));
+
+			let prepareCount = 0;
+			const originalPrepare = rawDb.prepare.bind(rawDb);
+			rawDb.prepare = (sql: string) => {
+				prepareCount++;
+				return originalPrepare(sql);
+			};
+
+			try {
+				await dbManager.commitSession(
+					{
+						started_at: 1000,
+						ended_at: 6000,
+						card_count: 10,
+						forgot_count: 0,
+						remembered_count: 10,
+					},
+					reviews,
+					cardUpdates,
+				);
+
+				// 1 for last_insert_rowid, 1 for insert reviews, 1 for update cards = 3 prepare calls total!
+				expect(prepareCount).toBe(3);
+
+				const updatedCards = dbManager.getAllCards();
+				expect(updatedCards.every((c) => c.reps === 1)).toBe(true);
+			} finally {
+				rawDb.prepare = originalPrepare;
+			}
+		});
+	});
 });
