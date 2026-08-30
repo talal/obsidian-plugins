@@ -96,7 +96,7 @@ export function addCardTag(
 				const t = (lines[j] ?? '')
 					.replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
 					.trim();
-				if (t === '...' || t === '. . .' || t === '…' || t === '---') {
+				if (t === '::' || t === ':::') {
 					break;
 				}
 				if (t.length > 0) {

@@ -53,20 +53,20 @@ Capital of Pakistan? ::: Islamabad ^k9x2mp
 ### 2.3 Block Cards (Multi-line)
 Wrapped inside Obsidian comment markers `%% ... %%` so metadata is completely invisible in Reading View and Live Preview:
 ```markdown
-%% card-start id=k9x2mp reversible=true %%
+%% card-start id=k9x2mp %%
 What are the largest cities of Pakistan? #card/todo
 
-...
+:::
 
 - Karachi
 - Lahore
 - Faisalabad
 %% card-end %%
 ```
-- **Attributes** (`key=val` on `card-start` line):
-  - `id`: Unique 6-character lowercase base-36 block ID (`[0-9a-z]`).
-  - `reversible`: `true` or `false` (default is `false` if omitted).
-- **Divider**: Standalone line with `...`, `. . .`, or `…` separating Front (Question) from Back (Answer).
+- **Header** (`%% card-start id=<id> %%`): Contains the unique 6-character lowercase base-36 block ID (`[0-9a-z]`).
+- **Divider & Direction**:
+  - `::` on its own line: Forward block card (`reversible = false`).
+  - `:::` on its own line: Bidirectional / reversible block card (`reversible = true`).
 
 ### 2.4 Cloze Deletion Cards
 Uses explicit `{{cloze}}` double curly brace syntax. All clozes in a card are revealed in-place:
@@ -105,7 +105,7 @@ Capital of California :: San Francisco #cs ^xyz102
 %% card-start id=xyz103 %%
 Why is Silicon Valley called that? #silicon #card/todo
 
-...
+::
 
 Because it's got that Silicon #chips ;)
 %% card-end %%
@@ -117,7 +117,7 @@ Because it's got that Silicon #chips ;)
   - **Removal (Toggle Off)**: Searches and removes `#card/todo` wherever it appears in the block's text, normalizing whitespace.
   - **Addition (Toggle On)**:
     - **Inline & Cloze Cards**: Appended at the end of the line right before the `^<id>` block identifier (e.g. `Question :: Answer #card/todo ^xyz101`).
-    - **Block Cards**: Appended at the **end of the question line/section** (e.g. `Why is X? #card/todo\n...\nAnswer` or `Q: Why is X? #card/todo\nAnswer`).
+    - **Block Cards**: Appended at the **end of the question line/section** before the `::` / `:::` divider (e.g. `Why is X? #card/todo\n::\nAnswer`).
     - **Why Question Placement**: Tags must **never** be placed on the `%% card-start %%` comment line because Obsidian's native tag indexer and global search ignore tags enclosed inside Markdown comment brackets `%%`. Placing it in the visible question ensures it is indexed natively across Obsidian.
 
 ---
@@ -519,7 +519,7 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 | **`Flashcards: Study deck`** | Global | Opens Tag Picker prompt to select tags and launches filtered review. |
 | **`Flashcards: Open dashboard`** | Global | Opens the Flashcards Inventory & Scheduling dashboard tab. |
 | **`Flashcards: Sync`** | Global | Scans all notes across the vault, auto-assigns missing IDs, and saves snapshot. |
-| **`Flashcards: Insert card block`** | Editor | Inserts clean `%% card-start %%\n\n...\n\n%% card-end %%` template at cursor. |
+| **`Flashcards: Insert card block`** | Editor | Inserts clean `%% card-start %%\n\n::\n\n%% card-end %%` template at cursor. |
 | **`Flashcards: Optimize database`** | Global | Runs `PRAGMA integrity_check`, deletes orphaned rows, executes `VACUUM`. |
 
 ---

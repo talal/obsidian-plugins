@@ -44,7 +44,6 @@ impl MarkdownContext {
             | Options::ENABLE_MATH
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
-            | Options::ENABLE_WIKILINKS
             | Options::ENABLE_FOOTNOTES;
 
         let mut protected_depth = 0usize;

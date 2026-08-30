@@ -296,6 +296,16 @@ pub(crate) fn bracket_depth_delta(line: &str) -> isize {
     delta
 }
 
+pub(crate) fn is_inside_html_tag(prefix: &str, suffix: &str) -> bool {
+    if let Some(last_open) = prefix.rfind('<') {
+        let after_open = &prefix[last_open..];
+        if !after_open.contains('>') && suffix.contains('>') {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn split_once_outside_clozes<'a>(
     line: &'a str,
     base_offset: usize,
@@ -317,6 +327,7 @@ pub(crate) fn split_once_outside_clozes<'a>(
             || is_inside_brackets(&line[..index], initial_bracket_depth)
             || has_unmatched_closing_bracket(&line[separator_end..])
             || has_unmatched_opening_bracket(&line[separator_end..])
+            || is_inside_html_tag(&line[..index], &line[separator_end..])
             || cloze_spans
                 .iter()
                 .any(|span| span.start <= index && index < span.end)
@@ -396,4 +407,21 @@ pub(crate) fn has_unclosed_inline_code(line: &str) -> bool {
         }
     }
     false
+}
+
+pub(crate) fn has_unclosed_html_tag(line: &str) -> bool {
+    let mut in_tag = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            if let Some(&next_c) = chars.peek()
+                && (next_c.is_alphabetic() || next_c == '/' || next_c == '!' || next_c == '?')
+            {
+                in_tag = true;
+            }
+        } else if c == '>' {
+            in_tag = false;
+        }
+    }
+    in_tag
 }

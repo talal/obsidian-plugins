@@ -37,12 +37,12 @@ fuzz_target!(|data: &[u8]| {
     // Fenced Code Block with fake block cards & inline cards
     doc.push_str("```rust\n");
     doc.push_str(&format!("// Code comment with :: separator: {block_safe}\n"));
-    doc.push_str("%% card-start id=fake01 %%\nFake Block Q\n...\nFake Block A\n%% card-end %%\n");
+    doc.push_str("%% card-start id=fake01 %%\nFake Block Q\n::\nFake Block A\n%% card-end %%\n");
     doc.push_str("let x = std::sync::Arc::new(5);\n");
     doc.push_str("```\n\n");
 
     // Valid Card 2 between protected blocks
-    doc.push_str("%% card-start %%\nReal Block Question\n...\nReal Block Answer\n%% card-end %%\n\n");
+    doc.push_str("%% card-start %%\nReal Block Question\n::\nReal Block Answer\n%% card-end %%\n\n");
 
     // Inline Math with fake cards
     let inline_math_safe = inline_safe.trim();

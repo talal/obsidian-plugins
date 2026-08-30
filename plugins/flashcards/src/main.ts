@@ -135,7 +135,7 @@ export default class FlashcardsPlugin extends Plugin {
 			editorCallback: (editor: Editor) => {
 				const cursor = editor.getCursor();
 				const prefix = cursor.ch !== 0 ? '\n' : '';
-				const template = `${prefix}%% card-start %%\n\n...\n\n%% card-end %%\n`;
+				const template = `${prefix}%% card-start %%\n\n::\n\n%% card-end %%\n`;
 				editor.replaceRange(template, cursor);
 				const targetLine = cursor.line + (cursor.ch !== 0 ? 2 : 1);
 				editor.setCursor({ line: targetLine, ch: 0 });

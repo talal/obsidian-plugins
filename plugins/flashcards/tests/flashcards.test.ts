@@ -882,10 +882,10 @@ describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / togg
 		expect(taggedCloze).toBe('The speed of light is ==3x10^8 m/s== in vacuum. #card/todo ^spd01');
 
 		// 3. Block card
-		const blockNoTags = `%% card-start id=blk01 %%\nWhat is photosynthesis?\n...\nProcess by which plants make food\n%% card-end %%`;
+		const blockNoTags = `%% card-start id=blk01 %%\nWhat is photosynthesis?\n::\nProcess by which plants make food\n%% card-end %%`;
 		const taggedBlock = addCardTag(blockNoTags, 'blk01', 'block', '#card/leech');
 		expect(taggedBlock).toBe(
-			`%% card-start id=blk01 %%\nWhat is photosynthesis? #card/leech\n...\nProcess by which plants make food\n%% card-end %%`,
+			`%% card-start id=blk01 %%\nWhat is photosynthesis? #card/leech\n::\nProcess by which plants make food\n%% card-end %%`,
 		);
 	});
 
@@ -908,14 +908,14 @@ describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / togg
 		expect(taggedQuestion).toBe('Derivative of #math sin(x)? :: cos(x) #card/leech ^der01');
 
 		// 4. Block card with existing tags on question line
-		const blockWithTag = `%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam\n...\nCell division\n%% card-end %%`;
+		const blockWithTag = `%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam\n::\nCell division\n%% card-end %%`;
 		const taggedBlock = addCardTag(blockWithTag, 'blk02', 'block', '#card/leech');
 		expect(taggedBlock).toBe(
-			`%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam #card/leech\n...\nCell division\n%% card-end %%`,
+			`%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam #card/leech\n::\nCell division\n%% card-end %%`,
 		);
 
 		// 5. Block card with tag already in header line
-		const blockHeaderTag = `%% card-start id=blk03 #card/leech %%\nWhat is meiosis?\n...\nSexual cell division\n%% card-end %%`;
+		const blockHeaderTag = `%% card-start id=blk03 #card/leech %%\nWhat is meiosis?\n::\nSexual cell division\n%% card-end %%`;
 		expect(hasCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(true);
 		expect(addCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(blockHeaderTag);
 	});
@@ -944,10 +944,10 @@ describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / togg
 		);
 
 		// 5. Block card tag removal
-		const blockTagged = `%% card-start id=blk04 %%\nQuestion line #tagA #card/leech #tagB\n...\nAnswer\n%% card-end %%`;
+		const blockTagged = `%% card-start id=blk04 %%\nQuestion line #tagA #card/leech #tagB\n::\nAnswer\n%% card-end %%`;
 		const blockRemoved = removeCardTag(blockTagged, 'blk04', 'block', '#card/leech');
 		expect(blockRemoved).toBe(
-			`%% card-start id=blk04 %%\nQuestion line #tagA #tagB\n...\nAnswer\n%% card-end %%`,
+			`%% card-start id=blk04 %%\nQuestion line #tagA #tagB\n::\nAnswer\n%% card-end %%`,
 		);
 	});
 
@@ -1002,12 +1002,12 @@ describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / togg
 First line of multiline question
 Second line of question
 
-...
+::
 Answer content
 %% card-end %%`;
 
 		const tagged = addCardTag(multilineBlock, 'blk05', 'block', '#card/leech');
-		expect(tagged).toContain('Second line of question #card/leech\n\n...');
+		expect(tagged).toContain('Second line of question #card/leech\n\n::');
 
 		const untagged = removeCardTag(tagged, 'blk05', 'block', '#card/leech');
 		expect(untagged).toBe(multilineBlock);
@@ -1468,15 +1468,15 @@ describe('Advanced Metrics & Edge Case Boundaries', () => {
 	});
 
 	it('handles complex tag toggling with preexisting tags and multiline questions', () => {
-		const original = `%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n...\nAnswer content\n%% card-end %%`;
+		const original = `%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n::\nAnswer content\n%% card-end %%`;
 		const tagged = toggleCardTodoInMarkdown(original, 'x89z12', 'block');
 		expect(tagged).toBe(
-			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #card/todo\n...\nAnswer content\n%% card-end %%`,
+			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #card/todo\n::\nAnswer content\n%% card-end %%`,
 		);
 
 		const untagged = toggleCardTodoInMarkdown(tagged, 'x89z12', 'block');
 		expect(untagged).toBe(
-			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n...\nAnswer content\n%% card-end %%`,
+			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n::\nAnswer content\n%% card-end %%`,
 		);
 	});
 
@@ -2625,7 +2625,7 @@ describe('Generic Card Tag Modifier Property Fuzzing & Unicode Invariants', () =
 					expect(matchedInlineBlock!.tags).toContain(cleanTag);
 
 					// 2. Block Cards Placement Invariants
-					const blockDoc = `%% card-start id=${blockId} %%\n${text}\n...\nAnswer content\n%% card-end %%\n`;
+					const blockDoc = `%% card-start id=${blockId} %%\n${text}\n::\nAnswer content\n%% card-end %%\n`;
 					const taggedBlock = addCardTag(blockDoc, blockId, 'block', tag);
 
 					// Invariant 1: Tag is present
@@ -2635,8 +2635,8 @@ describe('Generic Card Tag Modifier Property Fuzzing & Unicode Invariants', () =
 					expect(taggedBlock).toContain(`%% card-start id=${blockId} %%`);
 					expect(taggedBlock).toContain('%% card-end %%');
 
-					// Invariant 3: Tag is placed before the divider `...`
-					expect(taggedBlock).toContain(`${normalizedTag}\n...`);
+					// Invariant 3: Tag is placed before the divider `::`
+					expect(taggedBlock).toContain(`${normalizedTag}\n::`);
 
 					// Invariant 4: Idempotency
 					expect(addCardTag(taggedBlock, blockId, 'block', tag)).toBe(taggedBlock);
@@ -3327,11 +3327,11 @@ describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
 			const blockMd = `%% card-start id=blk01 %%
 What is the powerhouse
 of the cell?
----
+::
 Mitochondria
 %% card-end %%`;
 			const taggedBlock = addCardLeechTagInMarkdown(blockMd, 'blk01', 'block', '#card/leech');
-			expect(taggedBlock).toContain('of the cell? #card/leech\n---');
+			expect(taggedBlock).toContain('of the cell? #card/leech\n::');
 
 			// Idempotency
 			expect(addCardLeechTagInMarkdown(taggedBlock, 'blk01', 'block', '#card/leech')).toBe(
@@ -3630,7 +3630,7 @@ Mitochondria
 				'تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n' +
 				'%% card-start id=n7s8y3 %%\n' +
 				'تسی حج وی کیتی جاندے او\n' +
-				'...\n' +
+				'::\n' +
 				'لہو وی پیتی جاندے او\n' +
 				'%% card-end %%\n';
 
@@ -3643,12 +3643,12 @@ Mitochondria
 			expect(blocks[1]!.front).toBe('تسی حج وی کیتی جاندے او');
 			expect(blocks[1]!.back).toBe('لہو وی پیتی جاندے او');
 
-			// BiDi markers (RLM, LRM, etc.) with horizontal ellipsis divider …
+			// BiDi markers (RLM, LRM, etc.) with ::: divider
 			const bidiContent =
 				'\u200Fتسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u200F\n\n' +
 				'\u200F%% card-start id=n7s8y3 %%\u200F\n' +
 				'تسی حج وی کیتی جاندے او\n' +
-				'\u200F…\u200F\n' +
+				'\u200F:::\u200F\n' +
 				'لہو وی پیتی جاندے او\n' +
 				'\u200F%% card-end %%\u200F\n';
 

@@ -49,7 +49,7 @@ fn add_tags(tags: &mut Vec<String>, new_tags: Vec<String>) {
     }
 }
 
-pub fn parse_block_header(line: &str) -> Option<(String, bool)> {
+pub fn parse_block_header(line: &str) -> Option<String> {
     let trimmed = syntax::trim_whitespace_and_invisible(line);
     let inner = trimmed.strip_prefix("%%")?.strip_suffix("%%")?;
     let inner = syntax::trim_whitespace_and_invisible(inner);
@@ -60,28 +60,18 @@ pub fn parse_block_header(line: &str) -> Option<(String, bool)> {
     }
 
     let mut block_id = String::new();
-    let mut reversible = false;
     for part in parts {
         let clean_part = syntax::trim_whitespace_and_invisible(part);
         if let Some((key, value)) = clean_part.split_once('=') {
             let key = syntax::trim_whitespace_and_invisible(key);
             let value = syntax::trim_whitespace_and_invisible(value);
-            match key {
-                "id" if syntax::is_valid_block_id(value) => block_id = value.to_string(),
-                "reversible" => {
-                    reversible = value == "true" || value == "1";
-                }
-                "direction" => {
-                    reversible = value == "both";
-                }
-                _ => {}
+            if key == "id" && syntax::is_valid_block_id(value) {
+                block_id = value.to_string();
             }
-        } else if clean_part == "reversible" {
-            reversible = true;
         }
     }
 
-    Some((block_id, reversible))
+    Some(block_id)
 }
 
 fn rewrite_block_header(original_line: &str, new_id: &str) -> String {
@@ -136,9 +126,19 @@ fn rewrite_inline_or_cloze_line(
     format!("{leading}{body} ^{new_id}")
 }
 
-fn is_block_card_divider(line: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockDivider {
+    Forward,
+    Reverse,
+}
+
+fn parse_block_divider(line: &str) -> Option<BlockDivider> {
     let trimmed = syntax::trim_whitespace_and_invisible(line);
-    trimmed == "..." || trimmed == ". . ." || trimmed == "…"
+    match trimmed {
+        "::" => Some(BlockDivider::Forward),
+        ":::" => Some(BlockDivider::Reverse),
+        _ => None,
+    }
 }
 
 fn is_block_card_end(line: &str) -> bool {
@@ -154,7 +154,6 @@ fn parse_block_card(
     start_line: usize,
     header_line: &str,
     block_id: String,
-    reversible: bool,
     note_inherited_tags: &[String],
     context: &MarkdownContext,
 ) -> Option<(ParsedBlock, usize)> {
@@ -169,10 +168,12 @@ fn parse_block_card(
     let mut front = String::new();
     let mut back = String::new();
     let mut is_back = false;
+    let mut reversible = false;
 
     for line in content_lines {
-        if !is_back && is_block_card_divider(line) {
+        if !is_back && let Some(divider) = parse_block_divider(line) {
             is_back = true;
+            reversible = divider == BlockDivider::Reverse;
             continue;
         }
         let target = if is_back { &mut back } else { &mut front };
@@ -289,14 +290,13 @@ pub fn parse_markdown_blocks_with_sections(
             continue;
         }
 
-        if let Some((block_id, reversible)) = parse_block_header(logical_line) {
+        if let Some(block_id) = parse_block_header(logical_line) {
             paragraph_bracket_depth = 0;
             if let Some((block, end_line)) = parse_block_card(
                 &lines,
                 line_number,
                 logical_line,
                 block_id,
-                reversible,
                 note_inherited_tags,
                 &context,
             ) {
@@ -308,7 +308,9 @@ pub fn parse_markdown_blocks_with_sections(
             continue;
         }
 
-        if syntax::has_unclosed_inline_code(logical_line) {
+        if syntax::has_unclosed_inline_code(logical_line)
+            || syntax::has_unclosed_html_tag(logical_line)
+        {
             paragraph_bracket_depth = (paragraph_bracket_depth as isize
                 + syntax::bracket_depth_delta(logical_line))
             .max(0) as usize;
@@ -449,14 +451,13 @@ pub fn sync_document_with_reg(
             continue;
         }
 
-        if let Some((raw_block_id, reversible)) = parse_block_header(logical_line) {
+        if let Some(raw_block_id) = parse_block_header(logical_line) {
             paragraph_bracket_depth = 0;
             if let Some((mut block, end_line)) = parse_block_card(
                 &raw_lines,
                 line_number,
                 logical_line,
                 raw_block_id.clone(),
-                reversible,
                 note_inherited_tags,
                 &context,
             ) {
@@ -475,7 +476,9 @@ pub fn sync_document_with_reg(
             continue;
         }
 
-        if syntax::has_unclosed_inline_code(logical_line) {
+        if syntax::has_unclosed_inline_code(logical_line)
+            || syntax::has_unclosed_html_tag(logical_line)
+        {
             paragraph_bracket_depth = (paragraph_bracket_depth as isize
                 + syntax::bracket_depth_delta(logical_line))
             .max(0) as usize;

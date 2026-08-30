@@ -240,10 +240,10 @@ die Entscheidung ::: the decision #german ^c9f4d1
     #[test]
     fn test_parse_block_card() {
         let content = r#"
-%% card-start id=37066d reversible=true %%
+%% card-start id=37066d %%
 What are the largest cities of Pakistan?
 
-...
+:::
 
 - Karachi
 - Lahore
@@ -264,18 +264,18 @@ What are the largest cities of Pakistan?
     }
 
     #[test]
-    fn test_block_card_reversible_header_parsing() {
+    fn test_block_card_reversible_divider_parsing() {
         let content1 = r#"
-%% card-start id=37066d reversible=false %%
+%% card-start id=37066d %%
 Question
-...
+::
 Answer
 %% card-end %%
 "#;
         let content2 = r#"
-%% card-start id=37066d reversible=true %%
+%% card-start id=37066d %%
 Question
-...
+:::
 Answer
 %% card-end %%
 "#;
@@ -286,7 +286,7 @@ Answer
     }
 
     #[test]
-    fn test_reject_block_card_without_ellipsis_divider() {
+    fn test_reject_block_card_without_divider() {
         let content = r#"
 %% card-start %%
 Q: Capital of France
@@ -295,7 +295,7 @@ Paris
 %% card-end %%
 "#;
         let blocks = parse_markdown_blocks(content, &[]);
-        assert_eq!(blocks.len(), 0, "Block cards require explicit ... divider");
+        assert_eq!(blocks.len(), 0, "Block cards require explicit :: or ::: divider");
     }
 
     #[test]
@@ -374,9 +374,9 @@ Paris
     #[test]
     fn test_reject_unclosed_block_card() {
         let content = r#"
-%% card-start id=37066d reversible=true %%
+%% card-start id=37066d %%
 What are the largest cities?
-...
+:::
 - Karachi
 - Lahore
 "#; // Missing %% card-end %%
@@ -389,7 +389,7 @@ What are the largest cities?
         let content = r#"
 %% card-start id=37066d %%
 Question here
-...
+::
 Answer here
 
 Later question :: Later answer ^8a1b2c
@@ -412,9 +412,9 @@ Later question :: Later answer ^8a1b2c
     #[test]
     fn test_extract_tag_from_block_header() {
         let content = r#"
-%% card-start id=37066d reversible=false #card/todo %%
+%% card-start id=37066d #card/todo %%
 Question here
-...
+::
 Answer here
 %% card-end %%
 "#;
@@ -446,9 +446,9 @@ Valid Question :: Valid Answer ^8a1b2c
 
     #[test]
     fn test_block_code_does_not_close_block_card_early() {
-        let content = r#"%% card-start id=37066d reversible=false %%
+        let content = r#"%% card-start id=37066d %%
 Question
-...
+::
 ```text
 %% card-end %%
 ```
@@ -575,7 +575,7 @@ tags: [پنجابی, الفاظ]
 
     #[test]
     fn test_urdu_rtl_scratch_file() {
-        let content = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n%% card-start id=n7s8y3 %%\nتسی حج وی کیتی جاندے او\n...\nلہو وی پیتی جاندے او\n%% card-end %%\n";
+        let content = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n%% card-start id=n7s8y3 %%\nتسی حج وی کیتی جاندے او\n::\nلہو وی پیتی جاندے او\n%% card-end %%\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].id, "j1029y");
@@ -585,13 +585,13 @@ tags: [پنجابی, الفاظ]
         assert_eq!(blocks[1].front, "تسی حج وی کیتی جاندے او");
         assert_eq!(blocks[1].back, "لہو وی پیتی جاندے او");
 
-        let content_no_id = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\n\n%% card-start %%\nتسی حج وی کیتی جاندے او\n...\nلہو وی پیتی جاندے او\n%% card-end %%\n";
+        let content_no_id = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\n\n%% card-start %%\nتسی حج وی کیتی جاندے او\n::\nلہو وی پیتی جاندے او\n%% card-end %%\n";
         let result = sync_document(content_no_id, &HashSet::new(), &[], &[]);
         assert!(result.updated_content.is_some());
         assert_eq!(result.blocks.len(), 2);
 
         // BiDi marks test (RLM, LRM, ALM, etc.) with dividers
-        let content_bidi = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u{200F}\n\n\u{200F}%% card-start id=n7s8y3 %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}...\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
+        let content_bidi = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u{200F}\n\n\u{200F}%% card-start id=n7s8y3 %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}::\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
         let blocks_bidi = parse_markdown_blocks(content_bidi, &[]);
         assert_eq!(blocks_bidi.len(), 2, "BiDi marks should not break card parsing");
         assert_eq!(blocks_bidi[0].id, "j1029y");
@@ -602,7 +602,7 @@ tags: [پنجابی, الفاظ]
         assert_eq!(blocks_bidi[1].back, "لہو وی پیتی جاندے او");
 
         // Test sync_document with BiDi marks and no IDs
-        let content_bidi_no_id = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\u{200F}\n\n\u{200F}%% card-start %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}…\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
+        let content_bidi_no_id = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\u{200F}\n\n\u{200F}%% card-start %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}:::\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
         let sync_bidi = sync_document(content_bidi_no_id, &HashSet::new(), &[], &[]);
         assert!(sync_bidi.updated_content.is_some());
         assert_eq!(sync_bidi.blocks.len(), 2);
@@ -679,9 +679,9 @@ What is the powerhouse of the cell? :: Mitochondria
 French word for apple ::: la pomme
 The capital of Germany is {{Berlin}}.
 
-%% card-start reversible=true %%
+%% card-start %%
 List three states of matter:
-...
+:::
 - Solid
 - Liquid
 - Gas
@@ -785,7 +785,7 @@ Here is some code: `Fake Q :: Fake A ` and cloze `{{fake_cloze}}`.
 // Code comment with :: separator: e}
 %% card-start id=fake01 %%
 Fake Block Q
-...
+::
 Fake Block A
 %% card-end %%
 let x = std::sync::Arc::new(5);
@@ -793,7 +793,7 @@ let x = std::sync::Arc::new(5);
 
 %% card-start %%
 Real Block Question
-...
+::
 Real Block Answer
 %% card-end %%
 
@@ -960,7 +960,7 @@ Real Cloze with {{valid cloze}} here.
             "مرحبا بالعالم",
             "English text mixed with اردو",
         ];
-        const DIVIDERS: &[&str] = &["...", ". . .", "…"];
+        const DIVIDERS: &[&str] = &["::", ":::"];
 
         struct ByteReader<'a> {
             data: &'a [u8],
@@ -1019,9 +1019,8 @@ Real Cloze with {{valid cloze}} here.
         let block_a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
         let div = DIVIDERS[(reader.next_byte() as usize) % DIVIDERS.len()];
         let block_id = if reader.next_byte() % 2 == 0 { " id=n7s8y3" } else { "" };
-        let rev = if reader.next_byte() % 3 == 0 { " reversible=true" } else { "" };
         
-        let start_header = format!("%% card-start{block_id}{rev} %%");
+        let start_header = format!("%% card-start{block_id} %%");
         doc.push_str(&reader.inject_bidi(&start_header));
         doc.push('\n');
         doc.push_str(&reader.inject_bidi(block_q));
@@ -1052,6 +1051,223 @@ Real Cloze with {{valid cloze}} here.
         let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
         let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
         let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_unicode_bidi_crash() {
+        const BIDI_CHARS: &[char] = &[
+            '\u{200E}', '\u{200F}', '\u{061C}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{200B}',
+            '\u{200C}', '\u{200D}',
+        ];
+        const RTL_SNIPPETS: &[&str] = &[
+            "تسی حج وی کیتی جاندے او",
+            "لہو وی پیتی جاندے او",
+            "زمین سورج دے گرد چکر کٹدی اے۔",
+            "پاکستان دا دارالحکومت اسلام آباد اے۔",
+            "سورج",
+            "چاند",
+            "ستارے",
+            "שלום עולם",
+            "مرحبا بالعالم",
+            "English text mixed with اردو",
+        ];
+        const DIVIDERS: &[&str] = &["::", ":::"];
+
+        struct ByteReader<'a> {
+            data: &'a [u8],
+            idx: usize,
+        }
+        impl<'a> ByteReader<'a> {
+            fn next_byte(&mut self) -> u8 {
+                if self.data.is_empty() {
+                    0
+                } else {
+                    let b = self.data[self.idx % self.data.len()];
+                    self.idx = self.idx.wrapping_add(1);
+                    b
+                }
+            }
+            fn inject_bidi(&mut self, s: &str) -> String {
+                let mut out = String::new();
+                let count = (self.next_byte() % 4) as usize;
+                for _ in 0..count {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out.push_str(s);
+                let count_end = (self.next_byte() % 4) as usize;
+                for _ in 0..count_end {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out
+            }
+        }
+
+        let data: &[u8] = &[60, 65, 68, 32, 69, 61, 58, 60, 65, 68, 32, 69, 61, 58, 60, 69, 58, 58, 61, 62, 60, 69, 61, 61, 58, 75, 68, 60, 114, 30, 42, 219, 146, 62, 124, 13, 45, 124, 45, 13, 124, 124, 47, 125, 0, 0, 0, 0, 0, 0, 126, 125, 93, 58, 91, 83, 60, 114, 30, 42, 219, 146, 62, 124, 13, 45, 124, 45, 13, 124, 124, 13, 45, 124, 45, 13, 47, 125, 32, 32, 32, 32, 124, 62, 62, 124, 58, 13, 13, 58, 58, 60, 69, 58, 58, 61, 62, 60, 69, 61, 61, 58, 75, 68, 58, 58];
+        let mut reader = ByteReader { data, idx: 0 };
+        let mut doc = String::new();
+
+        // 1. Inline cards
+        let q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let sep = if reader.next_byte() % 2 == 0 { "::" } else { ":::" };
+        let has_id = reader.next_byte() % 2 == 0;
+        let id_suffix = if has_id { " ^j1029y" } else { "" };
+        let inline_card = format!("{q} {sep} {a}{id_suffix}");
+        doc.push_str(&reader.inject_bidi(&inline_card));
+        doc.push_str("\n\n");
+
+        // 2. Cloze cards
+        let cloze_snippet = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let cloze_body = format!("زمین {{{{{}}}}} دے گرد چکر کٹدی اے۔", cloze_snippet);
+        let cloze_id = if reader.next_byte() % 2 == 0 { " ^c3e2f1" } else { "" };
+        let cloze_card = format!("{cloze_body}{cloze_id}");
+        doc.push_str(&reader.inject_bidi(&cloze_card));
+        doc.push_str("\n\n");
+
+        // 3. Block cards
+        let block_q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let block_a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let div = DIVIDERS[(reader.next_byte() as usize) % DIVIDERS.len()];
+        let block_id = if reader.next_byte() % 2 == 0 { " id=n7s8y3" } else { "" };
+        
+        let start_header = format!("%% card-start{block_id} %%");
+        doc.push_str(&reader.inject_bidi(&start_header));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_q));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(div));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_a));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi("%% card-end %%"));
+        doc.push_str("\n\n");
+
+        // 4. Also append raw payload
+        let raw_str = std::str::from_utf8(data).unwrap();
+        doc.push_str(raw_str);
+
+        let sync1 = sync_document(&doc, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(&doc);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_unicode_bidi_crash_2() {
+        const BIDI_CHARS: &[char] = &[
+            '\u{200E}', '\u{200F}', '\u{061C}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{200B}',
+            '\u{200C}', '\u{200D}',
+        ];
+        const RTL_SNIPPETS: &[&str] = &[
+            "تسی حج وی کیتی جاندے او",
+            "لہو وی پیتی جاندے او",
+            "زمین سورج دے گرد چکر کٹدی اے۔",
+            "پاکستان دا دارالحکومت اسلام آباد اے۔",
+            "سورج",
+            "چاند",
+            "ستارے",
+            "שלום עולם",
+            "مرحبا بالعالم",
+            "English text mixed with اردو",
+        ];
+        const DIVIDERS: &[&str] = &["::", ":::"];
+
+        struct ByteReader<'a> {
+            data: &'a [u8],
+            idx: usize,
+        }
+        impl<'a> ByteReader<'a> {
+            fn next_byte(&mut self) -> u8 {
+                if self.data.is_empty() {
+                    0
+                } else {
+                    let b = self.data[self.idx % self.data.len()];
+                    self.idx = self.idx.wrapping_add(1);
+                    b
+                }
+            }
+            fn inject_bidi(&mut self, s: &str) -> String {
+                let mut out = String::new();
+                let count = (self.next_byte() % 4) as usize;
+                for _ in 0..count {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out.push_str(s);
+                let count_end = (self.next_byte() % 4) as usize;
+                for _ in 0..count_end {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out
+            }
+        }
+
+        let data: &[u8] = &[42, 43, 120, 13, 120, 60, 60, 67, 11, 11, 9, 112, 58, 58, 61, 9, 11, 13, 42, 50, 38, 126, 11, 42, 42, 42, 36, 36, 99, 11, 45, 62, 60, 67, 36, 36, 36, 13, 32, 11, 9, 112, 58, 58, 61, 9, 11, 13, 42, 50, 38, 126, 11, 42, 42, 42, 36, 36, 99, 11, 45, 62, 60, 67, 36, 36, 36, 13, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 58, 62, 58, 42, 10, 10, 44, 11, 45, 42, 46];
+        let mut reader = ByteReader { data, idx: 0 };
+        let mut doc = String::new();
+
+        // 1. Inline cards
+        let q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let sep = if reader.next_byte() % 2 == 0 { "::" } else { ":::" };
+        let has_id = reader.next_byte() % 2 == 0;
+        let id_suffix = if has_id { " ^j1029y" } else { "" };
+        let inline_card = format!("{q} {sep} {a}{id_suffix}");
+        doc.push_str(&reader.inject_bidi(&inline_card));
+        doc.push_str("\n\n");
+
+        // 2. Cloze cards
+        let cloze_snippet = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let cloze_body = format!("زمین {{{{{}}}}} دے گرد چکر کٹدی اے۔", cloze_snippet);
+        let cloze_id = if reader.next_byte() % 2 == 0 { " ^c3e2f1" } else { "" };
+        let cloze_card = format!("{cloze_body}{cloze_id}");
+        doc.push_str(&reader.inject_bidi(&cloze_card));
+        doc.push_str("\n\n");
+
+        // 3. Block cards
+        let block_q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let block_a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let div = DIVIDERS[(reader.next_byte() as usize) % DIVIDERS.len()];
+        let block_id = if reader.next_byte() % 2 == 0 { " id=n7s8y3" } else { "" };
+        
+        let start_header = format!("%% card-start{block_id} %%");
+        doc.push_str(&reader.inject_bidi(&start_header));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_q));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(div));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_a));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi("%% card-end %%"));
+        doc.push_str("\n\n");
+
+        // 4. Also append raw payload
+        let raw_str = std::str::from_utf8(data).unwrap();
+        doc.push_str(raw_str);
+
+        let sync1 = sync_document(&doc, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(&doc);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_slow_unit() {
+        let bytes: &[u8] = &[52, 64, 60, 125, 60, 55, 69, 50, 60, 91, 91, 50, 63, 119, 0, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 125, 60, 55, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 51, 50, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 0, 6, 58, 58, 58, 124, 93, 93, 62, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 51, 2, 0, 0, 0, 0, 0, 0, 0, 50, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 69, 50, 60, 91, 91, 50, 63, 5, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 51, 50, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 0, 6, 58, 58, 58, 124, 93, 93, 62, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 51, 2, 0, 0, 0, 0, 0, 0, 0, 50, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 0, 6, 58, 58, 58, 124, 93, 93, 62, 0, 6, 58, 124, 93, 93, 62, 69, 50, 60, 91, 91, 50, 63, 5, 63, 93, 50, 50, 58, 58, 46, 40, 58, 124, 93, 93, 62, 93, 93, 93, 93, 60, 55, 69, 50, 60, 91, 91, 50, 93, 50, 50, 0, 6, 58, 58, 58, 124, 93, 93, 62, 93, 93, 125, 13, 91];
+        let Ok(s) = std::str::from_utf8(bytes) else { return; };
+        let sync1 = sync_document(s, &HashSet::new(), &[], &[]);
+        let synced = sync1.updated_content.as_deref().unwrap_or(s);
+        let sync2 = sync_document(synced, &HashSet::new(), &[], &[]);
         assert_eq!(sync1.blocks.len(), sync2.blocks.len());
         assert_eq!(sync2.updated_content, None);
     }

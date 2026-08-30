@@ -43,7 +43,7 @@ const RTL_SNIPPETS: &[&str] = &[
     "English text mixed with اردو",
 ];
 
-const DIVIDERS: &[&str] = &["...", ". . .", "…"];
+const DIVIDERS: &[&str] = &["::", ":::"];
 
 struct ByteReader<'a> {
     data: &'a [u8],
@@ -109,9 +109,8 @@ fuzz_target!(|data: &[u8]| {
     let block_a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
     let div = DIVIDERS[(reader.next_byte() as usize) % DIVIDERS.len()];
     let block_id = if reader.next_byte() % 2 == 0 { " id=n7s8y3" } else { "" };
-    let rev = if reader.next_byte() % 3 == 0 { " reversible=true" } else { "" };
     
-    let start_header = format!("%% card-start{block_id}{rev} %%");
+    let start_header = format!("%% card-start{block_id} %%");
     doc.push_str(&reader.inject_bidi(&start_header));
     doc.push('\n');
     doc.push_str(&reader.inject_bidi(block_q));
