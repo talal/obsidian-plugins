@@ -212,16 +212,17 @@ export default class FlashcardsPlugin extends Plugin {
 		return this.db.getReviewLogsForOptimization();
 	}
 
-	public async syncVault(): Promise<void> {
+	public async syncVault(force = false): Promise<void> {
 		new Notice('🔍 Syncing flashcards across vault...');
 		try {
-			const res = await this.scanner.fullScan();
+			const res = await this.scanner.fullScan(undefined, { force });
 			const failureNotice =
 				res.failedFiles.length > 0
 					? ` (${res.failedFiles.length} note(s) had errors, see console)`
 					: '';
+			const skipNotice = res.filesSkipped > 0 ? ` (${res.filesSkipped} unchanged skipped)` : '';
 			new Notice(
-				`⚡ Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes${failureNotice}.`,
+				`⚡ Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes scanned${skipNotice}${failureNotice}.`,
 			);
 			this.refreshDashboardIfOpen();
 		} catch (error) {

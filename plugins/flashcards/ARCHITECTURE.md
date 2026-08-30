@@ -224,6 +224,14 @@ erDiagram
         REAL difficulty
         INTEGER reviewed_at "epoch ms"
     }
+
+    file_sync_state {
+        TEXT file_path PK
+        INTEGER modified_at "Modification time in epoch ms"
+        INTEGER size "File size in bytes"
+        TEXT content_hash "64-bit FNV-1a hex string"
+        INTEGER updated_at "epoch ms"
+    }
 ```
 
 ### 4.2 Schema Validation Rules & Triggers
@@ -235,15 +243,15 @@ erDiagram
 3. **Card Uniqueness**:
    `CREATE UNIQUE INDEX idx_cards_block_direction ON cards(block_id, ifnull(direction, 'cloze'));` guarantees exactly 1 forward card, 1 reverse card (if reversible), or 1 cloze card per block.
 
-### 4.3 Timestamps (`due_at`, `reviewed_at`, `updated_at`)
-All timestamps are stored as **Epoch Milliseconds (`INTEGER`)** with the `_at` suffix (`due_at`, `reviewed_at`, `started_at`, `ended_at`, `updated_at`):
+### 4.3 Timestamps (`due_at`, `reviewed_at`, `updated_at`, `modified_at`)
+All timestamps are stored as **Epoch Milliseconds (`INTEGER`)** with the `_at` suffix (`due_at`, `reviewed_at`, `started_at`, `ended_at`, `updated_at`, `modified_at`):
 - Directly matches JS `Date.now()`, `date.getTime()`, and Rust FSRS `DateTime::from_timestamp_millis()`.
 - Fast Numeric Indexing: Integer comparisons (`WHERE due_at <= ?`) are optimal for B-Tree indexes.
 - Timezone Invariance: Avoids string parsing ambiguities across timezones and Daylight Saving shifts.
 
 ---
 
-## 5. Single-Pass Synchronization Flow
+## 5. Single-Pass Synchronization & Concurrency Control
 
 ```mermaid
 sequenceDiagram
@@ -254,31 +262,39 @@ sequenceDiagram
     participant WASM as sync_document_with_registry (Rust WASM)
     participant DB as SQLite DB (sql.js)
 
-    Note over Scanner,Reg: Start Scan: Initialize scan-scoped CollisionRegistry
+    Note over Scanner,Reg: Start Scan: Initialize scan-scoped CollisionRegistry & preload FileSyncStates
     loop For each note in vault
-        Scanner->>Obs: app.vault.cachedRead(file)
-        Obs-->>Scanner: Note markdown content
-        Scanner->>WASM: sync_document_with_registry(content, registry, tags, sectionHints)
-        Note over WASM,Reg: AST byte-masking (pulldown-cmark)<br/>Parse cards, clozes & blocks<br/>O(1) test & reserve IDs in CollisionRegistry<br/>Generate 6-char Base-36 IDs if missing or duplicate
-        WASM-->>Scanner: DocumentSyncResult { updated_content, blocks }
-        
-        alt If updated_content != null (IDs generated / replaced)
-            Scanner->>Obs: app.vault.modify(file, updated_content)
-        end
+        alt Note unchanged (mtime & size match file_sync_state modified_at & size)
+            Scanner->>Reg: O(1) insert existing note block IDs into CollisionRegistry
+            Note over Scanner: Skip cachedRead, WASM parsing, and SQLite block upserts
+        else Note changed or force scan
+            Scanner->>Obs: app.vault.cachedRead(file)
+            Obs-->>Scanner: Note markdown content
+            Scanner->>WASM: sync_document_with_registry(content, registry, tags, sectionHints)
+            Note over WASM,Reg: AST byte-masking (pulldown-cmark)<br/>Parse cards, clozes & blocks<br/>O(1) test & reserve IDs in CollisionRegistry<br/>Generate 6-char Base-36 IDs if missing or duplicate
+            WASM-->>Scanner: DocumentSyncResult { updated_content, blocks }
+            
+            alt If updated_content != null (IDs generated / replaced)
+                Scanner->>Obs: app.vault.modify(file, updated_content)
+            end
 
-        Scanner->>DB: syncNoteBlocks(filePath, blocks)
-        Note over DB: Upsert blocks & reconcile cards in SQLite
+            Scanner->>DB: syncNoteBlocks(filePath, blocks) + upsertFileSyncState
+            Note over DB: Upsert blocks, reconcile cards & record modified_at/size fingerprint
+        end
     end
-    Note over Scanner,Reg: Finish Scan: registry.free()
+    Note over Scanner,Reg: Finish Scan: Prune deleted notes & registry.free()
 ```
 
-### Vault Scan Lifecycle
-1. **Initialize Scan-Scoped `CollisionRegistry`**: Create a single `CollisionRegistry` instance in Rust WASM for the entire vault scan (O(1) lookup/reservation, zero per-file JSON serialization overhead). Markdown is treated as the authoritative source of truth.
-2. **Iterate Files via `cachedRead`**: For each markdown file in the vault, read cached content via `app.vault.cachedRead(file)`.
-3. **Pass into Rust WASM (`sync_document_with_registry`)**: Rust parses cards, masks AST, reserves valid existing IDs or generates fresh 6-char lowercase base-36 IDs directly in the shared `CollisionRegistry`, and rebuilds the modified Markdown text in Rust.
-4. **File Write (if modified)**: If `updated_content` is present, TypeScript calls `app.vault.modify(file, updated_content)` once.
-5. **Incremental In-Memory DB Update**: Upsert `blocks` and reconcile `cards` into the in-memory SQLite database immediately per file.
-6. **Prune & Persist**: Once all files in the vault have completed scanning, prune deleted notes and execute a single snapshot save to disk via the **Dual-Slot Persistence Protocol**. Free the scan-scoped `CollisionRegistry`.
+### 5.1 Change Detection & Fingerprinting (`file_sync_state`)
+- **Fingerprint Matching**: Before reading a file's content or passing it to WebAssembly, `NoteScanner` inspects `file.stat.mtime` and `file.stat.size` against `file_sync_state`.
+- **Zero Overhead for Unchanged Files**: Unchanged notes skip file I/O, WebAssembly AST parsing, and SQLite writes entirely. Their existing block IDs are registered into the scan-scoped `CollisionRegistry` in microseconds.
+- **Authoritative Invalidation**: Any modification to note content or file size triggers re-reading, AST re-parsing, block reconciliation, and fingerprint updating.
+- **Manual Force Revalidation**: Running full scan with `{ force: true }` bypasses change detection and revalidates all vault notes.
+
+### 5.2 Serialized Execution Queue (`runSerialized`)
+- **Queue Guarantee**: All scanner operations (`syncFile`, `fullScan`, `renameFile`, `deleteFile`) are routed through a promise-chained serialization queue (`this.runSerialized`).
+- **Race Condition Prevention**: Prevents concurrent SQLite transactions (`BEGIN TRANSACTION`), overlapping note updates, or race conditions between full vault scans and file events (`rename`, `delete`).
+- **Resilience**: Errors in one operation reject only the caller's promise and never wedge the queue, allowing subsequent queued operations to proceed immediately.
 
 ---
 
@@ -556,7 +572,7 @@ plugins/flashcards/
 │   │   ├── schema.sql         # Canonical STRICT SQLite schema
 │   │   └── snapshot.ts        # 48-byte header packing & SHA-256 verification
 │   ├── scanner/
-│   │   └── NoteScanner.ts     # Scan-scoped vault & note scanner using CollisionRegistry
+│   │   └── NoteScanner.ts     # Serialized scanner with change detection & CollisionRegistry
 │   ├── ui/
 │   │   ├── DashboardView.ts   # Inventory & stats leaf view
 │   │   ├── ReviewModal.ts     # Review modal shell & in-memory session
@@ -574,6 +590,7 @@ plugins/flashcards/
 │       ├── clozeFormat.ts        # Safe HTML-escaped cloze text formatting
 │       ├── dashboardCards.ts     # Block grouping & reverse metrics consolidation
 │       ├── dashboardFilter.ts    # Tag matching & text search filters
+│       ├── fnv1a.ts              # Synchronous 64-bit FNV-1a fast hashing
 │       ├── reviewMetrics.ts      # Progress & retention calculations
 │       ├── ReviewSessionCache.ts # In-memory session cache & undo stack
 │       ├── siblingBurying.ts     # Anti-priming priority ranking & queue filtering
@@ -581,6 +598,6 @@ plugins/flashcards/
 │       ├── studySteps.ts         # Duration string parsing
 │       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (88 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (98 tests)
 ```
 

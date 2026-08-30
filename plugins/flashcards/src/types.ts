@@ -54,6 +54,32 @@ export interface ReviewRecord {
 	reviewed_at: number; // UTC epoch ms
 }
 
+/** 5. File Sync State (1:1 with SQLite file_sync_state table) */
+export interface FileSyncState {
+	file_path: string;
+	modified_at: number;
+	size: number;
+	content_hash: string | null;
+	updated_at: number;
+}
+
+export interface ScanResult {
+	filesScanned: number;
+	filesSkipped: number;
+	totalBlocks: number;
+	failedFiles: string[];
+}
+
+export interface SyncFileOptions {
+	force?: boolean;
+	externalCollisionIds?: Set<string> | import('./wasm.js').CollisionRegistry;
+	skipPersist?: boolean;
+}
+
+export interface FullScanOptions {
+	force?: boolean;
+}
+
 /** In-memory Card Performance update committed at end of session */
 export interface CardPerformanceUpdate {
 	id: number;

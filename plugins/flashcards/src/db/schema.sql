@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS reviews (
   reviewed_at  INTEGER NOT NULL                                            -- Timestamp when review was submitted (UTC epoch ms)
 ) STRICT;
 
+-- 5. File Sync State (Tracks note modification fingerprints to skip unchanged notes)
+CREATE TABLE IF NOT EXISTS file_sync_state (
+  file_path     TEXT PRIMARY KEY,  -- Vault-relative path to note (e.g. 'Notes/Biology.md')
+  modified_at   INTEGER NOT NULL,  -- Last modified timestamp reported by file metadata (epoch ms)
+  size          INTEGER NOT NULL,  -- File size in bytes
+  content_hash  TEXT,              -- 64-bit FNV-1a hash of note markdown content (16 hex chars)
+  updated_at    INTEGER NOT NULL   -- Timestamp when this file was last synchronized (epoch ms)
+) STRICT;
+
 -- Performance indexes for fast review queues, dashboard filtering, and optimizer training
 CREATE INDEX IF NOT EXISTS idx_blocks_file_path ON blocks(file_path);
 CREATE INDEX IF NOT EXISTS idx_cards_block ON cards(block_id);
@@ -90,3 +99,4 @@ CREATE INDEX IF NOT EXISTS idx_cards_due_at ON cards(due_at);
 CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_time ON reviews(reviewed_at);
+CREATE INDEX IF NOT EXISTS idx_file_sync_state_path ON file_sync_state(file_path);

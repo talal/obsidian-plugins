@@ -3796,4 +3796,496 @@ Mitochondria
 			expect(allDbIds.has('dup100')).toBe(true);
 		});
 	});
+
+	describe('Batch 2: Change Detection & Operation Serialization', () => {
+		it('skips unchanged files during fullScan and avoids unnecessary reading and parsing', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('Note1.md', 'Q1 :: A1 ^id0001\n');
+			fileVault.set('Note2.md', 'Q2 :: A2 ^id0002\n');
+			fileVault.set('Note3.md', 'Q3 :: A3 ^id0003\n');
+
+			const files = [
+				{ path: 'Note1.md', stat: { mtime: 1000, size: 20 } },
+				{ path: 'Note2.md', stat: { mtime: 1000, size: 20 } },
+				{ path: 'Note3.md', stat: { mtime: 1000, size: 20 } },
+			];
+
+			let readCount = 0;
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => {
+						readCount++;
+						return fileVault.get(file.path) ?? '';
+					},
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			// First scan: all files are scanned and indexed
+			const res1 = await scanner.fullScan();
+			expect(res1.filesScanned).toBe(3);
+			expect(res1.filesSkipped).toBe(0);
+			expect(res1.totalBlocks).toBe(3);
+			expect(readCount).toBe(3);
+
+			// Second scan: files are unchanged, should be skipped with 0 additional reads
+			const res2 = await scanner.fullScan();
+			expect(res2.filesScanned).toBe(0);
+			expect(res2.filesSkipped).toBe(3);
+			expect(res2.totalBlocks).toBe(3);
+			expect(readCount).toBe(3); // No new reads!
+
+			// Verify cards are still intact in DB
+			expect(db.getAllCards()).toHaveLength(3);
+		});
+
+		it('rescans modified files while keeping unchanged files skipped', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('NoteA.md', 'QA :: AA ^ida001\n');
+			fileVault.set('NoteB.md', 'QB :: AB ^idb001\n');
+
+			const files = [
+				{ path: 'NoteA.md', stat: { mtime: 1000, size: 20 } },
+				{ path: 'NoteB.md', stat: { mtime: 1000, size: 20 } },
+			];
+
+			let readCount = 0;
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => {
+						readCount++;
+						return fileVault.get(file.path) ?? '';
+					},
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			await scanner.fullScan();
+			expect(readCount).toBe(2);
+
+			// Modify NoteB
+			fileVault.set('NoteB.md', 'QB_Modified :: AB_Modified ^idb001\n');
+			files[1]!.stat = { mtime: 2000, size: 40 };
+
+			const res = await scanner.fullScan();
+			expect(res.filesScanned).toBe(1);
+			expect(res.filesSkipped).toBe(1);
+			expect(res.totalBlocks).toBe(2);
+			expect(readCount).toBe(3); // Only 1 additional read for NoteB
+
+			const cards = db.getAllCards();
+			const cardB = cards.find((c) => c.blockId === 'idb001');
+			expect(cardB?.front).toBe('QB_Modified');
+		});
+
+		it('forces rescan when metadata changes or force option is passed', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('Note.md', 'Q :: A ^id1001\n');
+
+			const files = [{ path: 'Note.md', stat: { mtime: 1000, size: 18 } }];
+			let readCount = 0;
+
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => {
+						readCount++;
+						return fileVault.get(file.path) ?? '';
+					},
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			await scanner.fullScan();
+			expect(readCount).toBe(1);
+
+			// Size changes with same mtime -> forces rescan
+			files[0]!.stat = { mtime: 1000, size: 25 };
+			const res1 = await scanner.fullScan();
+			expect(res1.filesScanned).toBe(1);
+			expect(res1.filesSkipped).toBe(0);
+			expect(readCount).toBe(2);
+
+			// Force option -> forces rescan even with identical mtime and size
+			const res2 = await scanner.fullScan(undefined, { force: true });
+			expect(res2.filesScanned).toBe(1);
+			expect(res2.filesSkipped).toBe(0);
+			expect(readCount).toBe(3);
+		});
+
+		it('removes deleted files from blocks and file_sync_state', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('DeleteMe.md', 'Q :: A ^del001\n');
+
+			const files = [{ path: 'DeleteMe.md', stat: { mtime: 1000, size: 18 } }];
+
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			await scanner.fullScan();
+			expect(db.getFileSyncState('DeleteMe.md')).not.toBeNull();
+			expect(db.getAllCards()).toHaveLength(1);
+
+			// Call deleteFile
+			await scanner.deleteFile('DeleteMe.md');
+			expect(db.getFileSyncState('DeleteMe.md')).toBeNull();
+			expect(db.getAllCards()).toHaveLength(0);
+		});
+
+		it('handles note rename without losing review scheduling or sync state', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('OldName.md', 'Q :: A ^ren001\n');
+
+			const files = [{ path: 'OldName.md', stat: { mtime: 1000, size: 18 } }];
+
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			await scanner.fullScan();
+
+			// Perform a review on the card
+			const card = db.getAllCards()[0]!;
+			await db.commitSession(
+				{
+					started_at: 1000,
+					ended_at: 2000,
+					card_count: 1,
+					forgot_count: 0,
+					remembered_count: 1,
+				},
+				[
+					{
+						card_id: card.cardId,
+						rating: 3,
+						state: 2,
+						due_at: 5000,
+						stability: 8.5,
+						difficulty: 3.2,
+						reviewed_at: 2000,
+					},
+				],
+				[
+					{
+						id: card.cardId,
+						state: 2,
+						due_at: 5000,
+						stability: 8.5,
+						difficulty: 3.2,
+						reps: 1,
+						lapses: 0,
+						last_review: 2000,
+						learning_step: 0,
+						relearning_step: 0,
+					},
+				],
+			);
+
+			// Rename note
+			await scanner.renameFile('OldName.md', 'NewName.md');
+			files[0] = { path: 'NewName.md', stat: { mtime: 1000, size: 18 } };
+
+			// Verify card scheduling is preserved
+			const cardsAfterRename = db.getAllCards();
+			expect(cardsAfterRename).toHaveLength(1);
+			expect(cardsAfterRename[0]!.stability).toBe(8.5);
+			expect(cardsAfterRename[0]!.difficulty).toBe(3.2);
+			expect(cardsAfterRename[0]!.notePath).toBe('NewName.md');
+
+			// Full scan skips the renamed note because its sync state was updated during rename
+			const res = await scanner.fullScan();
+			expect(res.filesSkipped).toBe(1);
+			expect(res.filesScanned).toBe(0);
+		});
+
+		it('serializes multiple rapid modifications without database collision', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			for (let i = 1; i <= 5; i++) {
+				fileVault.set(`Note${i}.md`, `Question ${i} :: Answer ${i} ^id000${i}\n`);
+			}
+
+			const mockApp = {
+				vault: {
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			// Launch 5 syncFile operations concurrently without awaiting individually
+			const promises = [];
+			for (let i = 1; i <= 5; i++) {
+				promises.push(
+					scanner.syncFile({
+						path: `Note${i}.md`,
+						stat: { mtime: 1000, size: 30 },
+					} as any),
+				);
+			}
+
+			const results = await Promise.all(promises);
+			expect(results).toHaveLength(5);
+			for (let i = 0; i < 5; i++) {
+				expect(results[i]).toHaveLength(1);
+			}
+
+			expect(db.getAllCards()).toHaveLength(5);
+		});
+
+		it('serializes concurrent rename and sync operations safely', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('Start.md', 'Q :: A ^start1\n');
+
+			const mockApp = {
+				vault: {
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			await scanner.syncFile({ path: 'Start.md', stat: { mtime: 1000, size: 16 } } as any);
+			expect(db.getAllCards()).toHaveLength(1);
+
+			fileVault.set('Final.md', 'Q_Updated :: A_Updated ^start1\n');
+
+			// Concurrently launch rename and syncFile on the new path
+			const renamePromise = scanner.renameFile('Start.md', 'Final.md');
+			const syncPromise = scanner.syncFile({
+				path: 'Final.md',
+				stat: { mtime: 2000, size: 35 },
+			} as any);
+
+			await Promise.all([renamePromise, syncPromise]);
+
+			const cards = db.getAllCards();
+			expect(cards).toHaveLength(1);
+			expect(cards[0]!.front).toBe('Q_Updated');
+			expect(cards[0]!.notePath).toBe('Final.md');
+		});
+
+		it('guarantees a failed operation does not wedge subsequent queued operations', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('Good.md', 'Good Question :: Good Answer ^good01\n');
+
+			const mockApp = {
+				vault: {
+					cachedRead: async (file: { path: string }) => {
+						if (file.path === 'Bad.md') {
+							throw new Error('Simulated file read failure');
+						}
+						return fileVault.get(file.path) ?? '';
+					},
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			// Operation 1 fails
+			const op1 = scanner.syncFile({ path: 'Bad.md', stat: { mtime: 1000, size: 10 } } as any);
+			// Operation 2 succeeds
+			const op2 = scanner.syncFile({ path: 'Good.md', stat: { mtime: 1000, size: 40 } } as any);
+
+			await expect(op1).rejects.toThrow('Simulated file read failure');
+
+			// Operation 2 must still complete cleanly
+			const res2 = await op2;
+			expect(res2).toHaveLength(1);
+			expect(res2[0]!.id).toBe('good01');
+
+			expect(db.getAllCards()).toHaveLength(1);
+		});
+
+		it('executes fullScan and file events serially without racing', async () => {
+			const SQL = await initSqlJs();
+			const db = DatabaseManager.createForTesting(new SQL.Database());
+
+			const fileVault = new Map<string, string>();
+			fileVault.set('Keep.md', 'Q1 :: A1 ^keep01\n');
+			fileVault.set('DeleteDuringScan.md', 'Q2 :: A2 ^del002\n');
+
+			const files = [
+				{ path: 'Keep.md', stat: { mtime: 1000, size: 20 } },
+				{ path: 'DeleteDuringScan.md', stat: { mtime: 1000, size: 20 } },
+			];
+
+			const mockApp = {
+				vault: {
+					getMarkdownFiles: () => files,
+					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
+					modify: async (file: { path: string }, data: string) => {
+						fileVault.set(file.path, data);
+					},
+					adapter: {
+						readBinary: async () => new ArrayBuffer(0),
+						writeBinary: async () => {},
+					},
+				},
+				metadataCache: {
+					getFileCache: () => null,
+				},
+			} as unknown as App;
+
+			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
+			const scanner = new NoteScanner(mockApp, db);
+
+			// Concurrently launch fullScan and deleteFile
+			const scanPromise = scanner.fullScan();
+			const deletePromise = scanner.deleteFile('DeleteDuringScan.md');
+
+			const [scanRes] = await Promise.all([scanPromise, deletePromise]);
+			expect(scanRes.filesScanned).toBe(2);
+
+			// After both complete serially, DeleteDuringScan was deleted
+			const remainingCards = db.getAllCards();
+			expect(remainingCards).toHaveLength(1);
+			expect(remainingCards[0]!.notePath).toBe('Keep.md');
+		});
+
+		it('computes deterministic 64-bit FNV-1a content hash as 16-char hex string', async () => {
+			const { fnv1a64 } = await import('../src/utils/fnv1a.ts');
+
+			const hEmpty = fnv1a64('');
+			expect(hEmpty).toMatch(/^[0-9a-f]{16}$/);
+
+			const h1 = fnv1a64('Capital of Pakistan :: Islamabad ^k9x2mp\n');
+			const h2 = fnv1a64('Capital of Pakistan :: Islamabad ^k9x2mp\n');
+			const h3 = fnv1a64('Capital of France :: Paris ^k9x2mp\n');
+			const hUnicode = fnv1a64('تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n');
+
+			expect(h1).toHaveLength(16);
+			expect(h1).toMatch(/^[0-9a-f]{16}$/);
+			expect(h1).toBe(h2); // Determinism
+			expect(h1).not.toBe(h3); // Distinct content
+			expect(hUnicode).toMatch(/^[0-9a-f]{16}$/);
+		});
+	});
 });

@@ -6,6 +6,7 @@ import type {
 	CardPerformanceUpdate,
 	CardRecord,
 	DashboardStats,
+	FileSyncState,
 	ParsedBlock,
 	ReviewItem,
 	ReviewLogEntry,
@@ -214,12 +215,40 @@ export class DatabaseManager {
 		if (this.db) CardSync.syncNoteBlocks(this.db, filePath, parsedBlocks);
 	}
 
-	public pruneDeletedNotes(validFilePaths: Set<string>): void {
-		if (this.db) CardSync.pruneDeletedNotes(this.db, validFilePaths);
+	public pruneDeletedNotes(validFilePaths: Set<string>): number {
+		return this.db ? CardSync.pruneDeletedNotes(this.db, validFilePaths) : 0;
 	}
 
 	public renameNote(oldPath: string, newPath: string): void {
 		if (this.db) CardSync.renameNote(this.db, oldPath, newPath);
+	}
+
+	public getFileSyncState(filePath: string): FileSyncState | null {
+		return this.db ? CardSync.getFileSyncState(this.db, filePath) : null;
+	}
+
+	public getAllFileSyncStates(): Map<string, FileSyncState> {
+		return this.db ? CardSync.getAllFileSyncStates(this.db) : new Map();
+	}
+
+	public upsertFileSyncState(state: FileSyncState): void {
+		if (this.db) CardSync.upsertFileSyncState(this.db, state);
+	}
+
+	public deleteFileSyncState(filePath: string): void {
+		if (this.db) CardSync.deleteFileSyncState(this.db, filePath);
+	}
+
+	public getFileToBlockIdsMap(): Map<string, string[]> {
+		return this.db ? CardSync.getFileToBlockIdsMap(this.db) : new Map();
+	}
+
+	public getFileToBlocksMap(): Map<string, ParsedBlock[]> {
+		return this.db ? CardSync.getFileToBlocksMap(this.db) : new Map();
+	}
+
+	public getBlocksForFile(filePath: string): ParsedBlock[] {
+		return this.db ? CardSync.getBlocksForFile(this.db, filePath) : [];
 	}
 
 	public getAllBlockIds(): Set<string> {

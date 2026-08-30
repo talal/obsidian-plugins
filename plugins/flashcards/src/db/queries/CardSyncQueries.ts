@@ -1,6 +1,6 @@
 import type { Database } from 'sql.js';
 
-import type { Block, CardBlockType, ParsedBlock } from '../../types.js';
+import type { Block, CardBlockType, FileSyncState, ParsedBlock } from '../../types.js';
 
 export function upsertBlock(db: Database, block: Block): void {
 	db.run(
@@ -100,7 +100,8 @@ export function syncNoteBlocks(db: Database, filePath: string, parsedBlocks: Par
 	}
 }
 
-export function pruneDeletedNotes(db: Database, validFilePaths: Set<string>): void {
+export function pruneDeletedNotes(db: Database, validFilePaths: Set<string>): number {
+	let prunedCount = 0;
 	const stmt = db.prepare('SELECT DISTINCT file_path FROM blocks');
 	const toDelete: string[] = [];
 	while (stmt.step()) {
@@ -113,11 +114,156 @@ export function pruneDeletedNotes(db: Database, validFilePaths: Set<string>): vo
 
 	for (const path of toDelete) {
 		db.run('DELETE FROM blocks WHERE file_path = ?', [path]);
+		prunedCount++;
 	}
+
+	const stmtFiles = db.prepare('SELECT file_path FROM file_sync_state');
+	const toDeleteFiles: string[] = [];
+	while (stmtFiles.step()) {
+		const path = stmtFiles.getAsObject().file_path as string;
+		if (!validFilePaths.has(path)) {
+			toDeleteFiles.push(path);
+		}
+	}
+	stmtFiles.free();
+
+	for (const path of toDeleteFiles) {
+		db.run('DELETE FROM file_sync_state WHERE file_path = ?', [path]);
+	}
+
+	return prunedCount;
 }
 
 export function renameNote(db: Database, oldPath: string, newPath: string): void {
 	db.run('UPDATE blocks SET file_path = ? WHERE file_path = ?', [newPath, oldPath]);
+	db.run('UPDATE file_sync_state SET file_path = ? WHERE file_path = ?', [newPath, oldPath]);
+}
+
+export function getFileSyncState(db: Database, filePath: string): FileSyncState | null {
+	const stmt = db.prepare(
+		'SELECT file_path, modified_at, size, content_hash, updated_at FROM file_sync_state WHERE file_path = ?',
+	);
+	stmt.bind([filePath]);
+	let state: FileSyncState | null = null;
+	if (stmt.step()) {
+		const row = stmt.getAsObject();
+		state = {
+			file_path: row.file_path as string,
+			modified_at: row.modified_at as number,
+			size: row.size as number,
+			content_hash: (row.content_hash as string) || null,
+			updated_at: row.updated_at as number,
+		};
+	}
+	stmt.free();
+	return state;
+}
+
+export function getAllFileSyncStates(db: Database): Map<string, FileSyncState> {
+	const map = new Map<string, FileSyncState>();
+	const stmt = db.prepare(
+		'SELECT file_path, modified_at, size, content_hash, updated_at FROM file_sync_state',
+	);
+	while (stmt.step()) {
+		const row = stmt.getAsObject();
+		const filePath = row.file_path as string;
+		map.set(filePath, {
+			file_path: filePath,
+			modified_at: row.modified_at as number,
+			size: row.size as number,
+			content_hash: (row.content_hash as string) || null,
+			updated_at: row.updated_at as number,
+		});
+	}
+	stmt.free();
+	return map;
+}
+
+export function upsertFileSyncState(db: Database, state: FileSyncState): void {
+	db.run(
+		`INSERT INTO file_sync_state (file_path, modified_at, size, content_hash, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(file_path) DO UPDATE SET
+		   modified_at = excluded.modified_at,
+		   size = excluded.size,
+		   content_hash = excluded.content_hash,
+		   updated_at = excluded.updated_at`,
+		[state.file_path, state.modified_at, state.size, state.content_hash, state.updated_at],
+	);
+}
+
+export function deleteFileSyncState(db: Database, filePath: string): void {
+	db.run('DELETE FROM file_sync_state WHERE file_path = ?', [filePath]);
+}
+
+export function getFileToBlockIdsMap(db: Database): Map<string, string[]> {
+	const map = new Map<string, string[]>();
+	const stmt = db.prepare('SELECT file_path, id FROM blocks');
+	while (stmt.step()) {
+		const row = stmt.getAsObject();
+		const filePath = row.file_path as string;
+		const id = row.id as string;
+		let ids = map.get(filePath);
+		if (!ids) {
+			ids = [];
+			map.set(filePath, ids);
+		}
+		ids.push(id);
+	}
+	stmt.free();
+	return map;
+}
+
+export function getFileToBlocksMap(db: Database): Map<string, ParsedBlock[]> {
+	const map = new Map<string, ParsedBlock[]>();
+	const stmt = db.prepare(
+		'SELECT file_path, id, block_type, reversible, front, back, tags FROM blocks',
+	);
+	while (stmt.step()) {
+		const row = stmt.getAsObject();
+		const filePath = row.file_path as string;
+		const block: ParsedBlock = {
+			id: row.id as string,
+			block_type: row.block_type as CardBlockType,
+			reversible: (row.reversible as number) === 1,
+			front: row.front as string,
+			back: row.back as string,
+			tags: row.tags ? (row.tags as string).split(' ').filter(Boolean) : [],
+			line_start: 0,
+			line_end: 0,
+		};
+		let blocks = map.get(filePath);
+		if (!blocks) {
+			blocks = [];
+			map.set(filePath, blocks);
+		}
+		blocks.push(block);
+	}
+	stmt.free();
+	return map;
+}
+
+export function getBlocksForFile(db: Database, filePath: string): ParsedBlock[] {
+	const blocks: ParsedBlock[] = [];
+	const stmt = db.prepare(
+		'SELECT id, block_type, reversible, front, back, tags FROM blocks WHERE file_path = ?',
+	);
+	stmt.bind([filePath]);
+	while (stmt.step()) {
+		const row = stmt.getAsObject();
+		blocks.push({
+			id: row.id as string,
+			block_type: row.block_type as CardBlockType,
+			reversible: (row.reversible as number) === 1,
+			front: row.front as string,
+			back: row.back as string,
+			tags: row.tags ? (row.tags as string).split(' ').filter(Boolean) : [],
+			line_start: 0,
+			line_end: 0,
+		});
+	}
+	stmt.free();
+	return blocks;
 }
 
 export function getAllBlockIds(db: Database): Set<string> {
