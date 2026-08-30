@@ -3548,5 +3548,81 @@ Mitochondria
 			expect(blocksValid).toHaveLength(1);
 			expect(blocksValid[0]!.id).toBe('abc123');
 		});
+
+		it('scans Urdu RTL inline and block cards with BiDi marks cleanly', () => {
+			const urduContent =
+				'تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n' +
+				'%% card-start id=n7s8y3 %%\n' +
+				'تسی حج وی کیتی جاندے او\n' +
+				'...\n' +
+				'لہو وی پیتی جاندے او\n' +
+				'%% card-end %%\n';
+
+			const blocks = WasmBridge.parseMarkdownBlocks(urduContent, []);
+			expect(blocks).toHaveLength(2);
+			expect(blocks[0]!.id).toBe('j1029y');
+			expect(blocks[0]!.front).toBe('تسی حج وی کیتی جاندے او');
+			expect(blocks[0]!.back).toBe('لہو وی پیتی جاندے او');
+			expect(blocks[1]!.id).toBe('n7s8y3');
+			expect(blocks[1]!.front).toBe('تسی حج وی کیتی جاندے او');
+			expect(blocks[1]!.back).toBe('لہو وی پیتی جاندے او');
+
+			// BiDi markers (RLM, LRM, etc.) with horizontal ellipsis divider …
+			const bidiContent =
+				'\u200Fتسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u200F\n\n' +
+				'\u200F%% card-start id=n7s8y3 %%\u200F\n' +
+				'تسی حج وی کیتی جاندے او\n' +
+				'\u200F…\u200F\n' +
+				'لہو وی پیتی جاندے او\n' +
+				'\u200F%% card-end %%\u200F\n';
+
+			const bidiBlocks = WasmBridge.parseMarkdownBlocks(bidiContent, []);
+			expect(bidiBlocks).toHaveLength(2);
+			expect(bidiBlocks[0]!.id).toBe('j1029y');
+			expect(bidiBlocks[0]!.front).toBe('تسی حج وی کیتی جاندے او');
+			expect(bidiBlocks[0]!.back).toBe('لہو وی پیتی جاندے او');
+			expect(bidiBlocks[1]!.id).toBe('n7s8y3');
+			expect(bidiBlocks[1]!.front).toBe('تسی حج وی کیتی جاندے او');
+			expect(bidiBlocks[1]!.back).toBe('لہو وی پیتی جاندے او');
+		});
+
+		it('handles legacy SQLite schema with content_hash column without erroring', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			rawDb.run(`
+				CREATE TABLE blocks (
+					id TEXT PRIMARY KEY,
+					file_path TEXT NOT NULL,
+					block_type TEXT NOT NULL,
+					reversible INTEGER NOT NULL DEFAULT 0,
+					front TEXT NOT NULL,
+					back TEXT NOT NULL,
+					tags TEXT NOT NULL,
+					content_hash TEXT NOT NULL,
+					updated_at INTEGER NOT NULL
+				);
+			`);
+
+			const db = DatabaseManager.createForTesting(rawDb);
+			expect(() => {
+				db.syncNoteBlocks('urdu.md', [
+					{
+						id: 'j1029y',
+						block_type: 'inline',
+						reversible: false,
+						front: 'تسی حج وی کیتی جاندے او',
+						back: 'لہو وی پیتی جاندے او',
+						tags: [],
+						line_start: 0,
+						line_end: 0,
+					},
+				]);
+			}).not.toThrow();
+
+			const cards = db.getAllCards();
+			expect(cards).toHaveLength(1);
+			expect(cards[0]!.front).toBe('تسی حج وی کیتی جاندے او');
+			expect(cards[0]!.back).toBe('لہو وی پیتی جاندے او');
+		});
 	});
 });

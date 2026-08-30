@@ -23,8 +23,9 @@ pub struct ObsidianSectionHint {
 pub fn extract_inline_tags(text: &str) -> Vec<String> {
     let mut tags = Vec::new();
     for word in text.split_whitespace() {
-        if word.starts_with('#') && word.len() > 1 {
-            let tag = word
+        let clean_word = syntax::trim_whitespace_and_invisible(word);
+        if clean_word.starts_with('#') && clean_word.len() > 1 {
+            let tag = clean_word
                 .trim_start_matches('#')
                 .trim_matches(|character: char| {
                     !character.is_alphanumeric()
@@ -49,16 +50,22 @@ fn add_tags(tags: &mut Vec<String>, new_tags: Vec<String>) {
 }
 
 pub fn parse_block_header(line: &str) -> Option<(String, bool)> {
-    let inner = line.strip_prefix("%%")?.strip_suffix("%%")?.trim();
+    let trimmed = syntax::trim_whitespace_and_invisible(line);
+    let inner = trimmed.strip_prefix("%%")?.strip_suffix("%%")?;
+    let inner = syntax::trim_whitespace_and_invisible(inner);
     let mut parts = inner.split_whitespace();
-    if parts.next()? != "card-start" {
+    let first = syntax::trim_whitespace_and_invisible(parts.next()?);
+    if first != "card-start" {
         return None;
     }
 
     let mut block_id = String::new();
     let mut reversible = false;
     for part in parts {
-        if let Some((key, value)) = part.split_once('=') {
+        let clean_part = syntax::trim_whitespace_and_invisible(part);
+        if let Some((key, value)) = clean_part.split_once('=') {
+            let key = syntax::trim_whitespace_and_invisible(key);
+            let value = syntax::trim_whitespace_and_invisible(value);
             match key {
                 "id" if syntax::is_valid_block_id(value) => block_id = value.to_string(),
                 "reversible" => {
@@ -69,7 +76,7 @@ pub fn parse_block_header(line: &str) -> Option<(String, bool)> {
                 }
                 _ => {}
             }
-        } else if part == "reversible" {
+        } else if clean_part == "reversible" {
             reversible = true;
         }
     }
@@ -78,8 +85,12 @@ pub fn parse_block_header(line: &str) -> Option<(String, bool)> {
 }
 
 fn rewrite_block_header(original_line: &str, new_id: &str) -> String {
-    let leading = &original_line[..original_line.len() - original_line.trim_start().len()];
-    let trimmed = original_line.trim();
+    let leading_len = original_line.len()
+        - original_line
+            .trim_start_matches(syntax::is_whitespace_or_invisible)
+            .len();
+    let leading = &original_line[..leading_len];
+    let trimmed = syntax::trim_whitespace_and_invisible(original_line);
     let Some(inner) = trimmed
         .strip_prefix("%%")
         .and_then(|s| s.strip_suffix("%%"))
@@ -87,8 +98,11 @@ fn rewrite_block_header(original_line: &str, new_id: &str) -> String {
         return format!("{leading}%% card-start id={new_id} %%");
     };
 
-    let inner = inner.trim();
-    let mut parts: Vec<String> = inner.split_whitespace().map(|s| s.to_string()).collect();
+    let inner = syntax::trim_whitespace_and_invisible(inner);
+    let mut parts: Vec<String> = inner
+        .split_whitespace()
+        .map(|s| syntax::trim_whitespace_and_invisible(s).to_string())
+        .collect();
     let mut has_id = false;
     for part in &mut parts {
         if part.starts_with("id=") {
@@ -113,9 +127,26 @@ fn rewrite_inline_or_cloze_line(
     raw_line_without_id: &str,
     new_id: &str,
 ) -> String {
-    let leading = &original_line[..original_line.len() - original_line.trim_start().len()];
-    let body = raw_line_without_id.trim();
+    let leading_len = original_line.len()
+        - original_line
+            .trim_start_matches(syntax::is_whitespace_or_invisible)
+            .len();
+    let leading = &original_line[..leading_len];
+    let body = syntax::trim_whitespace_and_invisible(raw_line_without_id);
     format!("{leading}{body} ^{new_id}")
+}
+
+fn is_block_card_divider(line: &str) -> bool {
+    let trimmed = syntax::trim_whitespace_and_invisible(line);
+    trimmed == "..." || trimmed == ". . ." || trimmed == "…"
+}
+
+fn is_block_card_end(line: &str) -> bool {
+    let trimmed = syntax::trim_whitespace_and_invisible(line);
+    trimmed
+        .strip_prefix("%%")
+        .and_then(|v| v.strip_suffix("%%"))
+        .is_some_and(|v| syntax::trim_whitespace_and_invisible(v) == "card-end")
 }
 
 fn parse_block_card(
@@ -131,11 +162,7 @@ fn parse_block_card(
         if context.is_ignored_line(*line) {
             return false;
         }
-        let candidate = lines[*line].trim();
-        candidate
-            .strip_prefix("%%")
-            .and_then(|value| value.strip_suffix("%%"))
-            .is_some_and(|value| value.trim() == "card-end")
+        is_block_card_end(lines[*line])
     })?;
 
     let content_lines = &lines[start_line + 1..end_line];
@@ -144,8 +171,7 @@ fn parse_block_card(
     let mut is_back = false;
 
     for line in content_lines {
-        let trimmed = line.trim();
-        if !is_back && (trimmed == "..." || trimmed == ". . .") {
+        if !is_back && is_block_card_divider(line) {
             is_back = true;
             continue;
         }
@@ -160,8 +186,8 @@ fn parse_block_card(
         return None;
     }
 
-    let front = front.trim().to_string();
-    let back = back.trim().to_string();
+    let front = syntax::trim_whitespace_and_invisible(&front).to_string();
+    let back = syntax::trim_whitespace_and_invisible(&back).to_string();
     if front.is_empty() || back.is_empty() {
         return None;
     }
@@ -196,8 +222,8 @@ fn make_inline_block(
     raw_line: &str,
     line_number: usize,
 ) -> Option<ParsedBlock> {
-    let front = front.trim();
-    let back = back.trim();
+    let front = syntax::trim_whitespace_and_invisible(front);
+    let back = syntax::trim_whitespace_and_invisible(back);
     if front.is_empty() || back.is_empty() {
         return None;
     }
@@ -250,9 +276,12 @@ pub fn parse_markdown_blocks_with_sections(
 
         let line = lines[line_number];
         let line_start = context.line_start(line_number);
-        let leading_whitespace = line.len() - line.trim_start().len();
-        let logical_line = line.trim_start().trim_end();
-        let logical_start = line_start + leading_whitespace;
+        let leading_len = line.len()
+            - line
+                .trim_start_matches(syntax::is_whitespace_or_invisible)
+                .len();
+        let logical_line = syntax::trim_whitespace_and_invisible(line);
+        let logical_start = line_start + leading_len;
 
         if logical_line.is_empty() {
             paragraph_bracket_depth = 0;
@@ -338,10 +367,14 @@ pub fn parse_markdown_blocks_with_sections(
             continue;
         }
 
-        if !cloze_scan.spans.is_empty() {
+        if !cloze_scan.spans.is_empty()
+            && paragraph_bracket_depth == 0
+            && !syntax::has_unmatched_opening_bracket(raw_line)
+            && !syntax::has_unmatched_closing_bracket(raw_line)
+        {
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
-            let front = raw_line.trim().to_string();
+            let front = syntax::trim_whitespace_and_invisible(raw_line).to_string();
             blocks.push(ParsedBlock {
                 id: block_id,
                 block_type: CardBlockType::Cloze,
@@ -414,9 +447,12 @@ pub fn sync_document(
 
         let line = raw_lines[line_number];
         let line_start = context.line_start(line_number);
-        let leading_whitespace = line.len() - line.trim_start().len();
-        let logical_line = line.trim_start().trim_end();
-        let logical_start = line_start + leading_whitespace;
+        let leading_len = line.len()
+            - line
+                .trim_start_matches(syntax::is_whitespace_or_invisible)
+                .len();
+        let logical_line = syntax::trim_whitespace_and_invisible(line);
+        let logical_start = line_start + leading_len;
 
         if logical_line.is_empty() {
             paragraph_bracket_depth = 0;
@@ -541,10 +577,14 @@ pub fn sync_document(
             continue;
         }
 
-        if !cloze_scan.spans.is_empty() {
+        if !cloze_scan.spans.is_empty()
+            && paragraph_bracket_depth == 0
+            && !syntax::has_unmatched_opening_bracket(raw_line)
+            && !syntax::has_unmatched_closing_bracket(raw_line)
+        {
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
-            let front = raw_line.trim().to_string();
+            let front = syntax::trim_whitespace_and_invisible(raw_line).to_string();
 
             let (id, newly_minted) = claim_or_mint_id(
                 &raw_block_id,

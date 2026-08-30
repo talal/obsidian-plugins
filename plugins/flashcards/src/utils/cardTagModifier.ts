@@ -93,8 +93,10 @@ export function addCardTag(
 			// Find the last non-empty line of the question before the divider
 			let targetLineIdx = -1;
 			for (let j = startIdx + 1; j < blockEnd; j++) {
-				const t = lines[j]?.trim() ?? '';
-				if (t === '---' || t === '...' || t === '. . .') {
+				const t = (lines[j] ?? '')
+					.replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
+					.trim();
+				if (t === '...' || t === '. . .' || t === '…' || t === '---') {
 					break;
 				}
 				if (t.length > 0) {

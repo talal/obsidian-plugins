@@ -5,10 +5,48 @@ use super::markdown::MarkdownContext;
 
 const BASE36_CHARS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
+/// Check if a character is a BiDi control, zero-width, or formatting mark.
+pub fn is_bidi_or_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200E}' // LRM (Left-to-Right Mark)
+        | '\u{200F}' // RLM (Right-to-Left Mark)
+        | '\u{061C}' // ALM (Arabic Letter Mark)
+        | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{200B}' // ZWSP (Zero Width Space)
+        | '\u{200C}' // ZWNJ (Zero Width Non-Joiner)
+        | '\u{200D}' // ZWJ (Zero Width Joiner)
+        | '\u{2060}' // WJ (Word Joiner)
+        | '\u{FEFF}' // BOM (Byte Order Mark)
+    )
+}
+
+/// Check if a character is whitespace or an invisible/BiDi mark.
+pub fn is_whitespace_or_invisible(c: char) -> bool {
+    c.is_whitespace() || is_bidi_or_invisible(c)
+}
+
+/// Trim leading and trailing whitespace and invisible/BiDi marks.
+pub fn trim_whitespace_and_invisible(s: &str) -> &str {
+    s.trim_matches(is_whitespace_or_invisible)
+}
+
+/// Trim leading whitespace and invisible/BiDi marks.
+pub fn trim_start_whitespace_and_invisible(s: &str) -> &str {
+    s.trim_start_matches(is_whitespace_or_invisible)
+}
+
+/// Trim trailing whitespace and invisible/BiDi marks.
+pub fn trim_end_whitespace_and_invisible(s: &str) -> &str {
+    s.trim_end_matches(is_whitespace_or_invisible)
+}
+
 /// Check if a block ID is exactly 6 lowercase base-36 characters ([0-9a-z]).
 pub fn is_valid_block_id(id: &str) -> bool {
-    id.len() == 6
-        && id
+    let clean = trim_whitespace_and_invisible(id);
+    clean.len() == 6
+        && clean
             .chars()
             .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
 }
@@ -98,25 +136,38 @@ pub(crate) fn scan_clozes(line: &str, base_offset: usize, context: &MarkdownCont
 }
 
 pub(crate) fn is_inside_brackets(prefix: &str, initial_depth: usize) -> bool {
-    let mut depth = initial_depth as isize;
+    let mut square_depth = initial_depth as isize;
+    let mut paren_depth = 0isize;
     for c in prefix.chars() {
         if c == '[' {
-            depth += 1;
+            square_depth += 1;
         } else if c == ']' {
-            depth = (depth - 1).max(0);
+            square_depth = (square_depth - 1).max(0);
+        } else if c == '(' {
+            paren_depth += 1;
+        } else if c == ')' {
+            paren_depth = (paren_depth - 1).max(0);
         }
     }
-    depth > 0
+    square_depth > 0 || paren_depth > 0
 }
 
 pub(crate) fn has_unmatched_closing_bracket(suffix: &str) -> bool {
-    let mut depth = 0isize;
+    let mut square_depth = 0isize;
+    let mut paren_depth = 0isize;
     for c in suffix.chars() {
         if c == '[' {
-            depth += 1;
+            square_depth += 1;
         } else if c == ']' {
-            depth -= 1;
-            if depth < 0 {
+            square_depth -= 1;
+            if square_depth < 0 {
+                return true;
+            }
+        } else if c == '(' {
+            paren_depth += 1;
+        } else if c == ')' {
+            paren_depth -= 1;
+            if paren_depth < 0 {
                 return true;
             }
         }
@@ -124,12 +175,29 @@ pub(crate) fn has_unmatched_closing_bracket(suffix: &str) -> bool {
     false
 }
 
+pub(crate) fn has_unmatched_opening_bracket(s: &str) -> bool {
+    let mut square_depth = 0isize;
+    let mut paren_depth = 0isize;
+    for c in s.chars() {
+        if c == '[' {
+            square_depth += 1;
+        } else if c == ']' {
+            square_depth = (square_depth - 1).max(0);
+        } else if c == '(' {
+            paren_depth += 1;
+        } else if c == ')' {
+            paren_depth = (paren_depth - 1).max(0);
+        }
+    }
+    square_depth > 0 || paren_depth > 0
+}
+
 pub(crate) fn bracket_depth_delta(line: &str) -> isize {
     let mut delta = 0isize;
     for c in line.chars() {
-        if c == '[' {
+        if c == '[' || c == '(' {
             delta += 1;
-        } else if c == ']' {
+        } else if c == ']' || c == ')' {
             delta -= 1;
         }
     }
@@ -156,6 +224,7 @@ pub(crate) fn split_once_outside_clozes<'a>(
         if !context.is_eligible(base_offset + index..base_offset + separator_end)
             || is_inside_brackets(&line[..index], initial_bracket_depth)
             || has_unmatched_closing_bracket(&line[separator_end..])
+            || has_unmatched_opening_bracket(&line[separator_end..])
             || cloze_spans
                 .iter()
                 .any(|span| span.start <= index && index < span.end)
@@ -171,22 +240,34 @@ pub(crate) fn split_once_outside_clozes<'a>(
 /// Extract a trailing 6-character lowercase base-36 block ID from the end of a line.
 pub(crate) fn split_trailing_block_id<'a>(
     line: &'a str,
-    _base_offset: usize,
-    _context: &MarkdownContext,
+    base_offset: usize,
+    context: &MarkdownContext,
 ) -> (&'a str, String) {
-    let trimmed_end = line.trim_end();
-    let Some(position) = trimmed_end.rfind(" ^") else {
+    let trimmed_end = trim_end_whitespace_and_invisible(line);
+    let Some(caret_pos) = trimmed_end.rfind('^') else {
         return (trimmed_end, String::new());
     };
 
-    let id_start = position + 2;
-    let id_part = &trimmed_end[id_start..];
-    let id = id_part.trim();
-    if !is_valid_block_id(id) {
+    let id_part = trim_whitespace_and_invisible(&trimmed_end[caret_pos + 1..]);
+    if !is_valid_block_id(id_part) {
         return (trimmed_end, String::new());
     }
 
-    (trimmed_end[..position].trim_end(), id.to_string())
+    let prefix = &trimmed_end[..caret_pos];
+    // Block ID must be preceded by whitespace, bidi marker, or start of line
+    if caret_pos > 0 && !prefix.ends_with(is_whitespace_or_invisible) {
+        return (trimmed_end, String::new());
+    }
+
+    let byte_pos = base_offset + caret_pos;
+    if !context.is_eligible(byte_pos..byte_pos + 1 + id_part.len()) {
+        return (trimmed_end, String::new());
+    }
+
+    (
+        trim_end_whitespace_and_invisible(prefix),
+        id_part.to_string(),
+    )
 }
 
 pub(crate) fn has_unclosed_inline_code(line: &str) -> bool {

@@ -390,6 +390,104 @@ tags: [پنجابی, الفاظ]
     }
 
     #[test]
+    fn test_urdu_rtl_scratch_file() {
+        let content = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n%% card-start id=n7s8y3 %%\nتسی حج وی کیتی جاندے او\n...\nلہو وی پیتی جاندے او\n%% card-end %%\n";
+        let blocks = parse_markdown_blocks(content, &[]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].id, "j1029y");
+        assert_eq!(blocks[0].front, "تسی حج وی کیتی جاندے او");
+        assert_eq!(blocks[0].back, "لہو وی پیتی جاندے او");
+        assert_eq!(blocks[1].id, "n7s8y3");
+        assert_eq!(blocks[1].front, "تسی حج وی کیتی جاندے او");
+        assert_eq!(blocks[1].back, "لہو وی پیتی جاندے او");
+
+        let content_no_id = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\n\n%% card-start %%\nتسی حج وی کیتی جاندے او\n...\nلہو وی پیتی جاندے او\n%% card-end %%\n";
+        let result = sync_document(content_no_id, &HashSet::new(), &[], &[]);
+        assert!(result.updated_content.is_some());
+        assert_eq!(result.blocks.len(), 2);
+
+        // BiDi marks test (RLM, LRM, ALM, etc.) with dividers
+        let content_bidi = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u{200F}\n\n\u{200F}%% card-start id=n7s8y3 %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}...\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
+        let blocks_bidi = parse_markdown_blocks(content_bidi, &[]);
+        assert_eq!(blocks_bidi.len(), 2, "BiDi marks should not break card parsing");
+        assert_eq!(blocks_bidi[0].id, "j1029y");
+        assert_eq!(blocks_bidi[0].front, "تسی حج وی کیتی جاندے او");
+        assert_eq!(blocks_bidi[0].back, "لہو وی پیتی جاندے او");
+        assert_eq!(blocks_bidi[1].id, "n7s8y3");
+        assert_eq!(blocks_bidi[1].front, "تسی حج وی کیتی جاندے او");
+        assert_eq!(blocks_bidi[1].back, "لہو وی پیتی جاندے او");
+
+        // Test sync_document with BiDi marks and no IDs
+        let content_bidi_no_id = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\u{200F}\n\n\u{200F}%% card-start %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}…\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
+        let sync_bidi = sync_document(content_bidi_no_id, &HashSet::new(), &[], &[]);
+        assert!(sync_bidi.updated_content.is_some());
+        assert_eq!(sync_bidi.blocks.len(), 2);
+        let updated_bidi = sync_bidi.updated_content.unwrap();
+        let resync_bidi = sync_document(&updated_bidi, &HashSet::new(), &[], &[]);
+        assert_eq!(resync_bidi.updated_content, None, "Resync must be idempotent");
+        assert_eq!(resync_bidi.blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_rescan_mismatch_6() {
+        let data: &[u8] = &[
+            84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 91, 118, 96,
+            10, 99, 116, 98, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87, 87,
+            87, 87, 87, 87, 87, 87, 87, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123,
+            123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123,
+            123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 87, 111, 110, 92, 0,
+            0, 96, 0, 0, 0, 0, 0, 93, 0, 0, 0, 0, 119, 84, 84, 84, 84, 84, 84, 84, 84, 84, 93, 0,
+            84, 84, 84, 84, 84, 84, 84, 58, 58, 58, 73, 96, 118, 74, 96, 73, 60, 118, 84, 91, 118,
+            96, 10, 99, 116, 98, 111, 48, 0, 92, 0, 96, 0, 84, 60, 84, 84, 84, 74, 78, 49, 114,
+            84, 84, 84, 84, 0, 0, 0, 0, 93, 0, 37, 0, 0, 0, 0, 74, 109, 97, 114, 107, 100, 111,
+            119, 110, 10, 37, 37, 32, 97,
+        ];
+        let input = std::str::from_utf8(data).unwrap();
+        let line_count = input.lines().count();
+        let hints: Vec<_> = data
+            .chunks(3)
+            .take(32)
+            .map(|chunk| {
+                let start = usize::from(chunk.first().copied().unwrap_or_default())
+                    .checked_rem(line_count.max(1))
+                    .unwrap_or_default();
+                let end = usize::from(chunk.get(1).copied().unwrap_or_default())
+                    .checked_rem(line_count.max(1))
+                    .unwrap_or(start);
+                ObsidianSectionHint {
+                    section_type: match chunk.get(2).copied().unwrap_or_default() % 6 {
+                        0 => "code",
+                        1 => "blockquote",
+                        2 => "table",
+                        3 => "yaml",
+                        4 => "html",
+                        _ => "paragraph",
+                    }
+                    .to_string(),
+                    line_start: start.min(end),
+                    line_end: start.max(end),
+                }
+            })
+            .collect();
+
+        let tags = vec![];
+        let external_ids = HashSet::new();
+
+        let sync_result = sync_document(input, &external_ids, &tags, &hints);
+        let synced_text = sync_result.updated_content.as_deref().unwrap_or(input);
+        println!("Synced text:\n{}", synced_text);
+        println!("Synced blocks:\n{:#?}", sync_result.blocks);
+
+        let second_sync = sync_document(synced_text, &external_ids, &tags, &hints);
+        println!("Second sync:\n{:#?}", second_sync);
+        assert_eq!(second_sync.updated_content, None);
+    }
+
+
+
+
+
+    #[test]
     fn test_sync_document_generates_missing_ids() {
         let input = r#"
 # Biology
@@ -532,16 +630,6 @@ $$
 
 Real Cloze with {{valid cloze}} here.
 "#;
-        let mut options = pulldown_cmark::Options::empty();
-        options.insert(pulldown_cmark::Options::ENABLE_TABLES);
-        options.insert(pulldown_cmark::Options::ENABLE_GFM);
-        options.insert(pulldown_cmark::Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-        options.insert(pulldown_cmark::Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS);
-        options.insert(pulldown_cmark::Options::ENABLE_MATH);
-        options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-        options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
-        options.insert(pulldown_cmark::Options::ENABLE_HEADING_ATTRIBUTES);
-        options.insert(pulldown_cmark::Options::ENABLE_WIKILINKS);
         let blocks = parse_markdown_blocks(doc, &[]);
         assert_eq!(blocks.len(), 3);
     }
@@ -658,4 +746,130 @@ Real Cloze with {{valid cloze}} here.
         assert_eq!(sync1.blocks.len(), sync2.blocks.len());
         assert_eq!(sync2.updated_content, None);
     }
+
+    #[test]
+    fn test_fuzz_reproduce_unicode_bidi_link_reference_definition() {
+        let input = "[{{_}}]:\n___";
+        let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_unicode_bidi_heading() {
+        const BIDI_CHARS: &[char] = &[
+            '\u{200E}', '\u{200F}', '\u{061C}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{200B}',
+            '\u{200C}', '\u{200D}',
+        ];
+        const RTL_SNIPPETS: &[&str] = &[
+            "تسی حج وی کیتی جاندے او",
+            "لہو وی پیتی جاندے او",
+            "زمین سورج دے گرد چکر کٹدی اے۔",
+            "پاکستان دا دارالحکومت اسلام آباد اے۔",
+            "سورج",
+            "چاند",
+            "ستارے",
+            "שלום עולם",
+            "مرحبا بالعالم",
+            "English text mixed with اردو",
+        ];
+        const DIVIDERS: &[&str] = &["...", ". . .", "…"];
+
+        struct ByteReader<'a> {
+            data: &'a [u8],
+            idx: usize,
+        }
+        impl<'a> ByteReader<'a> {
+            fn next_byte(&mut self) -> u8 {
+                if self.data.is_empty() {
+                    0
+                } else {
+                    let b = self.data[self.idx % self.data.len()];
+                    self.idx = self.idx.wrapping_add(1);
+                    b
+                }
+            }
+            fn inject_bidi(&mut self, s: &str) -> String {
+                let mut out = String::new();
+                let count = (self.next_byte() % 4) as usize;
+                for _ in 0..count {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out.push_str(s);
+                let count_end = (self.next_byte() % 4) as usize;
+                for _ in 0..count_end {
+                    let ch = BIDI_CHARS[(self.next_byte() as usize) % BIDI_CHARS.len()];
+                    out.push(ch);
+                }
+                out
+            }
+        }
+
+        let data: &[u8] = &[84, 58, 58, 123, 58, 58, 58, 125, 13, 45];
+        let mut reader = ByteReader { data, idx: 0 };
+        let mut doc = String::new();
+        // 1. Inline cards
+        let q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let sep = if reader.next_byte() % 2 == 0 { "::" } else { ":::" };
+        let has_id = reader.next_byte() % 2 == 0;
+        let id_suffix = if has_id { " ^j1029y" } else { "" };
+        let inline_card = format!("{q} {sep} {a}{id_suffix}");
+        doc.push_str(&reader.inject_bidi(&inline_card));
+        doc.push_str("\n\n");
+
+        // 2. Cloze cards
+        let cloze_snippet = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let cloze_body = format!("زمین {{{{{}}}}} دے گرد چکر کٹدی اے۔", cloze_snippet);
+        let cloze_id = if reader.next_byte() % 2 == 0 { " ^c3e2f1" } else { "" };
+        let cloze_card = format!("{cloze_body}{cloze_id}");
+        doc.push_str(&reader.inject_bidi(&cloze_card));
+        doc.push_str("\n\n");
+
+        // 3. Block cards
+        let block_q = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let block_a = RTL_SNIPPETS[(reader.next_byte() as usize) % RTL_SNIPPETS.len()];
+        let div = DIVIDERS[(reader.next_byte() as usize) % DIVIDERS.len()];
+        let block_id = if reader.next_byte() % 2 == 0 { " id=n7s8y3" } else { "" };
+        let rev = if reader.next_byte() % 3 == 0 { " reversible=true" } else { "" };
+        
+        let start_header = format!("%% card-start{block_id}{rev} %%");
+        doc.push_str(&reader.inject_bidi(&start_header));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_q));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(div));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi(block_a));
+        doc.push('\n');
+        doc.push_str(&reader.inject_bidi("%% card-end %%"));
+        doc.push_str("\n\n");
+
+        // 4. Also append raw payload
+        let raw_str = std::str::from_utf8(data).unwrap();
+        doc.push_str(raw_str);
+
+        let sync1 = sync_document(&doc, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(&doc);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        for (b1, b2) in sync1.blocks.iter().zip(sync2.blocks.iter()) {
+            assert_eq!(b1.reversible, b2.reversible);
+        }
+    }
+
+    #[test]
+    fn test_fuzz_reproduce_unicode_bidi_unclosed_paren() {
+        let input = "[0]::[](\r){\n\n)0\r\n";
+        let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
+        let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
+        let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
+        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync2.updated_content, None);
+    }
+
 

@@ -68,6 +68,15 @@ export class DatabaseManager {
 		manager.slotAPath = slotAPath;
 		manager.slotBPath = slotBPath;
 		db.run('PRAGMA foreign_keys = ON;');
+		try {
+			const tableInfo = db.exec('PRAGMA table_info(blocks);');
+			const columns = tableInfo[0]?.values?.map((row) => row[1]) ?? [];
+			if (columns.includes('content_hash')) {
+				db.run('ALTER TABLE blocks DROP COLUMN content_hash;');
+			}
+		} catch {
+			// Ignore if table does not exist yet
+		}
 		db.run(SCHEMA_SQL);
 		return manager;
 	}
@@ -136,6 +145,15 @@ export class DatabaseManager {
 
 		this.db = WasmBridge.createDatabase(payloadToLoad);
 		this.db.run('PRAGMA foreign_keys = ON;');
+		try {
+			const tableInfo = this.db.exec('PRAGMA table_info(blocks);');
+			const columns = tableInfo[0]?.values?.map((row) => row[1]) ?? [];
+			if (columns.includes('content_hash')) {
+				this.db.run('ALTER TABLE blocks DROP COLUMN content_hash;');
+			}
+		} catch {
+			// Ignore if table does not exist yet
+		}
 		this.db.run(SCHEMA_SQL);
 		this.db.run('DELETE FROM cards WHERE block_id NOT IN (SELECT id FROM blocks);');
 	}

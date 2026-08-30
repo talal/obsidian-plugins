@@ -66,7 +66,7 @@ What are the largest cities of Pakistan? #card/todo
 - **Attributes** (`key=val` on `card-start` line):
   - `id`: Unique 6-character lowercase base-36 block ID (`[0-9a-z]`).
   - `reversible`: `true` or `false` (default is `false` if omitted).
-- **Divider**: Standalone line with `...` or `. . .` separating Front (Question) from Back (Answer).
+- **Divider**: Standalone line with `...`, `. . .`, or `…` separating Front (Question) from Back (Answer).
 
 ### 2.4 Cloze Deletion Cards
 Uses explicit `{{cloze}}` double curly brace syntax. All clozes in a card are revealed in-place:
@@ -480,6 +480,7 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 ### 10.5 Right-to-Left (RTL) & Bidirectional Typography Support
 - **Logical CSS Properties**: Interface layouts, margins, paddings, and table alignments strictly utilize logical properties (`margin-inline-start`, `text-align: start`, `text-align: end`, `inset: 0`) ensuring native horizontal mirroring when `.mod-rtl` is active on `body`.
 - **Bidirectional Content Isolation (`unicode-bidi: plaintext` & `dir="auto"`)**: All single-line user-authored texts (note titles, breadcrumbs, tags, text previews, search inputs) specify `unicode-bidi: plaintext` and `dir="auto"` to prevent character reordering, punctuation flipping, and ellipsis (`…`) truncation anomalies across mixed LTR/RTL notes.
+- **BiDi-Safe Parsing & Trimming**: The Rust WASM parser and TypeScript tag modifiers recognize and strip Unicode directional marks (LRM `\u200E`, RLM `\u200F`, ALM `\u061C`, embedding/override isolates, and zero-width markers) surrounding block headers, block IDs (`^k9x2mp`), card separators (`::`, `:::`), and dividers (`...`, `. . .`, `…`).
 
 ---
 

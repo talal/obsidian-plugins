@@ -41,4 +41,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "unicode_bidi"
+path = "fuzz_targets/unicode_bidi.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
+
