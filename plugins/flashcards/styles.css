@@ -593,10 +593,15 @@
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	justify-content: center;
-	padding: 20px 16px;
+	justify-content: flex-start;
+	padding: clamp(48px, 11vh, 96px) 16px 20px;
 	overflow-y: auto;
 	background: var(--background-secondary);
+}
+
+.fc-workspace:has(.fc-completion-card) {
+	justify-content: center;
+	padding: 20px 16px;
 }
 
 .fc-card-container {
@@ -604,7 +609,7 @@
 	max-width: 760px;
 	display: flex;
 	flex-direction: column;
-	justify-content: center;
+	justify-content: flex-start;
 }
 
 .fc-card {
@@ -904,6 +909,10 @@
 	}
 
 	.fc-workspace {
+		padding: clamp(14px, 4vh, 24px) 12px 12px;
+	}
+
+	.fc-workspace:has(.fc-completion-card) {
 		padding: 12px;
 	}
 
