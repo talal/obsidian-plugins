@@ -207,14 +207,14 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 			)
 			.addButton((btn) => {
 				btn.setButtonText('Optimize database').onClick(async () => {
-					new Notice('🧹 Optimizing database...');
+					new Notice('Optimizing database...');
 					const files = this.app.vault.getMarkdownFiles();
 					const validPaths = new Set(files.map((f) => f.path));
 					const res = await this.plugin.db.optimizeDatabase(validPaths);
 					if (!res.integrityOk) {
-						new Notice('⚠️ Database integrity check reported warnings.');
+						new Notice('Database integrity check reported warnings.');
 					} else {
-						new Notice(`✨ Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
+						new Notice(`Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
 					}
 					this.plugin.refreshDashboardIfOpen();
 				});

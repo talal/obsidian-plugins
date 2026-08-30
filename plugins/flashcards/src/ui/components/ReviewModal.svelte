@@ -12,7 +12,10 @@
 		app?: App;
 		items: ReviewItem[];
 		deckName?: string;
-		onGrade?: (item: ReviewItem, rating: 'forgot' | 'remembered') => Promise<void> | void;
+		onGrade?: (
+			item: ReviewItem,
+			rating: 'forgot' | 'remembered',
+		) => Promise<{ isLeech?: boolean } | void> | { isLeech?: boolean } | void;
 		onUndo?: (item: ReviewItem) => Promise<void> | void;
 		onToggleTodo?: (item: ReviewItem) => Promise<void> | void;
 		onClose?: () => void;
@@ -91,7 +94,7 @@
 		const wasRevealed = isRevealed;
 		isProcessing = true;
 		try {
-			await onGrade?.(card, rating);
+			const gradeResult = await onGrade?.(card, rating);
 			history.push({
 				index: currentIndex,
 				wasRevealed,
@@ -102,7 +105,11 @@
 			sessionStudied += 1;
 			if (rating === 'forgot') {
 				sessionForgot += 1;
-				showToast('Marked as forgot');
+				if (gradeResult && typeof gradeResult === 'object' && gradeResult.isLeech) {
+					showToast('Marked as leech (#card/leech)');
+				} else {
+					showToast('Marked as forgot');
+				}
 			} else {
 				sessionRemembered += 1;
 				showToast('Marked as remembered');

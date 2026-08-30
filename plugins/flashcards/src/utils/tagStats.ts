@@ -30,10 +30,18 @@ export function computeTagDeckStats(items: ReviewItem[], dueCutoff: number): Tag
 		}
 	}
 
-	return Array.from(map.entries())
-		.map(([tag, stat]) => ({ tag, ...stat }))
-		.sort((a, b) => {
-			if (b.due !== a.due) return b.due - a.due;
-			return a.tag.localeCompare(b.tag);
+	const result: TagDeckStat[] = [];
+	for (const [tag, stat] of map) {
+		result.push({
+			tag,
+			total: stat.total,
+			due: stat.due,
+			newCards: stat.newCards,
 		});
+	}
+
+	return result.sort((a, b) => {
+		if (b.due !== a.due) return b.due - a.due;
+		return a.tag.localeCompare(b.tag);
+	});
 }

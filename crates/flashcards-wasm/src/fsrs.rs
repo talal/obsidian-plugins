@@ -523,4 +523,41 @@ mod tests {
             "Sibling due day 10 should be avoided, got {count_day10}"
         );
     }
+
+    #[test]
+    fn test_relearning_card_lapses_increment() {
+        let engine = FsrsEngine::new(FsrsParams::default());
+        let mut card = SchedulingCard {
+            state: State::Review,
+            lapses: 0,
+            stability: 5.0,
+            difficulty: 3.0,
+            reps: 2,
+            learning_step: 0,
+            relearning_step: 0,
+            last_review: Some(500),
+            due: 1000,
+        };
+
+        // First failure on review card -> moves to Relearning, lapses = 1
+        let res1 = engine.schedule(&card, 1000).next_states[0].card.clone();
+        assert_eq!(res1.state, State::Relearning);
+        assert_eq!(res1.lapses, 1);
+
+        // Failure while in Relearning does NOT increment lapses in Anki (remains in same lapse episode)
+        card = res1.clone();
+        let res2 = engine.schedule(&card, 2000).next_states[0].card.clone();
+        assert_eq!(res2.state, State::Relearning);
+        assert_eq!(res2.lapses, 1);
+
+        // Graduate out of Relearning with Good -> back to Review
+        let grad = engine.schedule(&res2, 3000).next_states[2].card.clone();
+        assert_eq!(grad.state, State::Review);
+        assert_eq!(grad.lapses, 1);
+
+        // Next failure on Review card -> lapses increments to 2
+        let res3 = engine.schedule(&grad, 4000).next_states[0].card.clone();
+        assert_eq!(res3.state, State::Relearning);
+        assert_eq!(res3.lapses, 2);
+    }
 }

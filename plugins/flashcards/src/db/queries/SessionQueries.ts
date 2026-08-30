@@ -204,16 +204,19 @@ export function getDashboardStats(db: Database, rolloverHour = 4): DashboardStat
 	let dueToday = 0;
 	let newCards = 0;
 
-	const cardStmt = db.prepare(
-		'SELECT c.state, c.due_at FROM cards c JOIN blocks b ON c.block_id = b.id',
-	);
-	while (cardStmt.step()) {
+	const cardStmt = db.prepare(`
+		SELECT COUNT(*) as total_cards,
+		       SUM(CASE WHEN c.state = 0 THEN 1 ELSE 0 END) as new_cards,
+		       SUM(CASE WHEN c.due_at <= ? THEN 1 ELSE 0 END) as due_today
+		FROM cards c
+		JOIN blocks b ON c.block_id = b.id
+	`);
+	cardStmt.bind([endOfDayMs]);
+	if (cardStmt.step()) {
 		const row = cardStmt.getAsObject();
-		totalCards++;
-		const state = row.state as number;
-		const due = row.due_at as number;
-		if (state === 0) newCards++;
-		if (due <= endOfDayMs) dueToday++;
+		totalCards = (row.total_cards as number) || 0;
+		newCards = (row.new_cards as number) || 0;
+		dueToday = (row.due_today as number) || 0;
 	}
 	cardStmt.free();
 

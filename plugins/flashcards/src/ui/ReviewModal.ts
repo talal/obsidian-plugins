@@ -1,4 +1,4 @@
-import { App, Modal, Notice, TFile } from 'obsidian';
+import { App, Modal, TFile } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
@@ -54,7 +54,7 @@ export class ReviewModal extends Modal {
 				items: this.items,
 				deckName: this.deckName,
 				onGrade: (item: ReviewItem, ratingStr: 'forgot' | 'remembered') => {
-					this.handleCardGrade(item, ratingStr);
+					return this.handleCardGrade(item, ratingStr);
 				},
 				onUndo: (item: ReviewItem) => {
 					this.handleCardUndo(item);
@@ -70,7 +70,10 @@ export class ReviewModal extends Modal {
 		});
 	}
 
-	private handleCardGrade(item: ReviewItem, ratingStr: 'forgot' | 'remembered'): void {
+	private handleCardGrade(
+		item: ReviewItem,
+		ratingStr: 'forgot' | 'remembered',
+	): { isLeech?: boolean } {
 		const previousCard = this.toSchedulingCard(item);
 		const rawWeights = this.plugin.settings.customWeights
 			? this.plugin.settings.customWeights
@@ -105,7 +108,7 @@ export class ReviewModal extends Modal {
 
 		const candidate =
 			info.next_states.find((c) => c.rating === targetRating) ?? info.next_states[2];
-		if (!candidate) return;
+		if (!candidate) return {};
 
 		const stateNum = this.plugin.db.unmapState(candidate.card.state);
 
@@ -114,15 +117,22 @@ export class ReviewModal extends Modal {
 
 		this.applySchedulingCard(item, candidate.card);
 
-		// Check Leech threshold on lapses (Forgot on review/relearning card)
+		// Check Leech threshold on lapses (Forgot on review card)
 		const leechThreshold = this.plugin.settings.leechThreshold ?? 4;
+		let isLeech = false;
 		if (
 			ratingStr === 'forgot' &&
-			(previousCard.state === 'review' || previousCard.state === 'relearning') &&
+			previousCard.state === 'review' &&
 			isLeechThresholdMet(candidate.card.lapses, leechThreshold)
 		) {
-			void this.handleCardLeech(item, candidate.card.lapses);
+			isLeech = true;
+			if (!item.tags.includes(DEFAULT_LEECH_TAG)) {
+				item.tags.push(DEFAULT_LEECH_TAG);
+			}
+			void this.handleCardLeech(item);
 		}
+
+		return { isLeech };
 	}
 
 	private handleCardUndo(_item: ReviewItem): void {
@@ -204,7 +214,7 @@ export class ReviewModal extends Modal {
 		}
 	}
 
-	private async handleCardLeech(item: ReviewItem, lapses: number): Promise<void> {
+	private async handleCardLeech(item: ReviewItem): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(item.notePath);
 		if (file instanceof TFile) {
 			const content = await this.app.vault.read(file);
@@ -218,7 +228,6 @@ export class ReviewModal extends Modal {
 				await this.app.vault.modify(file, updated);
 				await this.plugin.scanner.syncFile(file);
 				this.plugin.refreshDashboardIfOpen();
-				new Notice(`⚡ Card marked as leech (${DEFAULT_LEECH_TAG}) after ${lapses} lapses.`);
 			}
 		}
 	}

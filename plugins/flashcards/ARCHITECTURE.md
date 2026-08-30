@@ -382,8 +382,8 @@ Cards that fail repeatedly ("leeches") consume disproportionate study time. The 
 2. **Markdown Auto-Tagging**:
    - The plugin automatically appends `#card/leech` to the card line or question block in Markdown using `addCardLeechTagInMarkdown`.
    - Single-pass note synchronization updates the SQLite database blocks table with the `card/leech` tag.
-3. **Non-Blocking UI Notice**:
-   An Obsidian notice informs the user (`⚡ Card marked as leech (#card/leech) after 4 lapses`) without blocking their study flow.
+3. **Non-Blocking In-Modal Toast**:
+   An in-modal toast informs the user (`Marked as leech (#card/leech)`) without blocking their study flow or popping global vault notices.
 
 ---
 
@@ -603,6 +603,6 @@ plugins/flashcards/
 │       ├── studySteps.ts         # Duration string parsing
 │       └── tagStats.ts           # Tag deck statistics aggregation
 └── tests/
-    └── flashcards.test.ts        # Vitest unit test suite (102 tests)
+    └── flashcards.test.ts        # Vitest unit test suite (106 tests)
 ```
 

@@ -7,6 +7,78 @@ import { getStudyDayCutoff, getStudyDayStart } from '../../utils/studyDay.js';
 import { DEFAULT_LEARNING_STEPS, DEFAULT_RELEARNING_STEPS } from '../../utils/studySteps.js';
 import { humanizeDue, humanizeRelative, mapState } from '../formatters.js';
 
+function extractNoteTitle(filePath: string): string {
+	const slashIndex = filePath.lastIndexOf('/');
+	const base = slashIndex >= 0 ? filePath.slice(slashIndex + 1) : filePath;
+	return base.endsWith('.md') ? base.slice(0, -3) : base;
+}
+
+function createReviewItem(
+	row: Record<string, unknown>,
+	filePath: string,
+	direction: 'forward' | 'reverse' | null,
+	blockType: CardBlockType,
+	reversible: boolean,
+	front: string,
+	back: string,
+	tags: string[],
+): ReviewItem {
+	let cachedDueHuman: string | undefined;
+	let cachedLastPracticed: string | undefined;
+	let cachedNoteTitle: string | undefined;
+
+	return {
+		cardId: row.card_id as number,
+		blockId: row.block_id as string,
+		get noteTitle(): string {
+			if (cachedNoteTitle === undefined) {
+				cachedNoteTitle = extractNoteTitle(filePath);
+			}
+			return cachedNoteTitle;
+		},
+		set noteTitle(val: string) {
+			cachedNoteTitle = val;
+		},
+		notePath: filePath,
+		direction,
+		blockType,
+		reversible,
+		front,
+		back,
+		tags,
+		state: mapState(row.state as number),
+		stateNum: row.state as number,
+		dueAt: row.due_at as number,
+		get dueHuman(): string {
+			if (cachedDueHuman === undefined) {
+				cachedDueHuman = humanizeDue(row.due_at as number);
+			}
+			return cachedDueHuman;
+		},
+		set dueHuman(val: string) {
+			cachedDueHuman = val;
+		},
+		stability: row.stability as number,
+		difficulty: row.difficulty as number,
+		reps: row.reps as number,
+		lapses: row.lapses as number,
+		learningStep: row.learning_step as number,
+		relearningStep: row.relearning_step as number,
+		lastReview: (row.last_review as number) || null,
+		get lastPracticedHuman(): string {
+			if (cachedLastPracticed === undefined) {
+				cachedLastPracticed = row.last_review
+					? humanizeRelative(row.last_review as number)
+					: 'Never';
+			}
+			return cachedLastPracticed;
+		},
+		set lastPracticedHuman(val: string) {
+			cachedLastPracticed = val;
+		},
+	};
+}
+
 export function getDueCards(
 	db: Database,
 	filterTags?: string[],
@@ -32,14 +104,14 @@ export function getDueCards(
 
 	while (stmt.step()) {
 		const row = stmt.getAsObject();
-		const tags = ((row.tags as string) || '').split(' ').filter(Boolean);
+		const rawTags = row.tags as string;
+		const tags = rawTags ? rawTags.split(' ').filter(Boolean) : [];
 
 		if (filterTags && filterTags.length > 0) {
 			if (!matchCardTags(tags, filterTags)) continue;
 		}
 
 		const filePath = row.file_path as string;
-		const noteTitle = filePath.split('/').pop()?.replace(/\.md$/, '') || filePath;
 		const direction = (row.direction as 'forward' | 'reverse' | null) ?? null;
 		const blockType = row.block_type as CardBlockType;
 		const reversible = (row.reversible as number) === 1;
@@ -51,30 +123,9 @@ export function getDueCards(
 			back = row.front as string;
 		}
 
-		items.push({
-			cardId: row.card_id as number,
-			blockId: row.block_id as string,
-			noteTitle,
-			notePath: filePath,
-			direction,
-			blockType,
-			reversible,
-			front,
-			back,
-			tags,
-			state: mapState(row.state as number),
-			stateNum: row.state as number,
-			dueAt: row.due_at as number,
-			dueHuman: humanizeDue(row.due_at as number),
-			stability: row.stability as number,
-			difficulty: row.difficulty as number,
-			reps: row.reps as number,
-			lapses: row.lapses as number,
-			learningStep: row.learning_step as number,
-			relearningStep: row.relearning_step as number,
-			lastReview: (row.last_review as number) || null,
-			lastPracticedHuman: row.last_review ? humanizeRelative(row.last_review as number) : 'Never',
-		});
+		items.push(
+			createReviewItem(row, filePath, direction, blockType, reversible, front, back, tags),
+		);
 	}
 	stmt.free();
 
@@ -157,9 +208,9 @@ export function getAllCards(db: Database): ReviewItem[] {
 	const stmt = db.prepare(query);
 	while (stmt.step()) {
 		const row = stmt.getAsObject();
-		const tags = ((row.tags as string) || '').split(' ').filter(Boolean);
+		const rawTags = row.tags as string;
+		const tags = rawTags ? rawTags.split(' ').filter(Boolean) : [];
 		const filePath = row.file_path as string;
-		const noteTitle = filePath.split('/').pop()?.replace(/\.md$/, '') || filePath;
 		const direction = (row.direction as 'forward' | 'reverse' | null) ?? null;
 		const blockType = row.block_type as CardBlockType;
 		const reversible = (row.reversible as number) === 1;
@@ -171,30 +222,9 @@ export function getAllCards(db: Database): ReviewItem[] {
 			back = row.front as string;
 		}
 
-		items.push({
-			cardId: row.card_id as number,
-			blockId: row.block_id as string,
-			noteTitle,
-			notePath: filePath,
-			direction,
-			blockType,
-			reversible,
-			front,
-			back,
-			tags,
-			state: mapState(row.state as number),
-			stateNum: row.state as number,
-			dueAt: row.due_at as number,
-			dueHuman: humanizeDue(row.due_at as number),
-			stability: row.stability as number,
-			difficulty: row.difficulty as number,
-			reps: row.reps as number,
-			lapses: row.lapses as number,
-			learningStep: row.learning_step as number,
-			relearningStep: row.relearning_step as number,
-			lastReview: (row.last_review as number) || null,
-			lastPracticedHuman: row.last_review ? humanizeRelative(row.last_review as number) : 'Never',
-		});
+		items.push(
+			createReviewItem(row, filePath, direction, blockType, reversible, front, back, tags),
+		);
 	}
 	stmt.free();
 	return items;
@@ -202,11 +232,16 @@ export function getAllCards(db: Database): ReviewItem[] {
 
 export function getUniqueTags(db: Database): string[] {
 	const tagsSet = new Set<string>();
-	const stmt = db.prepare('SELECT tags FROM blocks');
+	const stmt = db.prepare("SELECT tags FROM blocks WHERE tags != '' AND tags IS NOT NULL");
 	while (stmt.step()) {
-		const row = stmt.getAsObject();
-		const tags = ((row.tags as string) || '').split(' ').filter(Boolean);
-		for (const t of tags) tagsSet.add(t);
+		const rawTags = stmt.getAsObject().tags as string;
+		if (rawTags) {
+			const tags = rawTags.split(' ');
+			for (let i = 0; i < tags.length; i++) {
+				const t = tags[i]!.trim();
+				if (t) tagsSet.add(t);
+			}
+		}
 	}
 	stmt.free();
 	return Array.from(tagsSet).sort();

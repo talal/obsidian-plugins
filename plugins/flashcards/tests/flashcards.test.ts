@@ -3395,6 +3395,77 @@ Mitochondria
 			cards = db.getAllCards();
 			expect(cards[0]!.tags).toContain('card/leech');
 		});
+
+		it('matches Anki lapse lifecycle (relearning preserves lapses, graduating and failing increments)', () => {
+			let currentCard: SchedulingCard = {
+				state: 'review',
+				lapses: 0,
+				stability: 4.0,
+				difficulty: 3.0,
+				reps: 2,
+				learning_step: 0,
+				relearning_step: 0,
+				last_review: Date.now() - 86400000 * 4,
+				due: Date.now(),
+			};
+
+			const params: FsrsParams = {
+				request_retention: 0.9,
+				maximum_interval: 36500,
+				learning_steps: [600000],
+				relearning_steps: [600000],
+			};
+
+			// 1st failure on review card -> moves to Relearning, lapses = 1
+			let res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
+			let againCandidate = res.next_states.find((s) => s.rating === 'again')!;
+			expect(againCandidate.card.state).toBe('relearning');
+			expect(againCandidate.card.lapses).toBe(1);
+
+			// Failure while in Relearning does NOT increment lapses (remains in same lapse episode)
+			currentCard = againCandidate.card;
+			res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
+			againCandidate = res.next_states.find((s) => s.rating === 'again')!;
+			expect(againCandidate.card.state).toBe('relearning');
+			expect(againCandidate.card.lapses).toBe(1);
+
+			// Graduate out of Relearning with Good -> back to Review
+			let goodCandidate = res.next_states.find((s) => s.rating === 'good')!;
+			expect(goodCandidate.card.state).toBe('review');
+			expect(goodCandidate.card.lapses).toBe(1);
+
+			// 2nd failure in Review state -> lapses = 2
+			currentCard = goodCandidate.card;
+			res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
+			againCandidate = res.next_states.find((s) => s.rating === 'again')!;
+			expect(againCandidate.card.state).toBe('relearning');
+			expect(againCandidate.card.lapses).toBe(2);
+
+			// Graduate again with Good (lapses remain 2)
+			let gradRes = WasmBridge.calculateSchedule(againCandidate.card, params, Date.now());
+			goodCandidate = gradRes.next_states.find((s) => s.rating === 'good')!;
+			expect(goodCandidate.card.state).toBe('review');
+			expect(goodCandidate.card.lapses).toBe(2);
+
+			// Fail 3rd time in Review state -> lapses = 3
+			let failRes = WasmBridge.calculateSchedule(goodCandidate.card, params, Date.now());
+			againCandidate = failRes.next_states.find((s) => s.rating === 'again')!;
+			expect(againCandidate.card.state).toBe('relearning');
+			expect(againCandidate.card.lapses).toBe(3);
+
+			// Graduate again with Good (lapses remain 3)
+			gradRes = WasmBridge.calculateSchedule(againCandidate.card, params, Date.now());
+			goodCandidate = gradRes.next_states.find((s) => s.rating === 'good')!;
+			expect(goodCandidate.card.state).toBe('review');
+			expect(goodCandidate.card.lapses).toBe(3);
+
+			// Fail 4th time in Review state -> lapses = 4 -> leech threshold met!
+			failRes = WasmBridge.calculateSchedule(goodCandidate.card, params, Date.now());
+			againCandidate = failRes.next_states.find((s) => s.rating === 'again')!;
+			expect(againCandidate.card.state).toBe('relearning');
+			expect(againCandidate.card.lapses).toBe(4);
+			expect(isLeechThresholdMet(againCandidate.card.lapses, 4)).toBe(true);
+		});
 	});
 
 	describe('Review Findings Regression & Correctness Invariants', () => {
@@ -4586,6 +4657,230 @@ Mitochondria
 			} finally {
 				rawDb.prepare = originalPrepare;
 			}
+		});
+	});
+
+	describe('Batch 4: Read-Side, Aggregation, and Presentation Optimizations', () => {
+		it('lazily computes and caches derived presentation fields on ReviewItem', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			dbManager.syncNoteBlocks('Folder/Subfolder/Cardiology Note.md', [
+				{
+					id: 'card01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Question',
+					back: 'Answer',
+					tags: ['heart'],
+					line_start: 1,
+					line_end: 1,
+				},
+			]);
+
+			const cards = dbManager.getAllCards();
+			expect(cards).toHaveLength(1);
+			const item = cards[0]!;
+
+			// Verify noteTitle lazy evaluation
+			expect(item.noteTitle).toBe('Cardiology Note');
+			// Setter support
+			item.noteTitle = 'Overridden Title';
+			expect(item.noteTitle).toBe('Overridden Title');
+
+			// Verify dueHuman and lastPracticedHuman formatting
+			expect(item.dueHuman).toBeDefined();
+			expect(item.lastPracticedHuman).toBe('Never');
+
+			// Custom setter for UI updates
+			item.dueHuman = 'Due in 2 days';
+			expect(item.dueHuman).toBe('Due in 2 days');
+			item.lastPracticedHuman = 'Just now';
+			expect(item.lastPracticedHuman).toBe('Just now');
+		});
+
+		it('computes dashboard aggregate stats accurately via single SQLite query', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			// Add 4 valid blocks (1 new, 1 due review, 1 future review, 1 new cloze)
+			dbManager.syncNoteBlocks('StatsNote.md', [
+				{
+					id: 'new01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'New Q',
+					back: 'New A',
+					tags: [],
+					line_start: 1,
+					line_end: 1,
+				},
+				{
+					id: 'revDue',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Due Review Q',
+					back: 'Due Review A',
+					tags: [],
+					line_start: 2,
+					line_end: 2,
+				},
+				{
+					id: 'revFuture',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Future Review Q',
+					back: 'Future Review A',
+					tags: [],
+					line_start: 3,
+					line_end: 3,
+				},
+				{
+					id: 'newCloze',
+					block_type: 'cloze',
+					reversible: false,
+					front: '==New Cloze==',
+					back: '',
+					tags: [],
+					line_start: 4,
+					line_end: 4,
+				},
+			]);
+
+			const cards = dbManager.getAllCards();
+			const revDueCard = cards.find((c) => c.blockId === 'revDue')!;
+			const revFutureCard = cards.find((c) => c.blockId === 'revFuture')!;
+
+			// Commit reviews to set one due today and one due next week
+			const now = Date.now();
+			await dbManager.commitSession(
+				{
+					started_at: now - 5000,
+					ended_at: now,
+					card_count: 2,
+					forgot_count: 0,
+					remembered_count: 2,
+				},
+				[
+					{
+						card_id: revDueCard.cardId,
+						rating: 3,
+						state: 2,
+						due_at: now - 1000, // Due in the past (due today)
+						stability: 2.0,
+						difficulty: 2.0,
+						reviewed_at: now,
+					},
+					{
+						card_id: revFutureCard.cardId,
+						rating: 3,
+						state: 2,
+						due_at: now + 7 * 86400000, // Due in 7 days
+						stability: 10.0,
+						difficulty: 2.0,
+						reviewed_at: now,
+					},
+				],
+				[
+					{
+						id: revDueCard.cardId,
+						state: 2,
+						due_at: now - 1000,
+						stability: 2.0,
+						difficulty: 2.0,
+						reps: 1,
+						lapses: 0,
+						last_review: now,
+						learning_step: 0,
+						relearning_step: 0,
+					},
+					{
+						id: revFutureCard.cardId,
+						state: 2,
+						due_at: now + 7 * 86400000,
+						stability: 10.0,
+						difficulty: 2.0,
+						reps: 1,
+						lapses: 0,
+						last_review: now,
+						learning_step: 0,
+						relearning_step: 0,
+					},
+				],
+			);
+
+			// Add an orphaned card not associated with any block to verify it is excluded from stats
+			rawDb.run('PRAGMA foreign_keys = OFF;');
+			rawDb.run(
+				`INSERT INTO cards (id, block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
+				 VALUES (99999, 'orphan_block', 'forward', 0, 0, 0.0, 0.0, 0, 0, NULL, 0, 0)`,
+			);
+			rawDb.run('PRAGMA foreign_keys = ON;');
+
+			const stats = dbManager.getDashboardStats();
+			expect(stats.totalCards).toBe(4); // Only valid blocks (excludes orphan 99999)
+			expect(stats.newCards).toBe(2); // new01 + newCloze
+			expect(stats.dueToday).toBe(3); // 2 new cards (due now) + 1 overdue review (revDue)
+			expect(stats.studiedToday).toBe(2);
+			expect(stats.dailyRetention).toBe(100);
+			expect(stats.studyStreak).toBeGreaterThanOrEqual(1);
+		});
+
+		it('computes tag deck stats and unique tags efficiently', async () => {
+			const SQL = await initSqlJs();
+			const rawDb = new SQL.Database();
+			const dbManager = DatabaseManager.createInMemory(rawDb);
+
+			dbManager.syncNoteBlocks('Tags.md', [
+				{
+					id: 't01',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Q1',
+					back: 'A1',
+					tags: ['biology/cells', 'science'],
+					line_start: 1,
+					line_end: 1,
+				},
+				{
+					id: 't02',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Q2',
+					back: 'A2',
+					tags: ['biology/genetics', 'science'],
+					line_start: 2,
+					line_end: 2,
+				},
+				{
+					id: 't03',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Q3',
+					back: 'A3',
+					tags: [], // Empty tags should be skipped in getUniqueTags
+					line_start: 3,
+					line_end: 3,
+				},
+			]);
+
+			// Unique tags
+			const uniqueTags = dbManager.getUniqueTags();
+			expect(uniqueTags).toEqual(['biology/cells', 'biology/genetics', 'science']);
+
+			// Tag deck stats
+			const { computeTagDeckStats } = await import('../src/utils/tagStats.ts');
+			const allCards = dbManager.getAllCards();
+			const deckStats = computeTagDeckStats(allCards, Date.now() + 1000);
+
+			expect(deckStats).toHaveLength(3);
+			const scienceDeck = deckStats.find((d) => d.tag === 'science');
+			expect(scienceDeck).toBeDefined();
+			expect(scienceDeck!.total).toBe(2);
+			expect(scienceDeck!.due).toBe(2);
+			expect(scienceDeck!.newCards).toBe(2);
 		});
 	});
 });

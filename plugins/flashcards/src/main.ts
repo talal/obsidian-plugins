@@ -34,7 +34,7 @@ export default class FlashcardsPlugin extends Plugin {
 			await WasmBridge.initialize(this.app, this.manifest);
 		} catch (err) {
 			console.error('Failed to initialize Flashcards WASM modules:', err);
-			new Notice('❌ Failed to initialize Flashcards WASM modules.');
+			new Notice('Failed to initialize Flashcards WASM modules.');
 			return;
 		}
 
@@ -44,7 +44,7 @@ export default class FlashcardsPlugin extends Plugin {
 			this.scanner = new NoteScanner(this.app, this.db);
 		} catch (err) {
 			console.error('Failed to initialize Flashcards SQLite database:', err);
-			new Notice('❌ Failed to initialize Flashcards SQLite database.');
+			new Notice('Failed to initialize Flashcards SQLite database.');
 			return;
 		}
 
@@ -99,7 +99,7 @@ export default class FlashcardsPlugin extends Plugin {
 				const queue = dueCards.length > 0 ? dueCards : this.db.getAllCards();
 
 				if (queue.length === 0) {
-					new Notice('🎉 No flashcards found in your vault. Run "Sync" first!');
+					new Notice('No flashcards found in your vault. Run "Sync" first!');
 					return;
 				}
 
@@ -155,7 +155,7 @@ export default class FlashcardsPlugin extends Plugin {
 			callback: async () => {
 				const logs = this.getReviewLogs();
 				if (logs.length < 8) {
-					new Notice('⚠️ Need at least 8 review logs to optimize FSRS weights.');
+					new Notice('Need at least 8 review logs to optimize FSRS weights.');
 					return;
 				}
 				try {
@@ -181,10 +181,10 @@ export default class FlashcardsPlugin extends Plugin {
 					const optimized = WasmBridge.optimizeFsrsWeights(params, logs);
 					this.settings.customWeights = optimized.map((n) => n.toFixed(5)).join(', ');
 					await this.saveSettings();
-					new Notice(`🧠 FSRS-6 weights optimized successfully from ${logs.length} review logs!`);
+					new Notice(`FSRS-6 weights optimized successfully from ${logs.length} review logs!`);
 				} catch (err) {
 					console.error('Failed to optimize FSRS weights:', err);
-					new Notice('❌ Failed to optimize FSRS weights.');
+					new Notice('Failed to optimize FSRS weights.');
 				}
 			},
 		});
@@ -194,14 +194,14 @@ export default class FlashcardsPlugin extends Plugin {
 			id: 'optimize-database',
 			name: 'Optimize database',
 			callback: async () => {
-				new Notice('🧹 Running database health check & optimization...');
+				new Notice('Running database health check & optimization...');
 				const files = this.app.vault.getMarkdownFiles();
 				const validPaths = new Set(files.map((f) => f.path));
 				const res = await this.db.optimizeDatabase(validPaths);
 				if (!res.integrityOk) {
-					new Notice('⚠️ Database integrity check reported warnings.');
+					new Notice('Database integrity check reported warnings.');
 				} else {
-					new Notice(`✨ Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
+					new Notice(`Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
 				}
 				this.refreshDashboardIfOpen();
 			},
@@ -213,7 +213,7 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	public async syncVault(force = false): Promise<void> {
-		new Notice('🔍 Syncing flashcards across vault...');
+		new Notice('Syncing flashcards across vault...');
 		try {
 			const res = await this.scanner.fullScan(undefined, { force });
 			const failureNotice =
@@ -222,12 +222,12 @@ export default class FlashcardsPlugin extends Plugin {
 					: '';
 			const skipNotice = res.filesSkipped > 0 ? ` (${res.filesSkipped} unchanged skipped)` : '';
 			new Notice(
-				`⚡ Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes scanned${skipNotice}${failureNotice}.`,
+				`Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes scanned${skipNotice}${failureNotice}.`,
 			);
 			this.refreshDashboardIfOpen();
 		} catch (error) {
 			console.error('[Flashcards] Vault sync encountered an error:', error);
-			new Notice('❌ Vault sync encountered an error. See developer console.');
+			new Notice('Vault sync encountered an error. See developer console.');
 		}
 	}
 
