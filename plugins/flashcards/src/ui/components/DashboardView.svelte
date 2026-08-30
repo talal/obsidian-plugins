@@ -166,7 +166,8 @@
 					</tr>
 				{:else}
 					{#each filteredItems as item (item.blockId)}
-						<tr onclick={() => onOpenCard?.(item.forward ?? item.reverse)}>
+						{@const activeCard = item.forward ?? item.reverse}
+						<tr onclick={() => { if (activeCard) onOpenCard?.(activeCard); }}>
 							<td class="fc-cell-note">
 								<span class="fc-note-link" title={item.notePath} dir="auto">{item.noteTitle}</span>
 							</td>

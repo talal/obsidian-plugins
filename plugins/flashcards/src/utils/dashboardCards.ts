@@ -10,7 +10,7 @@ export interface DashboardBlockItem {
 	front: string;
 	back: string;
 	tags: string[];
-	forward: ReviewItem;
+	forward?: ReviewItem;
 	reverse?: ReviewItem;
 }
 
@@ -34,7 +34,7 @@ export function groupCardsByBlock(items: ReviewItem[]): DashboardBlockItem[] {
 				front: isRev ? card.back : card.front,
 				back: isRev ? card.front : card.back,
 				tags: card.tags,
-				forward: isRev ? undefined! : card,
+				forward: isRev ? undefined : card,
 				reverse: isRev ? card : undefined,
 			};
 			map.set(card.blockId, item);

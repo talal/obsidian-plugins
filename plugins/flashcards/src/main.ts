@@ -3,13 +3,7 @@ import { type Editor, Notice, Plugin, TFile } from 'obsidian';
 import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
 import { FlashcardsSettingTab } from './settings.js';
-import {
-	DEFAULT_MAXIMUM_INTERVAL,
-	DEFAULT_REQUEST_RETENTION,
-	type FlashcardsPluginSettings,
-	type FsrsParams,
-	type ReviewLogEntry,
-} from './types.js';
+import { type FlashcardsPluginSettings, type ReviewLogEntry } from './types.js';
 import { DashboardView, FLASHCARDS_DASHBOARD_VIEW_TYPE } from './ui/DashboardView.js';
 import { ReviewModal } from './ui/ReviewModal.js';
 import { TagPickerModal } from './ui/TagPickerModal.js';
@@ -148,48 +142,7 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 6: Optimize FSRS weights
-		this.addCommand({
-			id: 'optimize-fsrs-weights',
-			name: 'Optimize FSRS weights',
-			callback: async () => {
-				const logs = this.getReviewLogs();
-				if (logs.length < 8) {
-					new Notice('Need at least 8 review logs to optimize FSRS weights.');
-					return;
-				}
-				try {
-					const rawWeights = this.settings.customWeights
-						? this.settings.customWeights
-								.split(',')
-								.map((s) => parseFloat(s.trim()))
-								.filter((n) => !isNaN(n))
-						: undefined;
-
-					const validWeights = rawWeights && rawWeights.length === 21 ? rawWeights : undefined;
-
-					const params: FsrsParams = {
-						request_retention: this.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
-						maximum_interval: this.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
-						weights: validWeights,
-						learning_steps: parseStudySteps(this.settings.learningSteps, DEFAULT_LEARNING_STEPS),
-						relearning_steps: parseStudySteps(
-							this.settings.relearningSteps,
-							DEFAULT_RELEARNING_STEPS,
-						),
-					};
-					const optimized = WasmBridge.optimizeFsrsWeights(params, logs);
-					this.settings.customWeights = optimized.map((n) => n.toFixed(5)).join(', ');
-					await this.saveSettings();
-					new Notice(`FSRS-6 weights optimized successfully from ${logs.length} review logs!`);
-				} catch (err) {
-					console.error('Failed to optimize FSRS weights:', err);
-					new Notice('Failed to optimize FSRS weights.');
-				}
-			},
-		});
-
-		// Command 7: Optimize database
+		// Command 6: Optimize database
 		this.addCommand({
 			id: 'optimize-database',
 			name: 'Optimize database',

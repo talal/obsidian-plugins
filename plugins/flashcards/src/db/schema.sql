@@ -99,4 +99,3 @@ CREATE INDEX IF NOT EXISTS idx_cards_due_at ON cards(due_at);
 CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_time ON reviews(reviewed_at);
-CREATE INDEX IF NOT EXISTS idx_file_sync_state_path ON file_sync_state(file_path);

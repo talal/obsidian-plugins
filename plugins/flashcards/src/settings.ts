@@ -1,12 +1,7 @@
 import { type App, Notice, PluginSettingTab, Setting } from 'obsidian';
 
 import type FlashcardsPlugin from './main.js';
-import { DEFAULT_MAXIMUM_INTERVAL, DEFAULT_REQUEST_RETENTION, type FsrsParams } from './types.js';
-import {
-	DEFAULT_LEARNING_STEPS,
-	DEFAULT_RELEARNING_STEPS,
-	parseStudySteps,
-} from './utils/studySteps.js';
+import { buildFsrsParams } from './utils/fsrsParams.js';
 import { WasmBridge } from './wasm.js';
 
 export class FlashcardsSettingTab extends PluginSettingTab {
@@ -223,25 +218,7 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 
 	private async optimizeWeights(): Promise<void> {
 		try {
-			const rawWeights = this.plugin.settings.customWeights
-				? this.plugin.settings.customWeights
-						.split(',')
-						.map((s) => parseFloat(s.trim()))
-						.filter((n) => !isNaN(n))
-				: undefined;
-
-			const validWeights = rawWeights && rawWeights.length === 21 ? rawWeights : undefined;
-
-			const params: FsrsParams = {
-				request_retention: this.plugin.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
-				maximum_interval: this.plugin.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
-				weights: validWeights,
-				learning_steps: parseStudySteps(this.plugin.settings.learningSteps, DEFAULT_LEARNING_STEPS),
-				relearning_steps: parseStudySteps(
-					this.plugin.settings.relearningSteps,
-					DEFAULT_RELEARNING_STEPS,
-				),
-			};
+			const params = buildFsrsParams(this.plugin.settings);
 
 			// Query review logs
 			const logs = this.plugin.getReviewLogs();

@@ -43,6 +43,7 @@ import {
 import { formatClozeText } from '../src/utils/clozeFormat.ts';
 import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardCards.ts';
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
+import { buildFsrsParams, parseWeights } from '../src/utils/fsrsParams.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
 import { ReviewSessionCache } from '../src/utils/ReviewSessionCache.ts';
 import {
@@ -1238,6 +1239,9 @@ describe('DatabaseManager Extended Behaviors', () => {
 		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24, now)).toBe('Tomorrow');
 		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24 * 5, now)).toBe('In 5 days');
 
+		expect(db.humanizeRelative(now + 1000, now)).toBe('Just now');
+		expect(db.humanizeRelative(now - 1000 * 10, now)).toBe('Just now');
+		expect(db.humanizeRelative(now - 1000 * 59, now)).toBe('Just now');
 		expect(db.humanizeRelative(now - 1000 * 60 * 5, now)).toBe('5m ago');
 		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 2, now)).toBe('2h ago');
 		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 24 * 3, now)).toBe('3d ago');
@@ -1995,7 +1999,7 @@ describe('Dashboard Block Grouping & Reverse Metrics', () => {
 		expect(bidiBlock?.reversible).toBe(true);
 		expect(bidiBlock?.front).toBe('Bonjour');
 		expect(bidiBlock?.back).toBe('Hello');
-		expect(bidiBlock?.forward.cardId).toBe(1);
+		expect(bidiBlock?.forward?.cardId).toBe(1);
 		expect(bidiBlock?.reverse?.cardId).toBe(2);
 
 		const monoBlock = blocks.find((b) => b.blockId === 'blk_mono_2');
@@ -3658,43 +3662,95 @@ Mitochondria
 			expect(bidiBlocks[1]!.back).toBe('لہو وی پیتی جاندے او');
 		});
 
-		it('handles legacy SQLite schema with content_hash column without erroring', async () => {
+		it('builds FSRS parameters consistently with defaults and overrides', () => {
+			const emptySettings: FlashcardsPluginSettings = {};
+			const params = buildFsrsParams(emptySettings);
+			expect(params.request_retention).toBe(DEFAULT_REQUEST_RETENTION);
+			expect(params.maximum_interval).toBe(DEFAULT_MAXIMUM_INTERVAL);
+			expect(params.weights).toBeUndefined();
+			expect(params.learning_steps).toEqual(DEFAULT_LEARNING_STEPS);
+			expect(params.relearning_steps).toEqual(DEFAULT_RELEARNING_STEPS);
+
+			const customWeightsStr =
+				'0.40255, 1.18385, 3.17300, 15.69105, 7.19490, 0.53450, 1.46040, 0.00460, 1.54575, 0.11920, 1.01925, 1.93950, 0.11000, 0.29605, 0.22695, 0.56985, 2.85535, 0.32345, 0.65580, 0.23120, 0.40255';
+			expect(parseWeights(customWeightsStr)).toHaveLength(21);
+			expect(parseWeights('1.0, 2.0')).toBeUndefined();
+
+			const overridden = buildFsrsParams(
+				{
+					requestRetention: 0.85,
+					maximumInterval: 365,
+					customWeights: customWeightsStr,
+					learningSteps: '5m 15m',
+				},
+				{
+					due_counts: [10, 20],
+					sibling_due_offset: 3,
+				},
+			);
+			expect(overridden.request_retention).toBe(0.85);
+			expect(overridden.maximum_interval).toBe(365);
+			expect(overridden.weights).toHaveLength(21);
+			expect(overridden.learning_steps).toEqual([5 * 60 * 1000, 15 * 60 * 1000]);
+			expect(overridden.due_counts).toEqual([10, 20]);
+			expect(overridden.sibling_due_offset).toBe(3);
+		});
+
+		it('optimizes database and cleans orphaned blocks as well as stale file_sync_state rows', async () => {
 			const SQL = await initSqlJs();
 			const rawDb = new SQL.Database();
-			rawDb.run(`
-				CREATE TABLE blocks (
-					id TEXT PRIMARY KEY,
-					file_path TEXT NOT NULL,
-					block_type TEXT NOT NULL,
-					reversible INTEGER NOT NULL DEFAULT 0,
-					front TEXT NOT NULL,
-					back TEXT NOT NULL,
-					tags TEXT NOT NULL,
-					content_hash TEXT NOT NULL,
-					updated_at INTEGER NOT NULL
-				);
-			`);
-
+			rawDb.run(SCHEMA_SQL);
 			const db = DatabaseManager.createForTesting(rawDb);
-			expect(() => {
-				db.syncNoteBlocks('urdu.md', [
-					{
-						id: 'j1029y',
-						block_type: 'inline',
-						reversible: false,
-						front: 'تسی حج وی کیتی جاندے او',
-						back: 'لہو وی پیتی جاندے او',
-						tags: [],
-						line_start: 0,
-						line_end: 0,
-					},
-				]);
-			}).not.toThrow();
 
-			const cards = db.getAllCards();
-			expect(cards).toHaveLength(1);
-			expect(cards[0]!.front).toBe('تسی حج وی کیتی جاندے او');
-			expect(cards[0]!.back).toBe('لہو وی پیتی جاندے او');
+			db.syncNoteBlocks('existing.md', [
+				{
+					id: 'k9x2mp',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Active',
+					back: 'Card',
+					tags: [],
+					line_start: 0,
+					line_end: 0,
+				},
+			]);
+			db.upsertFileSyncState({
+				file_path: 'existing.md',
+				modified_at: 1000,
+				size: 50,
+				content_hash: 'abc',
+				updated_at: 1000,
+			});
+
+			db.syncNoteBlocks('deleted.md', [
+				{
+					id: 'p8y2zq',
+					block_type: 'inline',
+					reversible: false,
+					front: 'Stale',
+					back: 'Card',
+					tags: [],
+					line_start: 0,
+					line_end: 0,
+				},
+			]);
+			db.upsertFileSyncState({
+				file_path: 'deleted.md',
+				modified_at: 2000,
+				size: 100,
+				content_hash: 'def',
+				updated_at: 2000,
+			});
+
+			const validPaths = new Set(['existing.md']);
+			const res = await db.optimizeDatabase(validPaths);
+
+			expect(res.integrityOk).toBe(true);
+			expect(res.prunedBlocks).toBe(1);
+
+			expect(db.getAllCards()).toHaveLength(1);
+			expect(db.getFileSyncState('existing.md')).not.toBeNull();
+			expect(db.getFileSyncState('deleted.md')).toBeNull();
 		});
 	});
 

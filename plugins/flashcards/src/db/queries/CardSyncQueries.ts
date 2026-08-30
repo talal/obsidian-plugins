@@ -383,18 +383,40 @@ export function optimizeDatabase(
 	let prunedBlocks = 0;
 	if (validFilePaths) {
 		const stmt = db.prepare('SELECT id, file_path FROM blocks');
-		const toDelete: string[] = [];
+		const toDeleteBlocks: string[] = [];
 		while (stmt.step()) {
 			const row = stmt.getAsObject();
 			if (!validFilePaths.has(row.file_path as string)) {
-				toDelete.push(row.id as string);
+				toDeleteBlocks.push(row.id as string);
 			}
 		}
 		stmt.free();
 
-		for (const id of toDelete) {
-			db.run('DELETE FROM blocks WHERE id = ?', [id]);
-			prunedBlocks++;
+		const stmtFiles = db.prepare('SELECT file_path FROM file_sync_state');
+		const toDeleteFiles: string[] = [];
+		while (stmtFiles.step()) {
+			const path = stmtFiles.getAsObject().file_path as string;
+			if (!validFilePaths.has(path)) {
+				toDeleteFiles.push(path);
+			}
+		}
+		stmtFiles.free();
+
+		if (toDeleteBlocks.length > 0 || toDeleteFiles.length > 0) {
+			db.run('BEGIN TRANSACTION');
+			try {
+				for (const id of toDeleteBlocks) {
+					db.run('DELETE FROM blocks WHERE id = ?', [id]);
+					prunedBlocks++;
+				}
+				for (const path of toDeleteFiles) {
+					db.run('DELETE FROM file_sync_state WHERE file_path = ?', [path]);
+				}
+				db.run('COMMIT');
+			} catch (error) {
+				db.run('ROLLBACK');
+				throw error;
+			}
 		}
 	}
 

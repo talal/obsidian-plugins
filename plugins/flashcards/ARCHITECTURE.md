@@ -520,7 +520,6 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 | **`Flashcards: Open dashboard`** | Global | Opens the Flashcards Inventory & Scheduling dashboard tab. |
 | **`Flashcards: Sync`** | Global | Scans all notes across the vault, auto-assigns missing IDs, and saves snapshot. |
 | **`Flashcards: Insert card block`** | Editor | Inserts clean `%% card-start %%\n\n...\n\n%% card-end %%` template at cursor. |
-| **`Flashcards: Optimize FSRS weights`** | Global | Runs FSRS-6 optimizer over `reviews`, updates custom weights in settings. |
 | **`Flashcards: Optimize database`** | Global | Runs `PRAGMA integrity_check`, deletes orphaned rows, executes `VACUUM`. |
 
 ---

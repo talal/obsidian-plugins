@@ -37,7 +37,7 @@ export function humanizeDue(dueMs: number, now = Date.now()): string {
 
 export function humanizeRelative(ms: number, now = Date.now()): string {
 	const diff = now - ms;
-	if (diff < 0) return 'Just now';
+	if (diff < 60 * 1000) return 'Just now';
 	const mins = Math.floor(diff / (1000 * 60));
 	if (mins < 60) return `${mins}m ago`;
 	const hours = Math.floor(mins / 60);

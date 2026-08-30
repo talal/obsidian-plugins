@@ -2,25 +2,14 @@ import { App, Modal, TFile } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
-import {
-	DEFAULT_LEECH_TAG,
-	DEFAULT_MAXIMUM_INTERVAL,
-	DEFAULT_REQUEST_RETENTION,
-	type FsrsParams,
-	type ReviewItem,
-	type SchedulingCard,
-} from '../types.js';
+import { DEFAULT_LEECH_TAG, type ReviewItem, type SchedulingCard } from '../types.js';
 import {
 	addCardLeechTagInMarkdown,
 	isLeechThresholdMet,
 	toggleCardTodoInMarkdown,
 } from '../utils/cardTagModifier.js';
+import { buildFsrsParams } from '../utils/fsrsParams.js';
 import { ReviewSessionCache } from '../utils/ReviewSessionCache.js';
-import {
-	DEFAULT_LEARNING_STEPS,
-	DEFAULT_RELEARNING_STEPS,
-	parseStudySteps,
-} from '../utils/studySteps.js';
 import { WasmBridge } from '../wasm.js';
 import ReviewModalComponent from './components/ReviewModal.svelte';
 
@@ -75,12 +64,6 @@ export class ReviewModal extends Modal {
 		ratingStr: 'forgot' | 'remembered',
 	): { isLeech?: boolean } {
 		const previousCard = this.toSchedulingCard(item);
-		const rawWeights = this.plugin.settings.customWeights
-			? this.plugin.settings.customWeights
-					.split(',')
-					.map((s) => parseFloat(s.trim()))
-					.filter((n) => !isNaN(n))
-			: undefined;
 		const now = Date.now();
 		const rolloverHour = this.plugin.settings.rolloverHour ?? 4;
 		const dueCounts = this.plugin.db.getUpcomingDueCounts(90, now, rolloverHour);
@@ -90,18 +73,10 @@ export class ReviewModal extends Modal {
 			siblingDueOffset = Math.max(0, Math.round((sibling.due_at - now) / 86400000));
 		}
 
-		const params: FsrsParams = {
-			request_retention: this.plugin.settings.requestRetention ?? DEFAULT_REQUEST_RETENTION,
-			maximum_interval: this.plugin.settings.maximumInterval ?? DEFAULT_MAXIMUM_INTERVAL,
-			weights: rawWeights && rawWeights.length === 21 ? rawWeights : undefined,
-			learning_steps: parseStudySteps(this.plugin.settings.learningSteps, DEFAULT_LEARNING_STEPS),
-			relearning_steps: parseStudySteps(
-				this.plugin.settings.relearningSteps,
-				DEFAULT_RELEARNING_STEPS,
-			),
+		const params = buildFsrsParams(this.plugin.settings, {
 			due_counts: dueCounts,
 			sibling_due_offset: siblingDueOffset,
-		};
+		});
 
 		const info = WasmBridge.calculateSchedule(previousCard, params, now);
 		const targetRating = ratingStr === 'forgot' ? 'again' : 'good';
