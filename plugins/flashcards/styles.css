@@ -369,7 +369,9 @@
 
 .fc-sub-icon {
 	color: var(--text-faint);
-	font-size: var(--font-ui-smallest);
+	--icon-size: var(--icon-xs);
+	display: inline-flex;
+	align-items: center;
 	user-select: none;
 }
 
@@ -806,6 +808,12 @@
 
 .fc-completion-icon {
 	margin-bottom: 16px;
+	color: var(--interactive-accent);
+	--icon-size: 48px;
+	--icon-stroke: 1.75px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 }
 
 .fc-completion-card h2 {

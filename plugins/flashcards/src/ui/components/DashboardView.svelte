@@ -101,7 +101,7 @@
 			</div>
 			<div class="fc-stat-divider"></div>
 			<div class="fc-stat-item">
-				<span class="fc-stat-number">🔥 {stats.studyStreak}d</span>
+				<span class="fc-stat-number">{stats.studyStreak}d</span>
 				<span class="fc-stat-label">Streak</span>
 			</div>
 			<div class="fc-stat-divider"></div>
@@ -194,7 +194,7 @@
 										<span class="fc-due-badge" class:fc-due-now={item.reverse.dueAt <= dueCutoff}>
 											{item.reverse.dueHuman}
 										</span>
-										<span class="fc-sub-icon">⇄</span>
+										<span class="fc-sub-icon" use:icon={'arrow-right-left'}></span>
 									</div>
 								{/if}
 							</td>
@@ -203,7 +203,7 @@
 								{#if item.reverse}
 									<div class="fc-metric-sub">
 										<span>{item.reverse.reps}</span>
-										<span class="fc-sub-icon">⇄</span>
+										<span class="fc-sub-icon" use:icon={'arrow-right-left'}></span>
 									</div>
 								{/if}
 							</td>
@@ -212,7 +212,7 @@
 								{#if item.reverse}
 									<div class="fc-metric-sub" dir="auto">
 										<span>{item.reverse.lastPracticedHuman}</span>
-										<span class="fc-sub-icon">⇄</span>
+										<span class="fc-sub-icon" use:icon={'arrow-right-left'}></span>
 									</div>
 								{/if}
 							</td>
