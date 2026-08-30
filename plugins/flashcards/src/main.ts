@@ -1,4 +1,4 @@
-import { type Editor, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+import { type Editor, Notice, Plugin, TFile } from 'obsidian';
 
 import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
@@ -99,7 +99,7 @@ export default class FlashcardsPlugin extends Plugin {
 				const queue = dueCards.length > 0 ? dueCards : this.db.getAllCards();
 
 				if (queue.length === 0) {
-					new Notice('🎉 No flashcards found in your vault. Run "Scan entire vault" first!');
+					new Notice('🎉 No flashcards found in your vault. Run "Sync" first!');
 					return;
 				}
 
@@ -125,59 +125,16 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 4: Scan current note
+		// Command 4: Sync
 		this.addCommand({
-			id: 'scan-current-note',
-			name: 'Scan current note',
-			checkCallback: (checking: boolean) => {
-				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (activeView && activeView.file) {
-					if (!checking) {
-						void (async () => {
-							try {
-								const blocks = await this.scanner.syncFile(activeView.file!);
-								new Notice(
-									`⚡ Scanned "${activeView.file!.basename}": ${blocks.length} flashcards synchronized.`,
-								);
-								this.refreshDashboardIfOpen();
-							} catch (error) {
-								console.error(`[Flashcards] Failed to scan "${activeView.file!.path}":`, error);
-								new Notice(
-									`❌ Failed to scan "${activeView.file!.basename}". See developer console for details.`,
-								);
-							}
-						})();
-					}
-					return true;
-				}
-				return false;
-			},
-		});
-
-		// Command 5: Scan entire vault
-		this.addCommand({
-			id: 'scan-entire-vault',
-			name: 'Scan entire vault',
+			id: 'sync',
+			name: 'Sync',
 			callback: async () => {
-				new Notice('🔍 Scanning entire vault for flashcards...');
-				try {
-					const res = await this.scanner.fullScan();
-					const failureNotice =
-						res.failedFiles.length > 0
-							? ` (${res.failedFiles.length} note(s) had errors, see console)`
-							: '';
-					new Notice(
-						`⚡ Vault scan complete: ${res.totalBlocks} cards across ${res.filesScanned} notes${failureNotice}.`,
-					);
-					this.refreshDashboardIfOpen();
-				} catch (error) {
-					console.error('[Flashcards] Vault scan encountered an error:', error);
-					new Notice('❌ Vault scan encountered an error. See developer console.');
-				}
+				await this.syncVault();
 			},
 		});
 
-		// Command 6: Insert card block
+		// Command 5: Insert card block
 		this.addCommand({
 			id: 'insert-card-block',
 			name: 'Insert card block',
@@ -191,7 +148,7 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 7: Optimize FSRS weights
+		// Command 6: Optimize FSRS weights
 		this.addCommand({
 			id: 'optimize-fsrs-weights',
 			name: 'Optimize FSRS weights',
@@ -232,7 +189,7 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 8: Optimize database
+		// Command 7: Optimize database
 		this.addCommand({
 			id: 'optimize-database',
 			name: 'Optimize database',
@@ -253,6 +210,24 @@ export default class FlashcardsPlugin extends Plugin {
 
 	public getReviewLogs(): ReviewLogEntry[] {
 		return this.db.getReviewLogsForOptimization();
+	}
+
+	public async syncVault(): Promise<void> {
+		new Notice('🔍 Syncing flashcards across vault...');
+		try {
+			const res = await this.scanner.fullScan();
+			const failureNotice =
+				res.failedFiles.length > 0
+					? ` (${res.failedFiles.length} note(s) had errors, see console)`
+					: '';
+			new Notice(
+				`⚡ Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes${failureNotice}.`,
+			);
+			this.refreshDashboardIfOpen();
+		} catch (error) {
+			console.error('[Flashcards] Vault sync encountered an error:', error);
+			new Notice('❌ Vault sync encountered an error. See developer console.');
+		}
 	}
 
 	public refreshDashboardIfOpen(): void {

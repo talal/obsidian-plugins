@@ -99,10 +99,13 @@
 
 .fc-header-actions {
 	display: flex;
+	align-items: center;
 	gap: var(--size-4-2);
 }
 
 .fc-header-actions button {
+	display: inline-flex;
+	align-items: center;
 	justify-content: center;
 	text-align: center;
 	white-space: nowrap;

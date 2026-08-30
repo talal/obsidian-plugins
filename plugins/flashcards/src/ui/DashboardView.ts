@@ -89,6 +89,9 @@ export class DashboardView extends ItemView {
 				onStudyDeck: () => {
 					new TagPickerModal(this.app, this.plugin).open();
 				},
+				onSync: () => {
+					void this.plugin.syncVault();
+				},
 				onOpenCard: (item: ReviewItem) => {
 					const link = item.blockId ? `${item.notePath}#^${item.blockId}` : item.notePath;
 					void this.app.workspace.openLinkText(link, '', false);

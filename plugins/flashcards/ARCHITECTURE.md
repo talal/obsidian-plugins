@@ -32,7 +32,7 @@ The Flashcards plugin enables spaced repetition learning directly within Obsidia
   - Review cards render in Svelte 5 via Obsidian's official `MarkdownRenderer`, preserving LaTeX math, wikilinks, code blocks, callouts, and vault image attachments.
 - **Strictly Manual / On-Demand Scanning**:
   - No parsing, document scanning, or database synchronization is ever attached to `vault.on('modify')`, `vault.on('create')`, or editor keystroke events.
-  - Scanning is triggered strictly via explicit user commands (**`Scan current note`** and **`Scan entire vault`**) to guarantee zero editor interference, zero cursor jumping, and zero background disk/battery drain while writing notes.
+  - Scanning and synchronization is triggered strictly via explicit user command (**`Sync`**) to guarantee zero editor interference, zero cursor jumping, and zero background disk/battery drain while writing notes.
 
 ---
 
@@ -490,8 +490,7 @@ Displays motivational feedback and session metrics upon finishing all due cards:
 | **`Flashcards: Study all cards`** | Global | Launches review queue for all due cards across the vault. |
 | **`Flashcards: Study deck`** | Global | Opens Tag Picker prompt to select tags and launches filtered review. |
 | **`Flashcards: Open dashboard`** | Global | Opens the Flashcards Inventory & Scheduling dashboard tab. |
-| **`Flashcards: Scan current note`** | Editor | Scans active note, auto-assigns missing IDs, syncs tags, and updates SQLite. |
-| **`Flashcards: Scan entire vault`** | Global | Scans all notes across the vault, auto-assigns missing IDs, and saves snapshot. |
+| **`Flashcards: Sync`** | Global | Scans all notes across the vault, auto-assigns missing IDs, and saves snapshot. |
 | **`Flashcards: Insert card block`** | Editor | Inserts clean `%% card-start %%\n\n...\n\n%% card-end %%` template at cursor. |
 | **`Flashcards: Optimize FSRS weights`** | Global | Runs FSRS-6 optimizer over `reviews`, updates custom weights in settings. |
 | **`Flashcards: Optimize database`** | Global | Runs `PRAGMA integrity_check`, deletes orphaned rows, executes `VACUUM`. |

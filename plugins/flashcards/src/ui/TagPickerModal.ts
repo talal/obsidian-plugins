@@ -33,7 +33,7 @@ export class TagPickerModal extends Modal {
 		const tagStats = computeTagDeckStats(allCards, dueCutoff);
 
 		if (tagStats.length === 0) {
-			new Notice('No tagged cards found in your vault. Run "Scan entire vault" first.');
+			new Notice('No tagged cards found in your vault. Run "Sync" first.');
 			this.close();
 			return;
 		}

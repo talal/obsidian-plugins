@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { setIcon } from 'obsidian';
+
 	import type { DashboardStats, ReviewItem } from '../../types.ts';
 	import {
 		filterDashboardBlock,
@@ -12,10 +14,28 @@
 		dueCutoff: number;
 		onStartReview?: () => void;
 		onStudyDeck?: () => void;
+		onSync?: () => void;
 		onOpenCard?: (item: ReviewItem) => void;
 	}
 
-	let { items = [], stats, dueCutoff, onStartReview, onStudyDeck, onOpenCard }: Props = $props();
+	let {
+		items = [],
+		stats,
+		dueCutoff,
+		onStartReview,
+		onStudyDeck,
+		onSync,
+		onOpenCard,
+	}: Props = $props();
+
+	function icon(node: HTMLElement, name: string) {
+		setIcon(node, name);
+		return {
+			update(newName: string) {
+				setIcon(node, newName);
+			},
+		};
+	}
 
 	let searchQuery = $state('');
 	let statusFilter = $state<'all' | 'due' | 'new' | 'learning' | 'review'>('all');
@@ -98,6 +118,7 @@
 			<button onclick={onStudyDeck}>
 				<span>Study deck</span>
 			</button>
+			<button aria-label="Sync" title="Sync" onclick={onSync} use:icon={'refresh-cw'}></button>
 		</div>
 	</header>
 
