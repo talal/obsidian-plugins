@@ -4,16 +4,16 @@ import * as path from 'path';
 import type { Plugin } from 'obsidian';
 import { describe, it, expect } from 'vitest';
 
-import { formatMarkdown } from '../src/formatter';
+import { WasmFormatter, formatMarkdown } from '../src/formatter';
 
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');
 
-describe('Prettier Formatter', () => {
+describe('WasmFormatter', () => {
 	const wasmPath = path.join(
 		__dirname,
 		'../../../crates/formatter-wasm/pkg/formatter_wasm_bg.wasm',
 	);
-	// Mock only exposes what formatMarkdown reads off the plugin.
+	// Mock only exposes what WasmFormatter reads off the plugin.
 	const mockPlugin = {
 		manifest: { dir: path.dirname(wasmPath) },
 		app: {
@@ -77,5 +77,39 @@ describe('Prettier Formatter', () => {
 		const afterPath = path.join(FIXTURES_DIR, 'flashcards_after.md');
 		const afterContent = fs.readFileSync(afterPath, 'utf-8');
 		expect(formatted).toBe(afterContent);
+	});
+
+	it('supports warmup and cleans up on unload', async () => {
+		const formatter = new WasmFormatter(mockPlugin);
+		await formatter.warmup();
+		const result = await formatter.format('# Heading\n\n-   item\n');
+		expect(result).toBe('# Heading\n\n- item\n');
+		formatter.unload();
+	});
+
+	it('discards instance and recovers on subsequent call if initialization fails', async () => {
+		let failOnce = true;
+		const failingPlugin = {
+			manifest: mockPlugin.manifest,
+			app: {
+				vault: {
+					adapter: {
+						readBinary: async () => {
+							if (failOnce) {
+								failOnce = false;
+								throw new Error('disk read error');
+							}
+							return fs.readFileSync(wasmPath);
+						},
+					},
+				},
+			},
+		} as unknown as Plugin;
+
+		const formatter = new WasmFormatter(failingPlugin);
+		await expect(formatter.format('text')).rejects.toThrow('disk read error');
+
+		const recovered = await formatter.format('# Hello\n\n-   item\n');
+		expect(recovered).toBe('# Hello\n\n- item\n');
 	});
 });

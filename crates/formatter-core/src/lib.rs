@@ -1,5 +1,16 @@
+use std::sync::LazyLock;
+
 use dprint_plugin_markdown::configuration::ConfigurationBuilder;
 use dprint_plugin_markdown::format_text;
+
+static CONFIG: LazyLock<dprint_plugin_markdown::configuration::Configuration> =
+    LazyLock::new(|| {
+        let mut config = ConfigurationBuilder::new();
+        config.list_indent_kind(
+            dprint_plugin_markdown::configuration::ListIndentKind::PythonMarkdown,
+        );
+        config.build()
+    });
 
 #[derive(Debug)]
 pub struct FormatError(pub String);
@@ -13,15 +24,12 @@ impl std::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 pub fn format(input: &str) -> Result<String, FormatError> {
-    let mut config = ConfigurationBuilder::new();
-    config.list_indent_kind(dprint_plugin_markdown::configuration::ListIndentKind::PythonMarkdown);
-    let config = config.build();
     // dprint can panic on pathological input (see fuzz corpus). catch_unwind turns a
     // panic into a per-input error so the CLI keeps formatting remaining files.
     // Requires the `unwind` panic strategy (dev/test, and the `cli` release profile);
     // WASM always aborts, where a panic traps the instance instead.
     let formatted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        format_text(input, &config, |_, _, _| Ok(None))
+        format_text(input, &CONFIG, |_, _, _| Ok(None))
     }))
     .map_err(|_| FormatError("dprint panicked while formatting input".to_string()))?
     .map_err(|e| FormatError(e.to_string()))?
