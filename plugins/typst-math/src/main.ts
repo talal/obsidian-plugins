@@ -1,6 +1,7 @@
 import { Plugin, loadMathJax, renderMath } from 'obsidian';
 
 import { TypstCompiler } from './compiler';
+import { FontManager } from './fonts';
 import { DEFAULT_SETTINGS, normalizeFontSize, TypstMathSettingTab } from './settings';
 import type { TypstMathSettings } from './settings';
 
@@ -25,7 +26,10 @@ class TypstMathElement extends HTMLElement {
 		if (!plugin) return;
 
 		try {
-			const result = await plugin.compiler.compile(source, display, plugin);
+			const [result] = await Promise.all([
+				plugin.compiler.compile(source, display, plugin),
+				plugin.fontManager.load(plugin),
+			]);
 			this.innerHTML = result.mathml;
 			plugin.applyEquationStylesheet(result.css);
 			this.className = '';
@@ -49,6 +53,7 @@ export default class TypstMathPlugin extends Plugin {
 	private appliedEquationCss: string | null = null;
 	private previousCssVariables: { inline: string; block: string } | null = null;
 	public compiler: TypstCompiler = new TypstCompiler();
+	public fontManager: FontManager = new FontManager();
 	public settings!: TypstMathSettings;
 
 	async onload() {
@@ -57,7 +62,10 @@ export default class TypstMathPlugin extends Plugin {
 		this.applySettings();
 		this.addSettingTab(new TypstMathSettingTab(this.app, this));
 
-		this.app.workspace.onLayoutReady(() => void this.installMathJaxOverride());
+		this.app.workspace.onLayoutReady(() => {
+			void this.installMathJaxOverride();
+			void this.fontManager.load(this);
+		});
 	}
 
 	private async installMathJaxOverride(): Promise<void> {
@@ -156,6 +164,7 @@ export default class TypstMathPlugin extends Plugin {
 	onunload() {
 		this.unloaded = true;
 		this.restoreCssVariables();
+		this.fontManager.unload();
 		this.equationStyleEl?.remove();
 		this.equationStyleEl = null;
 		this.appliedEquationCss = null;

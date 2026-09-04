@@ -13,9 +13,10 @@
 	cursor: help;
 }
 
-/* Match Obsidian's MathJax font stack for native MathML output. */
+/* True OpenType Math font stack for native MathML output */
 typst-math math {
-	font-family: MJXZERO, MJXTEX, 'IBM Plex Math', 'New Computer Modern Math', serif;
+	font-family:
+		'New Computer Modern Math', 'NewCMMath-Book', 'Latin Modern Math', 'STIX Two Math', serif;
 }
 
 /* Increase default math font size */

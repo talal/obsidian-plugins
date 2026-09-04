@@ -25,6 +25,9 @@ export default defineConfig({
 				if (!fs.existsSync('./dist')) fs.mkdirSync('./dist');
 				fs.copyFileSync('manifest.json', 'dist/manifest.json');
 				if (fs.existsSync('styles.css')) fs.copyFileSync('styles.css', 'dist/styles.css');
+				if (fs.existsSync('fonts')) {
+					fs.cpSync('fonts', 'dist/fonts', { recursive: true });
+				}
 				if (fs.existsSync('../../crates/typst-math-wasm/pkg/typst_math_wasm_bg.wasm')) {
 					fs.copyFileSync(
 						'../../crates/typst-math-wasm/pkg/typst_math_wasm_bg.wasm',

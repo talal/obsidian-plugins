@@ -14,7 +14,7 @@ Users write `$x^2 + y^2 = z^2$` (inline) and `$$...$$` (display) using **Typst m
 
 ### Explicit non-goals
 
-- No font-family setting or bundled fonts. Native MathML uses Obsidian's existing MathJax font stack; only inline and block font size are configurable.
+- No user-configurable font-family setting. Bundled New Computer Modern (NewCM) WOFF2 web fonts are loaded automatically; only inline and block font size are configurable in settings.
 - No full Typst document support (code blocks, `.typ` files, etc.). Math expressions only.
 - No LaTeX-to-Typst conversion or fallback. If you write LaTeX, it won't render — this is intentional.
 - No Typst package imports inside math expressions.
@@ -254,16 +254,19 @@ version bumps (§1.1).
 typst-math/
 ├── manifest.json
 ├── package.json
-├── vite.config.ts
-├── styles.css                       # render-state styling, font stack, size variables
+├── styles.css                       # render-state styling, NewCM Math font stack, size variables
+├── fonts/                           # bundled New Computer Modern Math WOFF2 font with full OpenType MATH table
 ├── src/
 │   ├── main.ts                      # Plugin entry: MathJax override, Custom Element definition
 │   ├── compiler.ts                  # WASM loader, init, compile(source, display) -> string
+│   ├── fonts.ts                     # Bundled font loading, FontFace registration, cleanup
 │   └── settings.ts                  # Settings defaults, normalization, and UI
 ├── ARCHITECTURE.md                  # this file
 └── dist/                            # build output
     ├── main.js
     ├── manifest.json
+    ├── styles.css
+    ├── fonts/
     └── typst_math_wasm_bg.wasm
 
 crates/typst-math-wasm/              # WASM crate
@@ -346,7 +349,18 @@ No package resolution. No file I/O. No network access.
 
 ### 5.5 `styles.css` — render-state styling
 
-Contains only plugin-owned rules: loading/error state styles, the MathJax font stack applied to rendered MathML, and the persisted `--typst-math-inline-font-size` and `--typst-math-block-font-size` variables, defaulting to 18px inline and 20px block when unset. The MathML UA-override rules are not kept here — they arrive from Typst dynamically (§4.6).
+Contains only plugin-owned rules: loading/error state styles, the bundled New Computer Modern Math font stack applied to rendered MathML, and the persisted `--typst-math-inline-font-size` and `--typst-math-block-font-size` variables, defaulting to 18px inline and 20px block when unset. The MathML UA-override rules are not kept here — they arrive from Typst dynamically (§4.6).
+
+### 5.6 `src/fonts.ts` — Bundled font loading & management
+
+Responsibilities:
+
+1. Maintain font definitions for the bundled `NewCMMath-Book.woff2` true OpenType Math font (sourced from upstream CTAN New Computer Modern and compressed to WOFF2).
+2. Register the font under both `'New Computer Modern Math'` and `'NewCMMath-Book'` font family names.
+3. Expose `FontManager` class with `load(plugin)` and `unload()`:
+   - On load: reads the WOFF2 file via `plugin.app.vault.adapter.readBinary`, constructs `FontFace` instances, loads them, and registers them into `document.fonts`.
+   - On unload: removes all registered `FontFace` instances from `document.fonts` to prevent memory leaks.
+4. Operates asynchronously on layout ready and when rendering math elements without blocking initial plugin startup.
 
 ---
 

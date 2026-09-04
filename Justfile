@@ -22,7 +22,7 @@ install-formatter:
 install-typst-math:
     npm run build -w typst-math
     mkdir -p {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
-    cp plugins/typst-math/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
+    cp -r plugins/typst-math/dist/* {{ obsidian_vault_dir }}/.obsidian/plugins/typst-math/
 
 # install flashcards plugin
 [group("install")]
