@@ -2,7 +2,6 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
 use super::ObsidianSectionHint;
-use super::syntax;
 
 /// Source-aware Markdown information shared by all card-syntax parsing.
 ///
@@ -39,12 +38,11 @@ impl MarkdownContext {
         }
 
         let options = Options::ENABLE_TABLES
-            | Options::ENABLE_GFM
-            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-            | Options::ENABLE_MATH
+            | Options::ENABLE_FOOTNOTES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
-            | Options::ENABLE_FOOTNOTES;
+            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+            | Options::ENABLE_MATH;
 
         let mut protected_depth = 0usize;
         for (event, range) in Parser::new_ext(content, options).into_offset_iter() {
@@ -97,7 +95,6 @@ impl MarkdownContext {
         context.mark_frontmatter(content);
         context.mark_display_math(content);
         context.mark_html_comments(content);
-        context.mark_link_reference_definitions(content);
         context
     }
 
@@ -208,17 +205,6 @@ impl MarkdownContext {
             }
         }
     }
-
-    fn mark_link_reference_definitions(&mut self, content: &str) {
-        for (index, line) in content.lines().enumerate() {
-            if index >= self.ignored_lines.len() {
-                break;
-            }
-            if is_link_reference_definition_start(line) {
-                self.ignored_lines[index] = true;
-            }
-        }
-    }
 }
 
 fn line_starts(content: &str) -> Vec<usize> {
@@ -264,37 +250,4 @@ fn is_protected_end(tag_end: &TagEnd) -> bool {
             | TagEnd::Table
             | TagEnd::FootnoteDefinition
     )
-}
-
-fn is_link_reference_definition_start(line: &str) -> bool {
-    let trimmed = syntax::trim_start_whitespace_and_invisible(line);
-    let Some(after_open) = trimmed.strip_prefix('[') else {
-        return false;
-    };
-    let mut escaped = false;
-    let mut has_non_whitespace = false;
-    for (idx, ch) in after_open.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '[' {
-            return false;
-        }
-        if ch == ']' {
-            if !has_non_whitespace {
-                return false;
-            }
-            let rest = syntax::trim_start_whitespace_and_invisible(&after_open[idx + 1..]);
-            return rest.starts_with(':') && !rest.starts_with("::");
-        }
-        if !syntax::is_whitespace_or_invisible(ch) {
-            has_non_whitespace = true;
-        }
-    }
-    false
 }

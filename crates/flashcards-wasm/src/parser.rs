@@ -267,7 +267,6 @@ pub fn parse_markdown_blocks_with_sections(
     let context = MarkdownContext::new(&normalized, lines.len(), section_hints);
     let mut blocks = Vec::new();
     let mut line_number = 0;
-    let mut paragraph_bracket_depth = 0usize;
 
     while line_number < lines.len() {
         if context.is_ignored_line(line_number) {
@@ -285,13 +284,11 @@ pub fn parse_markdown_blocks_with_sections(
         let logical_start = line_start + leading_len;
 
         if logical_line.is_empty() {
-            paragraph_bracket_depth = 0;
             line_number += 1;
             continue;
         }
 
         if let Some(block_id) = parse_block_header(logical_line) {
-            paragraph_bracket_depth = 0;
             if let Some((block, end_line)) = parse_block_card(
                 &lines,
                 line_number,
@@ -308,72 +305,44 @@ pub fn parse_markdown_blocks_with_sections(
             continue;
         }
 
-        if syntax::has_unclosed_inline_code(logical_line)
-            || syntax::has_unclosed_html_tag(logical_line)
-        {
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            line_number += 1;
-            continue;
-        }
-
         let (raw_line, block_id) = split_trailing_block_id(logical_line, logical_start, &context);
         let cloze_scan = scan_clozes(raw_line, logical_start, &context);
 
-        if let Some((front, back)) = split_once_outside_clozes(
-            raw_line,
-            logical_start,
-            ":::",
-            &context,
-            &cloze_scan.spans,
-            paragraph_bracket_depth,
-        ) && let Some(block) = make_inline_block(
-            front,
-            back,
-            block_id.clone(),
-            true,
-            note_inherited_tags,
-            raw_line,
-            line_number,
-        ) {
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            blocks.push(block);
-            line_number += 1;
-            continue;
-        }
-
-        if let Some((front, back)) = split_once_outside_clozes(
-            raw_line,
-            logical_start,
-            "::",
-            &context,
-            &cloze_scan.spans,
-            paragraph_bracket_depth,
-        ) && let Some(block) = make_inline_block(
-            front,
-            back,
-            block_id.clone(),
-            false,
-            note_inherited_tags,
-            raw_line,
-            line_number,
-        ) {
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            blocks.push(block);
-            line_number += 1;
-            continue;
-        }
-
-        if !cloze_scan.spans.is_empty()
-            && paragraph_bracket_depth == 0
-            && !syntax::has_unmatched_opening_bracket(raw_line)
-            && !syntax::has_unmatched_closing_bracket(raw_line)
+        if let Some((front, back)) =
+            split_once_outside_clozes(raw_line, logical_start, ":::", &context, &cloze_scan.spans)
+            && let Some(block) = make_inline_block(
+                front,
+                back,
+                block_id.clone(),
+                true,
+                note_inherited_tags,
+                raw_line,
+                line_number,
+            )
         {
+            blocks.push(block);
+            line_number += 1;
+            continue;
+        }
+
+        if let Some((front, back)) =
+            split_once_outside_clozes(raw_line, logical_start, "::", &context, &cloze_scan.spans)
+            && let Some(block) = make_inline_block(
+                front,
+                back,
+                block_id.clone(),
+                false,
+                note_inherited_tags,
+                raw_line,
+                line_number,
+            )
+        {
+            blocks.push(block);
+            line_number += 1;
+            continue;
+        }
+
+        if !cloze_scan.spans.is_empty() && !syntax::is_inside_brackets(raw_line) {
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
             let front = syntax::trim_whitespace_and_invisible(raw_line).to_string();
@@ -389,9 +358,6 @@ pub fn parse_markdown_blocks_with_sections(
             });
         }
 
-        paragraph_bracket_depth = (paragraph_bracket_depth as isize
-            + syntax::bracket_depth_delta(logical_line))
-        .max(0) as usize;
         line_number += 1;
     }
 
@@ -428,7 +394,6 @@ pub fn sync_document_with_reg(
     let mut blocks = Vec::new();
     let mut modified = false;
     let mut line_number = 0;
-    let mut paragraph_bracket_depth = 0usize;
 
     while line_number < raw_lines.len() {
         if context.is_ignored_line(line_number) {
@@ -446,13 +411,11 @@ pub fn sync_document_with_reg(
         let logical_start = line_start + leading_len;
 
         if logical_line.is_empty() {
-            paragraph_bracket_depth = 0;
             line_number += 1;
             continue;
         }
 
         if let Some(raw_block_id) = parse_block_header(logical_line) {
-            paragraph_bracket_depth = 0;
             if let Some((mut block, end_line)) = parse_block_card(
                 &raw_lines,
                 line_number,
@@ -476,89 +439,61 @@ pub fn sync_document_with_reg(
             continue;
         }
 
-        if syntax::has_unclosed_inline_code(logical_line)
-            || syntax::has_unclosed_html_tag(logical_line)
-        {
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            line_number += 1;
-            continue;
-        }
-
         let (raw_line, raw_block_id) =
             split_trailing_block_id(logical_line, logical_start, &context);
         let cloze_scan = scan_clozes(raw_line, logical_start, &context);
 
-        if let Some((front, back)) = split_once_outside_clozes(
-            raw_line,
-            logical_start,
-            ":::",
-            &context,
-            &cloze_scan.spans,
-            paragraph_bracket_depth,
-        ) && let Some(mut block) = make_inline_block(
-            front,
-            back,
-            raw_block_id.clone(),
-            true,
-            note_inherited_tags,
-            raw_line,
-            line_number,
-        ) {
-            let (id, newly_minted) = claim_or_mint_id(&raw_block_id, registry);
-            if newly_minted {
-                out_lines[line_number] =
-                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
-                modified = true;
-            }
-
-            block.id = id;
-            blocks.push(block);
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            line_number += 1;
-            continue;
-        }
-
-        if let Some((front, back)) = split_once_outside_clozes(
-            raw_line,
-            logical_start,
-            "::",
-            &context,
-            &cloze_scan.spans,
-            paragraph_bracket_depth,
-        ) && let Some(mut block) = make_inline_block(
-            front,
-            back,
-            raw_block_id.clone(),
-            false,
-            note_inherited_tags,
-            raw_line,
-            line_number,
-        ) {
-            let (id, newly_minted) = claim_or_mint_id(&raw_block_id, registry);
-            if newly_minted {
-                out_lines[line_number] =
-                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
-                modified = true;
-            }
-
-            block.id = id;
-            blocks.push(block);
-            paragraph_bracket_depth = (paragraph_bracket_depth as isize
-                + syntax::bracket_depth_delta(logical_line))
-            .max(0) as usize;
-            line_number += 1;
-            continue;
-        }
-
-        if !cloze_scan.spans.is_empty()
-            && paragraph_bracket_depth == 0
-            && !syntax::has_unmatched_opening_bracket(raw_line)
-            && !syntax::has_unmatched_closing_bracket(raw_line)
+        if let Some((front, back)) =
+            split_once_outside_clozes(raw_line, logical_start, ":::", &context, &cloze_scan.spans)
+            && let Some(mut block) = make_inline_block(
+                front,
+                back,
+                raw_block_id.clone(),
+                true,
+                note_inherited_tags,
+                raw_line,
+                line_number,
+            )
         {
+            let (id, newly_minted) = claim_or_mint_id(&raw_block_id, registry);
+            if newly_minted {
+                out_lines[line_number] =
+                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
+                modified = true;
+            }
+
+            block.id = id;
+            blocks.push(block);
+            line_number += 1;
+            continue;
+        }
+
+        if let Some((front, back)) =
+            split_once_outside_clozes(raw_line, logical_start, "::", &context, &cloze_scan.spans)
+            && let Some(mut block) = make_inline_block(
+                front,
+                back,
+                raw_block_id.clone(),
+                false,
+                note_inherited_tags,
+                raw_line,
+                line_number,
+            )
+        {
+            let (id, newly_minted) = claim_or_mint_id(&raw_block_id, registry);
+            if newly_minted {
+                out_lines[line_number] =
+                    rewrite_inline_or_cloze_line(raw_lines[line_number], raw_line, &id);
+                modified = true;
+            }
+
+            block.id = id;
+            blocks.push(block);
+            line_number += 1;
+            continue;
+        }
+
+        if !cloze_scan.spans.is_empty() && !syntax::is_inside_brackets(raw_line) {
             let mut tags = note_inherited_tags.to_vec();
             add_tags(&mut tags, extract_inline_tags(raw_line));
             let front = syntax::trim_whitespace_and_invisible(raw_line).to_string();
@@ -582,9 +517,6 @@ pub fn sync_document_with_reg(
             });
         }
 
-        paragraph_bracket_depth = (paragraph_bracket_depth as isize
-            + syntax::bracket_depth_delta(logical_line))
-        .max(0) as usize;
         line_number += 1;
     }
 

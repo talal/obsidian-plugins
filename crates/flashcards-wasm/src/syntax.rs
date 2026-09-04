@@ -227,83 +227,16 @@ pub(crate) fn scan_clozes(line: &str, base_offset: usize, context: &MarkdownCont
     ClozeScan { spans }
 }
 
-pub(crate) fn is_inside_brackets(prefix: &str, initial_depth: usize) -> bool {
-    let mut square_depth = initial_depth as isize;
-    let mut paren_depth = 0isize;
+pub(crate) fn is_inside_brackets(prefix: &str) -> bool {
+    let mut depth = 0isize;
     for c in prefix.chars() {
         if c == '[' {
-            square_depth += 1;
+            depth += 1;
         } else if c == ']' {
-            square_depth = (square_depth - 1).max(0);
-        } else if c == '(' {
-            paren_depth += 1;
-        } else if c == ')' {
-            paren_depth = (paren_depth - 1).max(0);
+            depth = (depth - 1).max(0);
         }
     }
-    square_depth > 0 || paren_depth > 0
-}
-
-pub(crate) fn has_unmatched_closing_bracket(suffix: &str) -> bool {
-    let mut square_depth = 0isize;
-    let mut paren_depth = 0isize;
-    for c in suffix.chars() {
-        if c == '[' {
-            square_depth += 1;
-        } else if c == ']' {
-            square_depth -= 1;
-            if square_depth < 0 {
-                return true;
-            }
-        } else if c == '(' {
-            paren_depth += 1;
-        } else if c == ')' {
-            paren_depth -= 1;
-            if paren_depth < 0 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-pub(crate) fn has_unmatched_opening_bracket(s: &str) -> bool {
-    let mut square_depth = 0isize;
-    let mut paren_depth = 0isize;
-    for c in s.chars() {
-        if c == '[' {
-            square_depth += 1;
-        } else if c == ']' {
-            square_depth = (square_depth - 1).max(0);
-        } else if c == '(' {
-            paren_depth += 1;
-        } else if c == ')' {
-            paren_depth = (paren_depth - 1).max(0);
-        }
-    }
-    square_depth > 0 || paren_depth > 0
-}
-
-pub(crate) fn bracket_depth_delta(line: &str) -> isize {
-    let mut delta = 0isize;
-    for c in line.chars() {
-        if c == '[' || c == '(' {
-            delta += 1;
-        } else if c == ']' || c == ')' {
-            delta -= 1;
-        }
-    }
-    delta
-}
-
-pub(crate) fn is_inside_html_tag(prefix: &str, suffix: &str) -> bool {
-    if let Some(last_open) = prefix.rfind('<') {
-        let after_open = &prefix[last_open..];
-        if !after_open.contains('>') && suffix.contains('>') {
-            return true;
-        }
-    }
-    false
+    depth > 0
 }
 
 pub(crate) fn split_once_outside_clozes<'a>(
@@ -312,7 +245,6 @@ pub(crate) fn split_once_outside_clozes<'a>(
     separator: &str,
     context: &MarkdownContext,
     cloze_spans: &[Range<usize>],
-    initial_bracket_depth: usize,
 ) -> Option<(&'a str, &'a str)> {
     for (index, _) in line.char_indices() {
         if separator == "::" && line[index..].starts_with(":::") {
@@ -324,10 +256,7 @@ pub(crate) fn split_once_outside_clozes<'a>(
 
         let separator_end = index + separator.len();
         if !context.is_eligible(base_offset + index..base_offset + separator_end)
-            || is_inside_brackets(&line[..index], initial_bracket_depth)
-            || has_unmatched_closing_bracket(&line[separator_end..])
-            || has_unmatched_opening_bracket(&line[separator_end..])
-            || is_inside_html_tag(&line[..index], &line[separator_end..])
+            || is_inside_brackets(&line[..index])
             || cloze_spans
                 .iter()
                 .any(|span| span.start <= index && index < span.end)
@@ -371,57 +300,4 @@ pub(crate) fn split_trailing_block_id<'a>(
         trim_end_whitespace_and_invisible(prefix),
         id_part.to_string(),
     )
-}
-
-pub(crate) fn has_unclosed_inline_code(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'`' {
-                i += 1;
-            }
-            let run_len = i - start;
-            let mut found_closing = false;
-            while i < bytes.len() {
-                if bytes[i] == b'`' {
-                    let close_start = i;
-                    while i < bytes.len() && bytes[i] == b'`' {
-                        i += 1;
-                    }
-                    let close_run_len = i - close_start;
-                    if close_run_len == run_len {
-                        found_closing = true;
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            if !found_closing {
-                return true;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    false
-}
-
-pub(crate) fn has_unclosed_html_tag(line: &str) -> bool {
-    let mut in_tag = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            if let Some(&next_c) = chars.peek()
-                && (next_c.is_alphabetic() || next_c == '/' || next_c == '!' || next_c == '?')
-            {
-                in_tag = true;
-            }
-        } else if c == '>' {
-            in_tag = false;
-        }
-    }
-    in_tag
 }

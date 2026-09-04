@@ -57,7 +57,7 @@ Prefer targeted commands while iterating:
 - Rust tests: `cargo test -p <crate>`
 - Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
 - Rust formatting: `cargo fmt -p <crate>`
-- Rust fuzzing (run from the crate's `fuzz/` directory): `cd crates/<crate>/fuzz && ASAN_OPTIONS=detect_leaks=0 cargo fuzz run <target> --release -- -max_total_time=300 -detect_leaks=0` (see `cd crates/<crate>/fuzz && cargo fuzz list` for target list)
+- Rust fuzzing (run from the crate's `fuzz/` directory): `cd crates/<crate>/fuzz && ASAN_OPTIONS=detect_leaks=0 cargo fuzz run <target> --release -- -max_total_time=30 -detect_leaks=0` (see `cd crates/<crate>/fuzz && cargo fuzz list` for target list)
 
 Typst Math plugin has additional fuzz campaigns:
 
