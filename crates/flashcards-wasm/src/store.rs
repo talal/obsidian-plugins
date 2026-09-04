@@ -1293,19 +1293,35 @@ mod tests {
 
         // 2. Due now (due 5 minutes ago)
         let card_due_now = make_card(State::Review, now_ms - 300_000, Some(now_ms - 86_400_000));
-        assert_eq!(to_review_item(&card_due_now, &prompt, now_ms).due_human, "Due now");
+        assert_eq!(
+            to_review_item(&card_due_now, &prompt, now_ms).due_human,
+            "Due now"
+        );
 
         // 3. Overdue (2 days ago)
-        let card_overdue = make_card(State::Review, now_ms - 2 * DAY_MS, Some(now_ms - 3 * DAY_MS));
-        assert_eq!(to_review_item(&card_overdue, &prompt, now_ms).due_human, "Overdue (2d)");
+        let card_overdue = make_card(
+            State::Review,
+            now_ms - 2 * DAY_MS,
+            Some(now_ms - 3 * DAY_MS),
+        );
+        assert_eq!(
+            to_review_item(&card_overdue, &prompt, now_ms).due_human,
+            "Overdue (2d)"
+        );
 
         // 4. In 30 seconds (<1m)
         let card_under_1m = make_card(State::Learning, now_ms + 30_000, Some(now_ms));
-        assert_eq!(to_review_item(&card_under_1m, &prompt, now_ms).due_human, "In <1m");
+        assert_eq!(
+            to_review_item(&card_under_1m, &prompt, now_ms).due_human,
+            "In <1m"
+        );
 
         // 5. In 10 minutes
         let card_10m = make_card(State::Learning, now_ms + 600_000, Some(now_ms));
-        assert_eq!(to_review_item(&card_10m, &prompt, now_ms).due_human, "In 10m");
+        assert_eq!(
+            to_review_item(&card_10m, &prompt, now_ms).due_human,
+            "In 10m"
+        );
 
         // 6. In 2 hours
         let card_2h = make_card(State::Learning, now_ms + 7_200_000, Some(now_ms));
@@ -1313,7 +1329,10 @@ mod tests {
 
         // 7. In 1 day (Tomorrow)
         let card_tomorrow = make_card(State::Review, now_ms + DAY_MS, Some(now_ms));
-        assert_eq!(to_review_item(&card_tomorrow, &prompt, now_ms).due_human, "Tomorrow");
+        assert_eq!(
+            to_review_item(&card_tomorrow, &prompt, now_ms).due_human,
+            "Tomorrow"
+        );
 
         // 8. In 5 days
         let card_5d = make_card(State::Review, now_ms + 5 * DAY_MS, Some(now_ms));
@@ -1350,7 +1369,9 @@ mod tests {
 
         // 2. User reviews and marks "Forgot" (Again)
         let params = FsrsParams::default();
-        let reviewed = store.record_review(card_id, Rating::Again, now_ms, &params).unwrap();
+        let reviewed = store
+            .record_review(card_id, Rating::Again, now_ms, &params)
+            .unwrap();
         assert_eq!(reviewed.state, State::Learning);
         // Due in 10 minutes (600,000 ms)
         assert_eq!(reviewed.due_human, "In 10m");

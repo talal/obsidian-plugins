@@ -1,17 +1,10 @@
 import type { Plugin } from 'obsidian';
 
-export interface FontDefinition {
-	family: string;
-	filename: string;
-}
-
-export const FONT_DEFINITIONS: readonly FontDefinition[] = [
-	{ family: 'New Computer Modern Math', filename: 'NewCMMath-Book.woff2' },
-	{ family: 'NewCMMath-Book', filename: 'NewCMMath-Book.woff2' },
-];
+export const FONT_FAMILY = 'New Computer Modern Math';
+export const FONT_FILENAME = 'NewCMMath-Book.woff2';
 
 export class FontManager {
-	private loadedFaces: FontFace[] = [];
+	private loadedFace: FontFace | null = null;
 	private loadPromise: Promise<void> | null = null;
 
 	public async load(plugin: Plugin): Promise<void> {
@@ -29,42 +22,27 @@ export class FontManager {
 	}
 
 	private async doLoad(plugin: Plugin): Promise<void> {
-		const bufferCache = new Map<string, ArrayBuffer>();
-
-		for (const def of FONT_DEFINITIONS) {
-			try {
-				let buffer = bufferCache.get(def.filename);
-				if (!buffer) {
-					const fontPath = `${plugin.manifest.dir}/fonts/${def.filename}`;
-					buffer = await plugin.app.vault.adapter.readBinary(fontPath);
-					bufferCache.set(def.filename, buffer);
-				}
-
-				const face = new FontFace(def.family, buffer);
-				await face.load();
-				document.fonts.add(face);
-				this.loadedFaces.push(face);
-			} catch (e) {
-				// Suppress errors when fonts cannot be loaded (e.g. in test runner or incomplete install)
-				console.warn(`[typst-math] Failed to load font ${def.family} (${def.filename}):`, e);
-			}
+		try {
+			const fontPath = `${plugin.manifest.dir}/fonts/${FONT_FILENAME}`;
+			const buffer = await plugin.app.vault.adapter.readBinary(fontPath);
+			const face = new FontFace(FONT_FAMILY, buffer);
+			await face.load();
+			document.fonts.add(face);
+			this.loadedFace = face;
+		} catch (e) {
+			console.warn(`[typst-math] Failed to load font ${FONT_FAMILY}:`, e);
 		}
 	}
 
 	public isLoaded(): boolean {
-		return this.loadedFaces.length > 0;
+		return this.loadedFace !== null;
 	}
 
 	public unload(): void {
-		if (typeof document === 'undefined' || !document.fonts) {
-			this.loadedFaces = [];
-			return;
+		if (this.loadedFace && typeof document !== 'undefined' && document.fonts) {
+			document.fonts.delete(this.loadedFace);
 		}
-
-		for (const face of this.loadedFaces) {
-			document.fonts.delete(face);
-		}
-		this.loadedFaces = [];
+		this.loadedFace = null;
 		this.loadPromise = null;
 	}
 }

@@ -7,8 +7,8 @@
 	"main": "dist/main.js",
 	"scripts": {
 		"build": "npm run build:wasm && vp build",
-		"build:wasm": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('flashcards_wasm_bg.wasm', import.meta.url)/'flashcards_wasm_bg.wasm'/g\" pkg/flashcards_wasm.js",
-		"build:wasm:dev": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --dev && sed -i \"s/new URL('flashcards_wasm_bg.wasm', import.meta.url)/'flashcards_wasm_bg.wasm'/g\" pkg/flashcards_wasm.js",
+		"build:wasm": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --release",
+		"build:wasm:dev": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --dev",
 		"check": "vp check",
 		"check:types": "vp check --no-fmt --no-lint",
 		"fmt": "vp fmt",

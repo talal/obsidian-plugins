@@ -69,10 +69,69 @@ describe('TypstCompiler', () => {
 
 		const result = await lazyCompiler.compile('x', false, mockPlugin);
 
-		expect(result.mathml).toContain('<math');
-		expect(result.css).toContain('mtable');
+		expect(result).toContain('<math');
+		expect(lazyCompiler.stylesheet).toContain('mtable');
 		expect(lazyCompiler.isReady()).toBe(true);
+		expect(lazyCompiler.compileSync('x', false)).toBe(result);
 		expect(wasmReads).toBe(1);
+	});
+
+	it('ensures styles.css contains Typst MathML reset rules', async () => {
+		const stylesPath = path.resolve(__dirname, '../styles.css');
+		const stylesCss = await fs.promises.readFile(stylesPath, 'utf-8');
+
+		const lazyCompiler = new TypstCompiler();
+		await lazyCompiler.init(mockPlugin);
+		const typstCss = lazyCompiler.stylesheet;
+
+		expect(typstCss).toBeTruthy();
+		expect(stylesCss).toContain('typst-math mtable.multiline-equation');
+		expect(stylesCss).toContain('math-style: inherit');
+		expect(stylesCss).toContain("font-feature-settings: 'dtls'");
+	});
+
+	it('caches synchronous compilation results and differentiates inline from display', async () => {
+		const c = new TypstCompiler();
+		await c.init(mockPlugin);
+
+		const inline1 = c.compileSync('alpha + beta', false);
+		const inline2 = c.compileSync('alpha + beta', false);
+		expect(inline1).toBe(inline2);
+		expect(inline1).not.toContain('display="block"');
+
+		const display = c.compileSync('alpha + beta', true);
+		expect(display).toContain('display="block"');
+		expect(display).not.toBe(inline1);
+	});
+
+	it('throws an error synchronously for malformed expressions', async () => {
+		const c = new TypstCompiler();
+		await c.init(mockPlugin);
+
+		expect(() => c.compileSync('$', false)).toThrow();
+	});
+
+	it('resets initPromise on failure so initialization can be retried', async () => {
+		const failingCompiler = new TypstCompiler();
+		const failingPlugin = {
+			manifest: { dir: 'invalid-dir' },
+			app: {
+				vault: {
+					adapter: {
+						readBinary: async () => {
+							throw new Error('File not found');
+						},
+					},
+				},
+			},
+		};
+
+		await expect(failingCompiler.init(failingPlugin as any)).rejects.toThrow('File not found');
+		expect(failingCompiler.isReady()).toBe(false);
+
+		// Retry with working plugin succeeds
+		await failingCompiler.init(mockPlugin);
+		expect(failingCompiler.isReady()).toBe(true);
 	});
 
 	const VALID_FIXTURES = ['valid-inline.md', 'valid-block-matrices.md', 'valid-block-cases.md'];
@@ -90,8 +149,9 @@ describe('TypstCompiler', () => {
 			for (const eq of equations) {
 				const result = await compiler.compile(eq.source, eq.display, mockPlugin);
 				// MathML should contain a <math> tag
-				expect(result.mathml).toContain('<math');
-				expect(result.mathml).toContain('</math>');
+				expect(result).toContain('<math');
+				expect(result).toContain('</math>');
+				expect(compiler.compileSync(eq.source, eq.display)).toBe(result);
 			}
 		});
 	}

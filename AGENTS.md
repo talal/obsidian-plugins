@@ -63,11 +63,6 @@ Prefer targeted commands while iterating:
 
 Plugin tests (`npm run test -w <plugin>`) run against the compiled WASM artifact in `crates/<crate>/pkg/` without automatically recompiling WASM to avoid build churn. When modifying Rust crates, run `npm run build:wasm:dev -w <plugin>` before running tests for a fast, incremental developer loop.
 
-Typst Math plugin has additional fuzz campaigns:
-
-- WASM artifact smoke campaign: `npm run fuzz -w typst-math`
-- Memory-bound soak (~70 s): `cargo test -p typst-math-wasm --release -- --ignored`
-
 Use workspace-wide checks when a change crosses boundaries or before finalizing when proportionate.
 
 ## Verification

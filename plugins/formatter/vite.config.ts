@@ -2,7 +2,7 @@ import fs from 'node:fs';
 
 import { defineConfig } from 'vite-plus';
 
-import { obsidianExternal } from '../../vite.shared.ts';
+import { obsidianExternal, wasmAssetStub } from '../../vite.shared.ts';
 
 export default defineConfig({
 	build: {
@@ -18,6 +18,7 @@ export default defineConfig({
 		emptyOutDir: false,
 	},
 	plugins: [
+		wasmAssetStub('formatter_wasm'),
 		{
 			name: 'copy-assets',
 			closeBundle() {

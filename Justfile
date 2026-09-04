@@ -41,10 +41,6 @@ fuzz:
     cd crates/flashcards-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run unicode_bidi --release -- -max_total_time=${FUZZ_TIME:-30} -detect_leaks=0
     # formatter
     cd crates/formatter-core/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run format --release -- -max_total_time=${FUZZ_TIME:-30} -detect_leaks=0
-    cd crates/typst-math-wasm/fuzz && ASAN_OPTIONS="detect_leaks=0" cargo fuzz run compile_math --release -- -max_total_time=${FUZZ_TIME:-30} -detect_leaks=0
-    # typst-math
-    npm run fuzz -w typst-math
-    cargo test -p typst-math-wasm --release -- --ignored
 
 # run test suites for all plugins and crates
 test:

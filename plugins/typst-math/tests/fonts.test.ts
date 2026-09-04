@@ -1,26 +1,22 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { FONT_DEFINITIONS, FontManager } from '../src/fonts';
+import { FONT_FAMILY, FONT_FILENAME, FontManager } from '../src/fonts';
 
 describe('Fonts', () => {
-	it('defines OpenType Math font definitions', () => {
-		expect(FONT_DEFINITIONS.length).toBeGreaterThan(0);
-		expect(FONT_DEFINITIONS.some((d) => d.family === 'New Computer Modern Math')).toBe(true);
-		expect(FONT_DEFINITIONS.some((d) => d.family === 'NewCMMath-Book')).toBe(true);
+	it('defines the OpenType Math font configuration', () => {
+		expect(FONT_FAMILY).toBe('New Computer Modern Math');
+		expect(FONT_FILENAME).toBe('NewCMMath-Book.woff2');
 	});
 
-	it('ensures all referenced font files exist on disk in the fonts directory', () => {
+	it('ensures the referenced font file exists on disk in the fonts directory', () => {
 		const fontsDir = path.resolve(__dirname, '../fonts');
-		const uniqueFiles = new Set(FONT_DEFINITIONS.map((d) => d.filename));
-		for (const filename of uniqueFiles) {
-			const filePath = path.join(fontsDir, filename);
-			expect(fs.existsSync(filePath), `Missing font file: ${filename}`).toBe(true);
-			const stats = fs.statSync(filePath);
-			expect(stats.size).toBeGreaterThan(0);
-		}
+		const filePath = path.join(fontsDir, FONT_FILENAME);
+		expect(fs.existsSync(filePath), `Missing font file: ${FONT_FILENAME}`).toBe(true);
+		const stats = fs.statSync(filePath);
+		expect(stats.size).toBeGreaterThan(0);
 	});
 
 	describe('FontManager', () => {
@@ -82,14 +78,15 @@ describe('Fonts', () => {
 			delete (globalThis as any).document;
 		});
 
-		it('loads fonts and registers them with document.fonts', async () => {
+		it('loads the font and registers it with document.fonts', async () => {
 			expect(fontManager.isLoaded()).toBe(false);
 			await fontManager.load(mockPlugin);
 
 			expect(fontManager.isLoaded()).toBe(true);
-			expect(addedFaces.length).toBe(FONT_DEFINITIONS.length);
+			expect(addedFaces.length).toBe(1);
+			expect(addedFaces[0].family).toBe(FONT_FAMILY);
 
-			// Unload removes all added fonts
+			// Unload removes the added font
 			fontManager.unload();
 			expect(fontManager.isLoaded()).toBe(false);
 			expect(addedFaces.length).toBe(0);
@@ -97,10 +94,10 @@ describe('Fonts', () => {
 
 		it('handles multiple load calls idempotently', async () => {
 			await fontManager.load(mockPlugin);
-			expect(addedFaces.length).toBe(FONT_DEFINITIONS.length);
+			expect(addedFaces.length).toBe(1);
 
 			await fontManager.load(mockPlugin);
-			expect(addedFaces.length).toBe(FONT_DEFINITIONS.length);
+			expect(addedFaces.length).toBe(1);
 		});
 	});
 });

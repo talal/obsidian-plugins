@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite-plus';
 
-import { obsidianExternal } from '../../vite.shared.ts';
+import { obsidianExternal, wasmAssetStub } from '../../vite.shared.ts';
 
 export default defineConfig({
 	build: {
@@ -20,6 +20,7 @@ export default defineConfig({
 		emptyOutDir: false,
 	},
 	plugins: [
+		wasmAssetStub('flashcards_wasm'),
 		svelte({
 			emitCss: false,
 			compilerOptions: {

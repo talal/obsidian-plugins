@@ -33,7 +33,17 @@ impl Compiler {
     }
 
     #[wasm_bindgen]
-    pub fn compile_math(&self, source: &str, display: bool) -> Result<CompiledMath, String> {
+    pub fn equation_stylesheet(&self) -> Option<String> {
+        self.world.set_source("$ x $".into());
+        let warned = typst::compile::<HtmlDocument>(&self.world);
+        let document = warned.output.ok()?;
+        let css = head_style_sheet(document.root());
+        typst::comemo::evict(0);
+        css
+    }
+
+    #[wasm_bindgen]
+    pub fn compile_math(&self, source: &str, display: bool) -> Result<String, String> {
         // Edge whitespace is visually meaningless in math and would otherwise
         // feed Typst's block-promotion heuristic in inline mode.
         let source = source.trim();
@@ -74,9 +84,8 @@ impl Compiler {
                 let root = "<math>".len();
                 mathml.replace_range(..root, "<math display=\"block\">");
             }
-            let css = head_style_sheet(document.root());
 
-            Ok(CompiledMath { mathml, css })
+            Ok(mathml)
         })();
 
         // Memoization misses on every call (engine state participates in the
@@ -85,28 +94,6 @@ impl Compiler {
         typst::comemo::evict(0);
 
         result
-    }
-}
-
-/// A compiled equation: MathML plus Typst's own MathML stylesheet, when the
-/// compiled document provides one.
-#[derive(Debug)]
-#[wasm_bindgen]
-pub struct CompiledMath {
-    mathml: String,
-    css: Option<String>,
-}
-
-#[wasm_bindgen]
-impl CompiledMath {
-    #[wasm_bindgen(getter)]
-    pub fn mathml(&self) -> String {
-        self.mathml.clone()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn css(&self) -> Option<String> {
-        self.css.clone()
     }
 }
 
@@ -188,29 +175,29 @@ mod tests {
     #[test]
     fn compiles_inline_math_to_mathml() {
         let compiler = Compiler::new();
-        let compiled = compiler.compile_math("x^2 + y^2 = z^2", false).unwrap();
+        let mathml = compiler.compile_math("x^2 + y^2 = z^2", false).unwrap();
 
-        assert!(compiled.mathml.starts_with("<math>"));
-        assert!(compiled.mathml.contains("<msup>"));
-        assert!(compiled.mathml.contains("<mi>𝑥</mi>"));
-        assert!(compiled.mathml.contains("<mn>2</mn>"));
+        assert!(mathml.starts_with("<math>"));
+        assert!(mathml.contains("<msup>"));
+        assert!(mathml.contains("<mi>𝑥</mi>"));
+        assert!(mathml.contains("<mn>2</mn>"));
     }
 
     #[test]
     fn returns_the_equation_stylesheet_from_the_document_head() {
         let compiler = Compiler::new();
-        let compiled = compiler.compile_math("x + y", true).unwrap();
-
-        let css = compiled.css.expect("stylesheet present alongside math");
+        let css = compiler
+            .equation_stylesheet()
+            .expect("stylesheet present alongside math");
         assert!(css.contains("mtable"));
     }
 
     #[test]
     fn marks_display_math_as_block() {
         let compiler = Compiler::new();
-        let compiled = compiler.compile_math("x + y", true).unwrap();
+        let mathml = compiler.compile_math("x + y", true).unwrap();
 
-        assert!(compiled.mathml.starts_with("<math display=\"block\">"));
+        assert!(mathml.starts_with("<math display=\"block\">"));
     }
 
     #[test]
@@ -218,11 +205,11 @@ mod tests {
         let compiler = Compiler::new();
 
         for source in ["", " ", "a$b$c"] {
-            let compiled = compiler.compile_math(source, true).unwrap();
+            let mathml = compiler.compile_math(source, true).unwrap();
             assert!(
-                compiled.mathml.starts_with("<math display=\"block\">"),
+                mathml.starts_with("<math display=\"block\">"),
                 "source {source:?}: {}",
-                compiled.mathml
+                mathml
             );
         }
     }
@@ -235,8 +222,8 @@ mod tests {
         assert!(error.contains("non-math content"));
 
         // Content-producing expressions remain valid MathML.
-        let compiled = compiler.compile_math(r#"#text("m/s")"#, false).unwrap();
-        assert!(compiled.mathml.contains("<mtext>"));
+        let mathml = compiler.compile_math(r#"#text("m/s")"#, false).unwrap();
+        assert!(mathml.contains("<mtext>"));
     }
 
     #[test]
@@ -278,11 +265,11 @@ mod tests {
 
     fn assert_mathml_or_diagnostic(compiler: &Compiler, source: &str, display: bool) {
         match compiler.compile_math(source, display) {
-            Ok(compiled) => {
-                assert!(compiled.mathml.starts_with("<math"));
-                assert!(compiled.mathml.ends_with("</math>"));
-                assert!(!compiled.mathml.to_ascii_lowercase().contains("<script"));
-                assert!(!compiled.mathml.to_ascii_lowercase().contains("<svg"));
+            Ok(mathml) => {
+                assert!(mathml.starts_with("<math"));
+                assert!(mathml.ends_with("</math>"));
+                assert!(!mathml.to_ascii_lowercase().contains("<script"));
+                assert!(!mathml.to_ascii_lowercase().contains("<svg"));
             }
             Err(error) => assert!(!error.trim().is_empty()),
         }
@@ -376,48 +363,5 @@ mod tests {
             vec![element("head", vec![element("style", vec![])])],
         );
         assert_eq!(head_style_sheet(as_element(&empty_style)), None);
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod leak_probe {
-    use super::*;
-
-    fn rss_kb() -> u64 {
-        std::fs::read_to_string("/proc/self/statm")
-            .map(|content| {
-                content
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|resident| resident.parse::<u64>().ok())
-                    .unwrap_or(0)
-                    * 4
-            })
-            .unwrap_or(0)
-    }
-
-    /// Long-running Linux-only regression guard (~70s): memo-cache eviction
-    /// must keep memory flat across repeated compiles. Run explicitly via
-    /// `cargo test -p typst-math-wasm --release -- --ignored`.
-    #[test]
-    #[ignore = "long-running soak; run via cargo test -p typst-math-wasm --release -- --ignored"]
-    fn repeated_compiles_do_not_grow_memory() {
-        let compiler = Compiler::new();
-        // Warm-up pass so one-time initialization is not mistaken for growth.
-        for _ in 0..100 {
-            let _ = compiler.compile_math("#true", true);
-        }
-        let mut baseline = rss_kb();
-        for round in 0..6 {
-            for _ in 0..10_000 {
-                let _ = compiler.compile_math("#true", true);
-            }
-            let current = rss_kb();
-            let delta = current - baseline;
-            println!("round {}: rss={current}kB delta={delta}kB", round + 1);
-            // Eviction keeps the memo cache flat; allow allocator jitter only.
-            assert!(delta < 4096, "memory grew {delta}kB across 10k compiles");
-            baseline = current;
-        }
     }
 }

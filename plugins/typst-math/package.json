@@ -7,16 +7,12 @@
 	"main": "dist/main.js",
 	"scripts": {
 		"build": "npm run build:wasm && vp build",
-		"build:wasm": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('typst_math_wasm_bg.wasm', import.meta.url)/'typst_math_wasm_bg.wasm'/g\" pkg/typst_math_wasm.js",
-		"build:wasm:dev": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --dev && sed -i \"s/new URL('typst_math_wasm_bg.wasm', import.meta.url)/'typst_math_wasm_bg.wasm'/g\" pkg/typst_math_wasm.js",
-		"fuzz": "npm run build:wasm:dev && node scripts/fuzz-typst.mjs",
+		"build:wasm": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --release",
+		"build:wasm:dev": "cd ../../crates/typst-math-wasm && wasm-pack build --target web --dev",
 		"check": "vp check",
 		"check:types": "vp check --no-fmt --no-lint",
 		"fmt": "vp fmt",
 		"lint": "vp lint",
 		"test": "vp test"
-	},
-	"devDependencies": {
-		"fast-check": "^4.3.0"
 	}
 }

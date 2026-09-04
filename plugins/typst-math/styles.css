@@ -1,6 +1,3 @@
-/* MathML UA-override rules are extracted from the compiled Typst document at
-   render time and injected via a <style> element; see src/main.ts. */
-
 /* Plugin specific: error and loading states */
 .typst-math-loading {
 	opacity: 0.5;
@@ -15,11 +12,10 @@
 
 /* True OpenType Math font stack for native MathML output */
 typst-math math {
-	font-family:
-		'New Computer Modern Math', 'NewCMMath-Book', 'Latin Modern Math', 'STIX Two Math', serif;
+	font-family: 'New Computer Modern Math', 'Latin Modern Math', 'STIX Two Math', serif;
 }
 
-/* Increase default math font size */
+/* Default math font size */
 typst-math:not([display]) {
 	/* inline math */
 	font-size: var(--typst-math-inline-font-size, 18px);
@@ -28,4 +24,89 @@ typst-math:not([display]) {
 typst-math[display] {
 	/* block math */
 	font-size: var(--typst-math-block-font-size, 20px);
+}
+
+/* Typst MathML Core alignment & UA-override rules (derived from Typst HTML export) */
+
+/* Alignment */
+typst-math mtable.right-align mtd,
+typst-math mtable mtd.right-align,
+typst-math mtable.left-align mtd.right-align,
+typst-math mtable.aligned mtd:nth-child(odd) {
+	justify-items: end;
+	text-align: right;
+}
+
+typst-math mtable.cases mtd,
+typst-math mtable.left-align mtd,
+typst-math mtable mtd.left-align,
+typst-math mtable.aligned mtd:nth-child(even),
+typst-math math:is(:not([display])) > mtable.multiline-equation mtd {
+	justify-items: start;
+	text-align: left;
+}
+
+typst-math mtable.cases mtd,
+typst-math mtable.aligned mtd,
+typst-math mtable mtd.flushed,
+typst-math mtable mtd.left-flush {
+	padding-left: 0;
+}
+
+typst-math mtable.cases mtd,
+typst-math mtable.aligned mtd,
+typst-math mtable mtd.flushed,
+typst-math mtable mtd.right-flush {
+	padding-right: 0;
+}
+
+/* Tables */
+typst-math mtable {
+	math-style: inherit;
+}
+
+typst-math mtd {
+	math-depth: auto-add;
+	math-style: compact;
+	math-shift: compact;
+}
+
+/* Equations */
+typst-math mtable.multiline-equation mtd {
+	math-depth: inherit;
+	math-style: inherit;
+	math-shift: inherit;
+	padding: 0;
+}
+
+typst-math math > mtable.multiline-equation mtr:not(:last-child) mtd {
+	padding-bottom: 0.5em;
+}
+
+/* Fractions */
+typst-math mfrac {
+	padding-inline: 0;
+	margin-inline: 0.1em;
+}
+
+/* Accents */
+typst-math mover[accent='true' i] > :first-child {
+	font-feature-settings: 'dtls';
+}
+
+typst-math mover.dotted[accent='true' i] > :first-child {
+	font-feature-settings: 'dtls' 0;
+}
+
+/* Other rules for scriptlevel, displaystyle and math-shift */
+typst-math munder > :nth-child(2),
+typst-math munderover > :nth-child(2) {
+	math-shift: compact;
+}
+
+typst-math munder[accentunder='true' i] > :not(:first-child),
+typst-math mover[accent='true' i] > :not(:first-child) {
+	math-depth: inherit;
+	math-style: inherit;
+	math-shift: inherit;
 }

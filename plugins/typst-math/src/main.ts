@@ -14,47 +14,80 @@ declare global {
 
 class TypstMathElement extends HTMLElement {
 	connectedCallback() {
-		// Use setTimeout to avoid blocking the DOM insertion
-		setTimeout(() => this.render(), 0);
-	}
-
-	async render() {
-		const source = this.getAttribute('source') || '';
-		const display = this.hasAttribute('display');
-
-		const plugin = window.typstMathPlugin;
-		if (!plugin) return;
-
-		try {
-			const [result] = await Promise.all([
-				plugin.compiler.compile(source, display, plugin),
-				plugin.fontManager.load(plugin),
-			]);
-			this.innerHTML = result.mathml;
-			plugin.applyEquationStylesheet(result.css);
-			this.className = '';
-			this.removeAttribute('title');
-		} catch (e: any) {
-			this.textContent = source;
-			this.title = e?.message ?? String(e);
-			this.className = 'typst-math-error';
-		}
+		window.typstMathPlugin?.renderElement(this);
 	}
 }
 
-if (typeof customElements !== 'undefined' && !customElements.get('typst-math')) {
-	customElements.define('typst-math', TypstMathElement);
+if (typeof customElements !== 'undefined') {
+	const existing = customElements.get('typst-math');
+	if (existing) {
+		existing.prototype.connectedCallback = function (this: HTMLElement) {
+			window.typstMathPlugin?.renderElement(this);
+		};
+		(existing.prototype as any).render = function (this: HTMLElement) {
+			window.typstMathPlugin?.renderElement(this);
+		};
+	} else {
+		customElements.define('typst-math', TypstMathElement);
+	}
 }
 
 export default class TypstMathPlugin extends Plugin {
-	private originalTex2chtml: any;
+	private originalTex2chtmlMap = new Map<Window, any>();
 	private unloaded = false;
-	private equationStyleEl: HTMLStyleElement | null = null;
-	private appliedEquationCss: string | null = null;
 	private previousCssVariables: { inline: string; block: string } | null = null;
 	public compiler: TypstCompiler = new TypstCompiler();
 	public fontManager: FontManager = new FontManager();
 	public settings!: TypstMathSettings;
+
+	/** No-op shim for stale in-flight element callbacks during hot-reload. */
+	applyEquationStylesheet(_css?: string | null): void {}
+
+	public renderElement(el: HTMLElement): void {
+		// If content is already rendered, do not re-render.
+		if (el.querySelector('math')) {
+			return;
+		}
+
+		if (this.compiler.isReady()) {
+			this.renderSync(el);
+		} else {
+			void this.renderAsync(el);
+		}
+	}
+
+	private renderSync(el: HTMLElement): void {
+		const source = el.getAttribute('source') || '';
+		const display = el.hasAttribute('display');
+
+		try {
+			el.innerHTML = this.compiler.compileSync(source, display);
+			el.className = '';
+			el.removeAttribute('title');
+		} catch (e: any) {
+			el.textContent = source;
+			el.title = e?.message ?? String(e);
+			el.className = 'typst-math-error';
+		}
+	}
+
+	private async renderAsync(el: HTMLElement): Promise<void> {
+		const source = el.getAttribute('source') || '';
+		const display = el.hasAttribute('display');
+
+		el.textContent = source;
+		el.className = 'typst-math-loading';
+
+		try {
+			el.innerHTML = await this.compiler.compile(source, display, this);
+			el.className = '';
+			el.removeAttribute('title');
+		} catch (e: any) {
+			el.textContent = source;
+			el.title = e?.message ?? String(e);
+			el.className = 'typst-math-error';
+		}
+	}
 
 	async onload() {
 		window.typstMathPlugin = this;
@@ -62,59 +95,84 @@ export default class TypstMathPlugin extends Plugin {
 		this.applySettings();
 		this.addSettingTab(new TypstMathSettingTab(this.app, this));
 
-		this.app.workspace.onLayoutReady(() => {
-			void this.installMathJaxOverride();
+		this.app.workspace.onLayoutReady(async () => {
+			await loadMathJax();
+			if (this.unloaded) return;
+
+			renderMath('', false);
+			this.patchWindow(window);
 			void this.fontManager.load(this);
+
+			// Warm up WASM compiler in the background
+			await this.compiler.init(this);
+			this.rerenderMathElements(window.document);
 		});
+
+		this.registerEvent(
+			this.app.workspace.on('window-open', (_workspaceWindow, win) => {
+				this.patchWindow(win);
+				this.rerenderMathElements(win.document);
+			}),
+		);
+
+		this.registerEvent(
+			this.app.workspace.on('window-close', (_workspaceWindow, win) => {
+				this.originalTex2chtmlMap.delete(win);
+			}),
+		);
 	}
 
-	private async installMathJaxOverride(): Promise<void> {
-		await loadMathJax();
+	public createMathContainer(
+		source: string,
+		display: boolean,
+		doc: Document = document,
+	): HTMLElement {
+		const container = doc.createElement('mjx-container');
+		container.className = 'Mathjax';
+		container.setAttribute('jax', 'CHTML');
 
-		// The plugin may have been disabled while MathJax was loading; installing
-		// after onunload would leave an override that nothing can restore.
-		if (this.unloaded || !window.MathJax) return;
-
-		// Trigger side-effects (loads CSS)
-		renderMath('', false);
-
-		this.originalTex2chtml = window.MathJax.tex2chtml;
-
-		window.MathJax.tex2chtml = (source: string, opts: { display?: boolean }) => {
-			const container = document.createElement('mjx-container');
-			container.className = 'Mathjax';
-			container.setAttribute('jax', 'CHTML');
-
-			const el = document.createElement('typst-math');
-			el.setAttribute('source', source);
-			if (opts.display) {
-				el.setAttribute('display', '');
-			}
-
-			if (!this.compiler.isReady()) {
-				el.textContent = source;
-				el.className = 'typst-math-loading';
-			}
-
-			container.appendChild(el);
-			return container;
-		};
-	}
-
-	/**
-	 * Injects Typst's own MathML stylesheet, extracted from the compiled
-	 * document at render time so it always matches the compiler version.
-	 */
-	applyEquationStylesheet(css: string | null): void {
-		if (!css || css === this.appliedEquationCss) return;
-
-		if (!this.equationStyleEl) {
-			this.equationStyleEl = document.createElement('style');
-			this.equationStyleEl.dataset.plugin = 'typst-math';
-			document.head.appendChild(this.equationStyleEl);
+		const el = doc.createElement('typst-math');
+		el.setAttribute('source', source);
+		if (display) {
+			el.setAttribute('display', '');
 		}
-		this.equationStyleEl.textContent = css;
-		this.appliedEquationCss = css;
+
+		if (this.compiler.isReady()) {
+			try {
+				el.innerHTML = this.compiler.compileSync(source, display);
+			} catch (e: any) {
+				el.textContent = source;
+				el.title = e?.message ?? String(e);
+				el.className = 'typst-math-error';
+			}
+		} else {
+			el.textContent = source;
+			el.className = 'typst-math-loading';
+		}
+
+		container.appendChild(el);
+		return container;
+	}
+
+	private patchWindow(win: Window): void {
+		if (this.unloaded || this.originalTex2chtmlMap.has(win)) return;
+
+		if (win.MathJax && typeof win.MathJax.tex2chtml === 'function') {
+			this.originalTex2chtmlMap.set(win, win.MathJax.tex2chtml);
+			win.MathJax.tex2chtml = (source: string, opts: { display?: boolean }) => {
+				return this.createMathContainer(source, Boolean(opts?.display), win.document);
+			};
+		} else {
+			win.setTimeout(() => this.patchWindow(win), 100);
+		}
+	}
+
+	private rerenderMathElements(doc: Document = document): void {
+		for (const el of doc.querySelectorAll<HTMLElement>('typst-math')) {
+			if (!el.querySelector('math')) {
+				this.renderElement(el);
+			}
+		}
 	}
 
 	async loadSettings(): Promise<void> {
@@ -165,12 +223,14 @@ export default class TypstMathPlugin extends Plugin {
 		this.unloaded = true;
 		this.restoreCssVariables();
 		this.fontManager.unload();
-		this.equationStyleEl?.remove();
-		this.equationStyleEl = null;
-		this.appliedEquationCss = null;
-		if (window.MathJax && this.originalTex2chtml) {
-			window.MathJax.tex2chtml = this.originalTex2chtml;
+
+		for (const [win, original] of this.originalTex2chtmlMap) {
+			if (win.MathJax) {
+				win.MathJax.tex2chtml = original;
+			}
 		}
+		this.originalTex2chtmlMap.clear();
+
 		delete window.typstMathPlugin;
 	}
 }
