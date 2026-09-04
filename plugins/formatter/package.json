@@ -8,6 +8,7 @@
 	"scripts": {
 		"build": "npm run build:wasm && vp build",
 		"build:wasm": "cd ../../crates/formatter-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('formatter_wasm_bg.wasm', import.meta.url)/'formatter_wasm_bg.wasm'/g\" pkg/formatter_wasm.js",
+		"build:wasm:dev": "cd ../../crates/formatter-wasm && wasm-pack build --target web --dev && sed -i \"s/new URL('formatter_wasm_bg.wasm', import.meta.url)/'formatter_wasm_bg.wasm'/g\" pkg/formatter_wasm.js",
 		"check": "vp check",
 		"check:types": "vp check --no-fmt --no-lint",
 		"fmt": "vp fmt",

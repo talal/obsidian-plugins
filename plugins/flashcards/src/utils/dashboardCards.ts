@@ -1,11 +1,11 @@
-import type { ReviewItem } from '../types.ts';
+import type { CardType, ReviewItem } from '../types.ts';
 import { filterDashboardCard } from './dashboardFilter.ts';
 
-export interface DashboardBlockItem {
-	blockId: string;
-	noteTitle: string;
-	notePath: string;
-	blockType: 'inline' | 'block' | 'cloze';
+export interface DashboardPromptItem {
+	prompt_id: string;
+	note_title: string;
+	note_path: string;
+	card_type: CardType;
 	reversible: boolean;
 	front: string;
 	back: string;
@@ -15,21 +15,21 @@ export interface DashboardBlockItem {
 }
 
 /**
- * Groups raw ReviewItem cards by their parent block ID so bidirectional cards
+ * Groups raw ReviewItem cards by their parent prompt ID so bidirectional cards
  * appear as a single consolidated row in the dashboard table.
  */
-export function groupCardsByBlock(items: ReviewItem[]): DashboardBlockItem[] {
-	const map = new Map<string, DashboardBlockItem>();
+export function groupCardsByPrompt(items: ReviewItem[]): DashboardPromptItem[] {
+	const map = new Map<string, DashboardPromptItem>();
 
 	for (const card of items) {
-		const existing = map.get(card.blockId);
+		const existing = map.get(card.prompt_id);
 		if (!existing) {
 			const isRev = card.direction === 'reverse';
-			const item: DashboardBlockItem = {
-				blockId: card.blockId,
-				noteTitle: card.noteTitle,
-				notePath: card.notePath,
-				blockType: card.blockType,
+			const item: DashboardPromptItem = {
+				prompt_id: card.prompt_id,
+				note_title: card.note_title,
+				note_path: card.note_path,
+				card_type: card.card_type,
 				reversible: card.reversible,
 				front: isRev ? card.back : card.front,
 				back: isRev ? card.front : card.back,
@@ -37,7 +37,7 @@ export function groupCardsByBlock(items: ReviewItem[]): DashboardBlockItem[] {
 				forward: isRev ? undefined : card,
 				reverse: isRev ? card : undefined,
 			};
-			map.set(card.blockId, item);
+			map.set(card.prompt_id, item);
 		} else {
 			if (card.direction === 'reverse') {
 				existing.reverse = card;
@@ -53,18 +53,25 @@ export function groupCardsByBlock(items: ReviewItem[]): DashboardBlockItem[] {
 }
 
 /**
- * Filter a DashboardBlockItem against status filters and search queries.
+ * Filter a DashboardPromptItem against status filters and search queries.
  */
-export function filterDashboardBlock(
-	item: DashboardBlockItem,
+export function filterDashboardPrompt(
+	item: DashboardPromptItem,
 	statusFilter: 'all' | 'due' | 'new' | 'learning' | 'review',
 	dueCutoff: number,
 	searchQuery: string,
 ): boolean {
 	// Status Filter
 	if (statusFilter === 'due') {
-		const fDue = item.forward && item.forward.dueAt <= dueCutoff;
-		const rDue = item.reverse && item.reverse.dueAt <= dueCutoff;
+		const now = Date.now();
+		const isDue = (c: ReviewItem | undefined) => {
+			if (!c) return false;
+			if (c.state === 'new') return true;
+			if (c.state === 'learning' || c.state === 'relearning') return c.due_at <= now;
+			return c.due_at <= dueCutoff;
+		};
+		const fDue = isDue(item.forward);
+		const rDue = isDue(item.reverse);
 		if (!fDue && !rDue) return false;
 	} else if (statusFilter === 'new') {
 		const fNew = item.forward && item.forward.state === 'new';

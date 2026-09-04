@@ -8,15 +8,12 @@
 	"scripts": {
 		"build": "npm run build:wasm && vp build",
 		"build:wasm": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --release && sed -i \"s/new URL('flashcards_wasm_bg.wasm', import.meta.url)/'flashcards_wasm_bg.wasm'/g\" pkg/flashcards_wasm.js",
+		"build:wasm:dev": "cd ../../crates/flashcards-wasm && wasm-pack build --target web --dev && sed -i \"s/new URL('flashcards_wasm_bg.wasm', import.meta.url)/'flashcards_wasm_bg.wasm'/g\" pkg/flashcards_wasm.js",
 		"check": "vp check",
 		"check:types": "vp check --no-fmt --no-lint",
 		"fmt": "vp fmt",
 		"lint": "vp lint",
 		"test": "vp test"
-	},
-	"dependencies": {
-		"@types/sql.js": "^1.4.11",
-		"sql.js": "^1.14.2"
 	},
 	"devDependencies": {
 		"@sveltejs/vite-plugin-svelte": "^5.0.3",

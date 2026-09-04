@@ -1,32 +1,25 @@
-import { App, Modal, TFile } from 'obsidian';
+import { App, Modal } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
 import type FlashcardsPlugin from '../main.js';
-import { DEFAULT_LEECH_TAG, type ReviewItem, type SchedulingCard } from '../types.js';
-import {
-	addCardLeechTagInMarkdown,
-	isLeechThresholdMet,
-	toggleCardTodoInMarkdown,
-} from '../utils/cardTagModifier.js';
-import { buildFsrsParams } from '../utils/fsrsParams.js';
-import { ReviewSessionCache } from '../utils/ReviewSessionCache.js';
-import { WasmBridge } from '../wasm.js';
+import type { ReviewItem } from '../types.js';
+import type { FlashcardsEngine } from '../wasm.js';
 import ReviewModalComponent from './components/ReviewModal.svelte';
+import { ReviewSession } from './ReviewSession.js';
 
 export class ReviewModal extends Modal {
 	private component: ReturnType<typeof ReviewModalComponent> | undefined;
-	private cache: ReviewSessionCache;
-	private activeSessionId: number | null = null;
-	private hasUnsavedChanges = false;
+	private session: ReviewSession;
 
 	constructor(
 		app: App,
 		private plugin: FlashcardsPlugin,
-		private items: ReviewItem[],
-		private deckName = 'All Cards',
+		engine: FlashcardsEngine,
+		items: ReviewItem[],
+		deckName = 'All Cards',
 	) {
 		super(app);
-		this.cache = new ReviewSessionCache();
+		this.session = new ReviewSession(app, plugin, engine, items, deckName);
 	}
 
 	onOpen() {
@@ -40,185 +33,27 @@ export class ReviewModal extends Modal {
 			target: this.contentEl,
 			props: {
 				app: this.app,
-				items: this.items,
-				deckName: this.deckName,
-				onGrade: (item: ReviewItem, ratingStr: 'forgot' | 'remembered') => {
-					return this.handleCardGrade(item, ratingStr);
-				},
-				onUndo: (item: ReviewItem) => {
-					this.handleCardUndo(item);
-				},
-				onFinishSession: async (studied: number, forgot: number, remembered: number) => {
-					await this.flushSessionData(studied, forgot, remembered);
-				},
-				onToggleTodo: async (item: ReviewItem) => {
-					await this.handleToggleTodo(item);
-				},
+				items: this.session.items,
+				deckName: this.session.deckName,
+				onGrade: (item: ReviewItem, ratingStr: 'forgot' | 'remembered') =>
+					this.session.grade(item, ratingStr),
+				onUndo: (_item: ReviewItem) => this.session.undo(),
+				onFinishSession: () => this.session.finishSession(),
+				onToggleTodo: (item: ReviewItem) => this.session.toggleTodo(item),
 				onClose: () => this.close(),
 			},
 		});
 	}
 
-	private handleCardGrade(
-		item: ReviewItem,
-		ratingStr: 'forgot' | 'remembered',
-	): { isLeech?: boolean } {
-		const previousCard = this.toSchedulingCard(item);
-		const now = Date.now();
-		const rolloverHour = this.plugin.settings.rolloverHour ?? 4;
-		const dueCounts = this.plugin.db.getUpcomingDueCounts(90, now, rolloverHour);
-		const sibling = this.plugin.db.getSiblingCard(item.cardId, item.blockId);
-		let siblingDueOffset: number | undefined = undefined;
-		if (sibling && sibling.due_at > now) {
-			siblingDueOffset = Math.max(0, Math.round((sibling.due_at - now) / 86400000));
-		}
-
-		const params = buildFsrsParams(this.plugin.settings, {
-			due_counts: dueCounts,
-			sibling_due_offset: siblingDueOffset,
-		});
-
-		const info = WasmBridge.calculateSchedule(previousCard, params, now);
-		const targetRating = ratingStr === 'forgot' ? 'again' : 'good';
-
-		const candidate =
-			info.next_states.find((c) => c.rating === targetRating) ?? info.next_states[2];
-		if (!candidate) return {};
-
-		const stateNum = this.plugin.db.unmapState(candidate.card.state);
-
-		this.cache.recordReview(item, previousCard, ratingStr, candidate.card, stateNum, now);
-		this.hasUnsavedChanges = true;
-
-		this.applySchedulingCard(item, candidate.card);
-
-		// Check Leech threshold on lapses (Forgot on review card)
-		const leechThreshold = this.plugin.settings.leechThreshold ?? 4;
-		let isLeech = false;
-		if (
-			ratingStr === 'forgot' &&
-			previousCard.state === 'review' &&
-			isLeechThresholdMet(candidate.card.lapses, leechThreshold)
-		) {
-			isLeech = true;
-			if (!item.tags.includes(DEFAULT_LEECH_TAG)) {
-				item.tags.push(DEFAULT_LEECH_TAG);
-			}
-			void this.handleCardLeech(item);
-		}
-
-		return { isLeech };
-	}
-
-	private handleCardUndo(_item: ReviewItem): void {
-		const undoRes = this.cache.undo();
-		if (undoRes) {
-			this.hasUnsavedChanges = true;
-			this.applySchedulingCard(undoRes.item, undoRes.previousState);
-		}
-	}
-
-	public async flushSessionData(
-		studied?: number,
-		forgot?: number,
-		remembered?: number,
-	): Promise<void> {
-		if (!this.hasUnsavedChanges || this.cache.getReviewsCount() === 0) return;
-
-		const stats = this.cache.getStats();
-		const s = studied ?? stats.studied;
-		const f = forgot ?? stats.forgot;
-		const r = remembered ?? stats.remembered;
-
-		const { session, reviews, cardUpdates } = this.cache.getPendingData(s, f, r);
-
-		try {
-			const sessionId = await this.plugin.db.commitSession(
-				session,
-				reviews,
-				cardUpdates,
-				this.activeSessionId ?? undefined,
-			);
-			this.activeSessionId = sessionId;
-			this.hasUnsavedChanges = false;
-			this.plugin.refreshDashboardIfOpen();
-		} catch (error) {
-			console.error('Failed to flush study session checkpoint:', error);
-		}
-	}
-
-	private toSchedulingCard(item: ReviewItem): SchedulingCard {
-		return {
-			stability: item.stability,
-			difficulty: item.difficulty,
-			reps: item.reps,
-			lapses: item.lapses,
-			learning_step: item.learningStep,
-			relearning_step: item.relearningStep,
-			state: item.state,
-			last_review: item.lastReview,
-			due: item.dueAt,
-		};
-	}
-
-	private applySchedulingCard(item: ReviewItem, card: SchedulingCard): void {
-		item.stability = card.stability;
-		item.difficulty = card.difficulty;
-		item.reps = card.reps;
-		item.lapses = card.lapses;
-		item.learningStep = card.learning_step;
-		item.relearningStep = card.relearning_step;
-		item.state = card.state;
-		item.stateNum = this.plugin.db.unmapState(card.state);
-		item.lastReview = card.last_review;
-		item.dueAt = card.due;
-		item.dueHuman = this.plugin.db.humanizeDue(card.due);
-		item.lastPracticedHuman = card.last_review ? 'Just now' : 'Never';
-	}
-
-	private async handleToggleTodo(item: ReviewItem): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(item.notePath);
-		if (file instanceof TFile) {
-			const content = await this.app.vault.read(file);
-			const updated = toggleCardTodoInMarkdown(content, item.blockId, item.blockType);
-			if (updated !== content) {
-				await this.app.vault.modify(file, updated);
-				await this.plugin.scanner.syncFile(file);
-				this.plugin.refreshDashboardIfOpen();
-			}
-		}
-	}
-
-	private async handleCardLeech(item: ReviewItem): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(item.notePath);
-		if (file instanceof TFile) {
-			const content = await this.app.vault.read(file);
-			const updated = addCardLeechTagInMarkdown(
-				content,
-				item.blockId,
-				item.blockType,
-				DEFAULT_LEECH_TAG,
-			);
-			if (updated !== content) {
-				await this.app.vault.modify(file, updated);
-				await this.plugin.scanner.syncFile(file);
-				this.plugin.refreshDashboardIfOpen();
-			}
-		}
-	}
-
-	onClose() {
+	async onClose() {
 		if (this.plugin.activeReviewModal === this) {
 			this.plugin.activeReviewModal = null;
-		}
-		if (this.hasUnsavedChanges && this.cache.getReviewsCount() > 0) {
-			const stats = this.cache.getStats();
-			void this.flushSessionData(stats.studied, stats.forgot, stats.remembered);
 		}
 		if (this.component) {
 			void unmount(this.component);
 			this.component = undefined;
 		}
 		this.contentEl.empty();
+		await this.session.finishSession();
 	}
 }

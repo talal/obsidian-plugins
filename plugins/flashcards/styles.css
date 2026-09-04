@@ -467,6 +467,50 @@
 	color: var(--text-faint);
 }
 
+.fc-tag-cell {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	max-width: 100%;
+}
+
+.fc-tree-toggle {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	margin: 0;
+	background: transparent;
+	border: none;
+	cursor: pointer;
+	color: var(--text-muted);
+	border-radius: var(--radius-s);
+	flex-shrink: 0;
+}
+
+.fc-tree-toggle:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.fc-tree-chevron {
+	display: inline-flex;
+	transition: transform 150ms ease;
+}
+
+.fc-tree-chevron.is-collapsed {
+	transform: rotate(-90deg);
+}
+
+.fc-tree-spacer {
+	width: 18px;
+	height: 18px;
+	flex-shrink: 0;
+	display: inline-block;
+}
+
 /* RTL Plaintext Bidi Support */
 .fc-note-link,
 .fc-text-preview,

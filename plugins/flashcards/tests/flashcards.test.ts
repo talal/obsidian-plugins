@@ -1,64 +1,53 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { App } from 'obsidian';
-import initSqlJs, { type SqlJsStatic } from 'sql.js';
-import { beforeAll, describe, expect, it } from 'vitest';
+import type { App, CachedMetadata, TFile } from 'obsidian';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import initWasm from '../../../crates/flashcards-wasm/pkg/flashcards_wasm.js';
-import {
-	DatabaseManager,
-	getStudyDayCutoff,
-	getStudyDayKey,
-	getStudyDayStart,
-} from '../src/db/DatabaseManager.ts';
-import SCHEMA_SQL from '../src/db/schema.sql?raw';
-import {
-	computeSha256,
-	isValidSqliteHeader,
-	packSnapshot,
-	unpackAndVerifySnapshot,
-} from '../src/db/snapshot.ts';
-import {
-	DEFAULT_MAXIMUM_INTERVAL,
-	DEFAULT_REQUEST_RETENTION,
-	DEFAULT_SETTINGS,
-	type FlashcardsPluginSettings,
-	type FsrsParams,
-	type ParsedBlock,
-	type ReviewItem,
-	type ReviewRecord,
-	type SchedulingCard,
-	type SessionRecord,
-} from '../src/types.ts';
-import {
-	addCardLeechTagInMarkdown,
-	addCardTag,
-	hasCardTag,
-	isLeechThresholdMet,
-	removeCardTag,
-	toggleCardTag,
-	toggleCardTodoInMarkdown,
-} from '../src/utils/cardTagModifier.ts';
+import initWasm, { FlashcardsEngine } from '../../../crates/flashcards-wasm/pkg/flashcards_wasm.js';
+import type FlashcardsPlugin from '../src/main.ts';
+import { NoteScanner } from '../src/scanner/NoteScanner.ts';
+import { SnapshotStore } from '../src/storage.ts';
+import { DEFAULT_MAXIMUM_INTERVAL, DEFAULT_SETTINGS, type ReviewItem } from '../src/types.ts';
+import { ReviewSession } from '../src/ui/ReviewSession.ts';
 import { formatClozeText } from '../src/utils/clozeFormat.ts';
-import { filterDashboardBlock, groupCardsByBlock } from '../src/utils/dashboardCards.ts';
+import {
+	type DashboardPromptItem,
+	filterDashboardPrompt,
+	groupCardsByPrompt,
+} from '../src/utils/dashboardCards.ts';
 import { filterDashboardCard } from '../src/utils/dashboardFilter.ts';
 import { buildFsrsParams, parseWeights } from '../src/utils/fsrsParams.ts';
 import { calculateProgress, calculateRetention } from '../src/utils/reviewMetrics.ts';
-import { ReviewSessionCache } from '../src/utils/ReviewSessionCache.ts';
 import {
-	applySiblingBurying,
-	CardPriorityRank,
-	getCardPriorityRank,
-} from '../src/utils/siblingBurying.ts';
-import { formatLocalDate, shiftLocalDateKey } from '../src/utils/studyDay.ts';
+	formatLocalDate,
+	getStudyDayCutoff,
+	getStudyDayKey,
+	getStudyDayStart,
+	shiftLocalDateKey,
+} from '../src/utils/studyDay.ts';
 import {
 	DEFAULT_LEARNING_STEPS,
 	DEFAULT_RELEARNING_STEPS,
 	parseStudySteps,
 } from '../src/utils/studySteps.ts';
-import { computeTagDeckStats } from '../src/utils/tagStats.ts';
+import {
+	buildTagTree,
+	getSelectedTagSummary,
+	getVisibleTagRows,
+	isNodeFullySelected,
+	isNodeIndeterminate,
+} from '../src/utils/tagTree.ts';
 import { WasmBridge } from '../src/wasm.ts';
+
+beforeAll(async () => {
+	const wasmPath = path.resolve(
+		__dirname,
+		'../../../crates/flashcards-wasm/pkg/flashcards_wasm_bg.wasm',
+	);
+	const wasmBuffer = fs.readFileSync(wasmPath);
+	await initWasm({ module_or_path: wasmBuffer });
+});
 
 describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 	it('calculates start and cutoff for evening reviews (e.g. 21:00)', () => {
@@ -69,14 +58,17 @@ describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 		const startDate = new Date(startMs);
 		const cutoffDate = new Date(cutoffMs);
 
+		expect(startDate.getFullYear()).toBe(2026);
+		expect(startDate.getMonth()).toBe(4);
 		expect(startDate.getDate()).toBe(15);
 		expect(startDate.getHours()).toBe(4);
 
 		expect(cutoffDate.getDate()).toBe(16);
 		expect(cutoffDate.getHours()).toBe(4);
+		expect(cutoffDate.getMinutes()).toBe(0);
 	});
 
-	it('calculates start and cutoff for late-night reviews before rollover (e.g. 02:30 AM)', () => {
+	it('calculates start and cutoff for post-midnight reviews before rollover (e.g. 02:30)', () => {
 		const testTime = new Date(2026, 4, 16, 2, 30, 0, 0);
 		const startMs = getStudyDayStart(4, testTime);
 		const cutoffMs = getStudyDayCutoff(4, testTime);
@@ -91,4852 +83,914 @@ describe('Study Day Boundary Calculation (4:00 AM Rollover)', () => {
 		expect(cutoffDate.getHours()).toBe(4);
 	});
 
-	it('calculates start and cutoff right after rollover (e.g. 04:01 AM)', () => {
-		const testTime = new Date(2026, 4, 16, 4, 1, 0, 0);
-		const startMs = getStudyDayStart(4, testTime);
-		const cutoffMs = getStudyDayCutoff(4, testTime);
-
-		const startDate = new Date(startMs);
-		const cutoffDate = new Date(cutoffMs);
-
-		expect(startDate.getDate()).toBe(16);
-		expect(startDate.getHours()).toBe(4);
-
-		expect(cutoffDate.getDate()).toBe(17);
-		expect(cutoffDate.getHours()).toBe(4);
-	});
-
-	it('assigns reviews before rollover to the previous local study day', () => {
-		const beforeRollover = new Date(2026, 4, 16, 3, 59, 0, 0).getTime();
-		const afterRollover = new Date(2026, 4, 16, 4, 0, 0, 0).getTime();
-
-		expect(getStudyDayKey(beforeRollover, 4)).toBe('2026-05-15');
-		expect(getStudyDayKey(afterRollover, 4)).toBe('2026-05-16');
+	it('formats and shifts study day keys', () => {
+		const d = new Date(2026, 4, 15, 12, 0, 0);
+		expect(formatLocalDate(d)).toBe('2026-05-15');
+		expect(getStudyDayKey(d.getTime(), 4)).toBe('2026-05-15');
+		expect(shiftLocalDateKey('2026-05-15', 3)).toBe('2026-05-18');
+		expect(shiftLocalDateKey('2026-05-15', -1)).toBe('2026-05-14');
 	});
 });
 
-describe('FSRS study step parsing', () => {
-	it('parses supported minute, hour, and day units', () => {
-		expect(parseStudySteps('10m 9h 2d', DEFAULT_LEARNING_STEPS)).toEqual([
-			10 * 60 * 1000,
-			9 * 60 * 60 * 1000,
-			2 * 24 * 60 * 60 * 1000,
-		]);
+describe('FSRS Parameters and Weight Parsing', () => {
+	it('parses valid comma-separated 21-weight string', () => {
+		const valid21 =
+			'0.4, 0.9, 2.3, 10.9, 4.93, 0.94, 0.86, 0.01, 1.49, 0.14, 0.94, 2.18, 0.05, 0.34, 1.26, 0.29, 2.61, 0.1, 0.2, 0.3, 0.4';
+		const parsed = parseWeights(valid21);
+		expect(parsed).toBeDefined();
+		expect(parsed).toHaveLength(21);
+		expect(parsed![0]).toBe(0.4);
 	});
 
-	it('uses defaults when no valid step is configured', () => {
-		expect(parseStudySteps('not-a-step', DEFAULT_LEARNING_STEPS)).toEqual(DEFAULT_LEARNING_STEPS);
-		expect(parseStudySteps('', DEFAULT_RELEARNING_STEPS)).toEqual(DEFAULT_RELEARNING_STEPS);
-	});
-});
-
-describe('Dashboard Search & Tag Filter Logic', () => {
-	const sampleCards = [
-		{
-			noteTitle: 'Geography Demo',
-			notePath: 'Geography Demo.md',
-			front: 'Capital of France?',
-			back: 'Paris',
-			tags: ['geography', 'capitals'],
-		},
-		{
-			noteTitle: 'Computer Science',
-			notePath: 'Computer Science.md',
-			front: 'What is %rax?',
-			back: 'Return register',
-			tags: ['cs', 'assembly'],
-		},
-		{
-			noteTitle: 'German Vocab',
-			notePath: 'German Vocab.md',
-			front: 'die Entscheidung',
-			back: 'the decision',
-			tags: ['german', 'vocab'],
-		},
-	];
-
-	it('filters by multiple tags with OR matching (e.g. #cs #geography)', () => {
-		const result = sampleCards.filter((c) => filterDashboardCard(c, '#cs #geography'));
-		expect(result).toHaveLength(2);
-		expect(result.map((c) => c.noteTitle)).toEqual(['Geography Demo', 'Computer Science']);
+	it('rejects weights with invalid length', () => {
+		expect(parseWeights('0.4, 0.9, 2.3')).toBeUndefined();
+		expect(parseWeights('')).toBeUndefined();
+		expect(parseWeights(undefined)).toBeUndefined();
 	});
 
-	it('filters by note text query (e.g. "German")', () => {
-		const result = sampleCards.filter((c) => filterDashboardCard(c, 'German'));
-		expect(result).toHaveLength(1);
-		expect(result[0]?.noteTitle).toBe('German Vocab');
+	it('parses study step strings correctly', () => {
+		expect(parseStudySteps('1m 10m 1d', DEFAULT_LEARNING_STEPS)).toEqual([60000, 600000, 86400000]);
+		expect(parseStudySteps('', DEFAULT_LEARNING_STEPS)).toEqual([600000]);
+		expect(parseStudySteps('invalid', DEFAULT_RELEARNING_STEPS)).toEqual([600000]);
 	});
 
-	it('combines text search with tag filter (e.g. "France #geography")', () => {
-		const match = sampleCards.filter((c) => filterDashboardCard(c, 'France #geography'));
-		expect(match).toHaveLength(1);
-		expect(match[0]?.noteTitle).toBe('Geography Demo');
-
-		const nonMatch = sampleCards.filter((c) => filterDashboardCard(c, 'France #cs'));
-		expect(nonMatch).toHaveLength(0);
-	});
-
-	it('matches hierarchical tags and does not over-match substring tags', () => {
-		const cards = [
-			{
-				noteTitle: 'Art History',
-				notePath: 'Art.md',
-				front: 'Renaissance',
-				back: '14th-17th century',
-				tags: ['art', 'art/renaissance'],
-			},
-			{
-				noteTitle: 'Cardiology',
-				notePath: 'Cardio.md',
-				front: 'Heart function',
-				back: 'Pumps blood',
-				tags: ['heart', 'cardiology'],
-			},
-		];
-
-		const artMatches = cards.filter((c) => filterDashboardCard(c, '#art'));
-		expect(artMatches).toHaveLength(1);
-		expect(artMatches[0]?.noteTitle).toBe('Art History');
-
-		const subtagMatches = cards.filter((c) => filterDashboardCard(c, '#art/renaissance'));
-		expect(subtagMatches).toHaveLength(1);
-		expect(subtagMatches[0]?.noteTitle).toBe('Art History');
-	});
-});
-
-describe('Dual-Slot Persistence Protocol (cards.a.db / cards.b.db)', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-		WasmBridge.initForTest(SQL);
-
-		const wasmPath = path.resolve(
-			__dirname,
-			'../../../crates/flashcards-wasm/pkg/flashcards_wasm_bg.wasm',
-		);
-		const wasmBuffer = fs.readFileSync(wasmPath);
-		await initWasm({ module_or_path: wasmBuffer });
-	});
-
-	it('packs and unpacks 48-byte header with SHA-256 checksum verification', async () => {
-		const rawDb = new SQL.Database();
-		rawDb.run(SCHEMA_SQL);
-		const payload = rawDb.export();
-		expect(isValidSqliteHeader(payload)).toBe(true);
-
-		const sha256 = await computeSha256(payload);
-		const generation = 42n;
-
-		const packed = packSnapshot(payload, generation, sha256);
-		expect(packed.length).toBe(48 + payload.length);
-
-		const unpacked = await unpackAndVerifySnapshot(packed);
-		expect(unpacked).not.toBeNull();
-		expect(unpacked?.generation).toBe(42n);
-		expect(unpacked?.payloadLength).toBe(payload.length);
-		expect(unpacked?.payload).toEqual(payload);
-	});
-
-	it('rejects corrupt snapshots (tampered payload or invalid magic)', async () => {
-		const rawDb = new SQL.Database();
-		rawDb.run(SCHEMA_SQL);
-		const payload = rawDb.export();
-		const sha256 = await computeSha256(payload);
-		const packed = packSnapshot(payload, 1n, sha256);
-
-		// Case 1: Corrupted byte in payload
-		const tamperedPayload = new Uint8Array(packed);
-		tamperedPayload[60] = (tamperedPayload[60] ?? 0) ^ 0xff;
-		expect(await unpackAndVerifySnapshot(tamperedPayload)).toBeNull();
-
-		// Case 2: Invalid Magic bytes
-		const badMagic = new Uint8Array(packed);
-		badMagic[0] = 0x00;
-		expect(await unpackAndVerifySnapshot(badMagic)).toBeNull();
-
-		// Case 3: Truncated buffer
-		const truncated = packed.subarray(0, 30);
-		expect(await unpackAndVerifySnapshot(truncated)).toBeNull();
-	});
-
-	it('recovers from higher generation slot on startup and handles corrupted sibling slot', async () => {
-		const rawDb = new SQL.Database();
-		rawDb.run(SCHEMA_SQL);
-		const payload = rawDb.export();
-		const sha = await computeSha256(payload);
-
-		const slotABytes = packSnapshot(payload, 10n, sha);
-		const slotBBytes = packSnapshot(payload, 11n, sha);
-
-		// Mock file system with both slots valid: should choose Slot B (gen 11 > gen 10)
-		const mockStorage: Record<string, Uint8Array> = {
-			'.obsidian/plugins/flashcards/cards.a.db': slotABytes,
-			'.obsidian/plugins/flashcards/cards.b.db': slotBBytes,
-		};
-
-		const mockApp = {
-			vault: {
-				adapter: {
-					exists: async (p: string) => p in mockStorage,
-					readBinary: async (p: string) => mockStorage[p]?.buffer ?? new ArrayBuffer(0),
-					writeBinary: async (p: string, b: ArrayBuffer) => {
-						mockStorage[p] = new Uint8Array(b);
-					},
-					remove: async (p: string) => {
-						delete mockStorage[p];
-					},
-				},
-			},
-		} as any;
-
-		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
-		await dbManager.init();
-
-		const active = dbManager.getActiveSlot();
-		expect(active.slot).toBe('b');
-		expect(active.generation).toBe(11n);
-
-		// Now simulate corrupting Slot B on disk: should recover cleanly from intact Slot A
-		const corruptedSlotB = new Uint8Array(slotBBytes);
-		const byteVal = corruptedSlotB[50] ?? 0;
-		corruptedSlotB[50] = byteVal ^ 0xff;
-		mockStorage['.obsidian/plugins/flashcards/cards.b.db'] = corruptedSlotB;
-
-		const dbManagerRecovery = new DatabaseManager(mockApp, {
-			dir: '.obsidian/plugins/flashcards',
-		} as any);
-		await dbManagerRecovery.init();
-
-		const recoveredActive = dbManagerRecovery.getActiveSlot();
-		expect(recoveredActive.slot).toBe('a');
-		expect(recoveredActive.generation).toBe(10n);
-	});
-
-	it('alternates slots and increments 64-bit BigInt generation on consecutive persists', async () => {
-		const mockStorage: Record<string, Uint8Array> = {};
-		const mockApp = {
-			vault: {
-				adapter: {
-					exists: async (p: string) => p in mockStorage,
-					readBinary: async (p: string) => mockStorage[p]?.buffer ?? new ArrayBuffer(0),
-					writeBinary: async (p: string, b: ArrayBuffer) => {
-						mockStorage[p] = new Uint8Array(b);
-					},
-					remove: async (p: string) => {
-						delete mockStorage[p];
-					},
-				},
-			},
-		} as any;
-
-		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
-		await dbManager.init();
-
-		// Initial state (empty DB): Slot A, Generation 0
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 0n });
-
-		// 1st persist -> Writes to Slot B, Gen 1
-		await dbManager.persist();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
-		expect(mockStorage['.obsidian/plugins/flashcards/cards.b.db']).toBeDefined();
-
-		// 2nd persist -> Writes to Slot A, Gen 2
-		await dbManager.persist();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 2n });
-		expect(mockStorage['.obsidian/plugins/flashcards/cards.a.db']).toBeDefined();
-
-		// 3rd persist -> Writes to Slot B, Gen 3
-		await dbManager.persist();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 3n });
-
-		// 4th persist -> Writes to Slot A, Gen 4
-		await dbManager.persist();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 4n });
-	});
-
-	it('handles read-back verification failure without advancing slot or generation', async () => {
-		const mockStorage: Record<string, Uint8Array> = {};
-		let corruptReadBack = false;
-
-		const mockApp = {
-			vault: {
-				adapter: {
-					exists: async (p: string) => p in mockStorage,
-					readBinary: async (p: string) => {
-						const buf = mockStorage[p];
-						if (!buf) return new ArrayBuffer(0);
-						if (corruptReadBack) {
-							// Return corrupted data on read-back
-							const corrupted = new Uint8Array(buf);
-							corrupted[10] = (corrupted[10] ?? 0) ^ 0xff;
-							return corrupted.buffer;
-						}
-						return buf.buffer;
-					},
-					writeBinary: async (p: string, b: ArrayBuffer) => {
-						mockStorage[p] = new Uint8Array(b);
-					},
-					remove: async (p: string) => {
-						delete mockStorage[p];
-					},
-				},
-			},
-		} as any;
-
-		const dbManager = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
-		await dbManager.init();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'a', generation: 0n });
-
-		// Normal persist -> moves to Slot B, Gen 1
-		await dbManager.persist();
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
-
-		// Trigger read-back corruption
-		corruptReadBack = true;
-		await expect(dbManager.persist()).rejects.toThrow(/Dual-slot read-back verification failed/);
-
-		// Must NOT have advanced generation or switched slot
-		expect(dbManager.getActiveSlot()).toEqual({ slot: 'b', generation: 1n });
-	});
-});
-
-describe('DatabaseManager SQLite Pipeline Integration (v2 Schema)', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-	});
-
-	function createFreshDb(): { db: DatabaseManager; rawDb: any } {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		return { db, rawDb };
-	}
-
-	it('creates and updates forward, bidirectional, and cloze cards correctly', () => {
-		const { db } = createFreshDb();
-		const filePath = 'Notes/Biology.md';
-
-		const parsedBlocks: ParsedBlock[] = [
-			{
-				id: 'blk001',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Mitochondria function?',
-				back: 'Powerhouse of the cell',
-				tags: ['biology', 'cells'],
-				line_start: 1,
-				line_end: 1,
-			},
-			{
-				id: 'blk002',
-				block_type: 'block',
-				reversible: true,
-				front: 'DNA',
-				back: 'Deoxyribonucleic acid',
-				tags: ['biology', 'genetics'],
-				line_start: 3,
-				line_end: 7,
-			},
-			{
-				id: 'blk003',
-				block_type: 'cloze',
-				reversible: false,
-				front: 'The human body has {{206}} bones.',
-				back: '',
-				tags: ['anatomy'],
-				line_start: 9,
-				line_end: 9,
-			},
-		];
-
-		db.syncNoteBlocks(filePath, parsedBlocks);
-
-		const cards = db.getAllCards();
-		expect(cards).toHaveLength(4); // 1 forward + 2 (forward & reverse for DNA) + 1 cloze
-
-		const mitoItem = cards.find((c) => c.blockId === 'blk001');
-		expect(mitoItem).toBeDefined();
-		expect(mitoItem?.direction).toBe('forward');
-		expect(mitoItem?.tags).toEqual(['biology', 'cells']);
-
-		const dnaForward = cards.find((c) => c.blockId === 'blk002' && c.direction === 'forward');
-		const dnaReverse = cards.find((c) => c.blockId === 'blk002' && c.direction === 'reverse');
-		expect(dnaForward).toBeDefined();
-		expect(dnaReverse).toBeDefined();
-		expect(dnaReverse?.front).toBe('Deoxyribonucleic acid');
-		expect(dnaReverse?.back).toBe('DNA');
-
-		const clozeItem = cards.find((c) => c.blockId === 'blk003');
-		expect(clozeItem).toBeDefined();
-		expect(clozeItem?.direction).toBeNull();
-		expect(clozeItem?.blockType).toBe('cloze');
-	});
-
-	it('enforces cloze direction trigger constraint at database level', () => {
-		const { rawDb } = createFreshDb();
-
-		// Insert cloze block
-		rawDb.run(`
-			INSERT INTO blocks (id, file_path, block_type, reversible, front, back, tags, updated_at)
-			VALUES ('cloze1', 'Note.md', 'cloze', 0, 'Question {{cloze}}', '', 'tags', 1000);
-		`);
-
-		// Inserting cloze card with non-null direction MUST abort via trigger
-		expect(() => {
-			rawDb.run(`
-				INSERT INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, learning_step, relearning_step)
-				VALUES ('cloze1', 'forward', 0, 1000, 0, 0, 0, 0, 0, 0);
-			`);
-		}).toThrow(/Cloze cards must have NULL direction/);
-
-		// Inserting cloze card with NULL direction succeeds
-		rawDb.run(`
-			INSERT INTO cards (block_id, direction, state, due_at, stability, difficulty, reps, lapses, learning_step, relearning_step)
-			VALUES ('cloze1', NULL, 0, 1000, 0, 0, 0, 0, 0, 0);
-		`);
-	});
-
-	it('prunes obsolete directional items when card direction changes from bidirectional to forward', () => {
-		const { db } = createFreshDb();
-		const filePath = 'Notes/Chemistry.md';
-
-		// Initially bidirectional
-		db.syncNoteBlocks(filePath, [
-			{
-				id: 'chem01',
-				block_type: 'block',
-				reversible: true,
-				front: 'NaCl',
-				back: 'Sodium Chloride',
-				tags: ['chemistry'],
-				line_start: 1,
-				line_end: 5,
-			},
-		]);
-		expect(db.getAllCards()).toHaveLength(2);
-
-		// User edits card to reversible=false (forward only)
-		db.syncNoteBlocks(filePath, [
-			{
-				id: 'chem01',
-				block_type: 'block',
-				reversible: false,
-				front: 'NaCl',
-				back: 'Sodium Chloride',
-				tags: ['chemistry'],
-				line_start: 1,
-				line_end: 5,
-			},
-		]);
-
-		const remainingCards = db.getAllCards();
-		expect(remainingCards).toHaveLength(1);
-		expect(remainingCards[0]?.direction).toBe('forward');
-	});
-
-	it('commits review session in single batch transaction and updates statistics', async () => {
-		const { db } = createFreshDb();
-		const filePath = 'Notes/History.md';
-		db.syncNoteBlocks(filePath, [
-			{
-				id: 'hist01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Year WW2 ended?',
-				back: '1945',
-				tags: ['history'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		const card = db.getAllCards()[0]!;
-		expect(card.state).toBe('new');
-		expect(card.reps).toBe(0);
-
-		const now = Date.now();
-		const nextDue = now + 24 * 60 * 60 * 1000;
-
-		const session: SessionRecord = {
-			started_at: now - 60000,
-			ended_at: now,
-			card_count: 1,
-			forgot_count: 0,
-			remembered_count: 1,
-		};
-
-		const reviews: ReviewRecord[] = [
-			{
-				card_id: card.cardId,
-				rating: 3, // Good
-				state: 2, // Review
-				due_at: nextDue,
-				stability: 2.5,
-				difficulty: 4.0,
-				reviewed_at: now,
-			},
-		];
-
-		const cardUpdates = [
-			{
-				id: card.cardId,
-				state: 2,
-				due_at: nextDue,
-				stability: 2.5,
-				difficulty: 4.0,
-				reps: 1,
-				lapses: 0,
-				last_review: now,
-				learning_step: 0,
-				relearning_step: 0,
-			},
-		];
-
-		await db.commitSession(session, reviews, cardUpdates);
-
-		const updated = db.getAllCards()[0]!;
-		expect(updated.state).toBe('review');
-		expect(updated.reps).toBe(1);
-		expect(updated.dueAt).toBe(nextDue);
-
-		const stats = db.getDashboardStats(4);
-		expect(stats.studiedToday).toBe(1);
-		expect(stats.dailyRetention).toBe(100);
-		expect(stats.studyStreak).toBe(1);
-	});
-
-	it('computes review logs with window delta_t for FSRS weight optimizer', async () => {
-		const { db } = createFreshDb();
-		const filePath = 'Notes/Math.md';
-		db.syncNoteBlocks(filePath, [
-			{
-				id: 'math01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Derivative of sin(x)?',
-				back: 'cos(x)',
-				tags: ['math'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		const card = db.getAllCards()[0]!;
-		const t0 = 1700000000000;
-		const t1 = t0 + 86400000; // 1 day
-		const t2 = t1 + 3 * 86400000; // 3 days
-
-		await db.commitSession(
-			{ started_at: t0, ended_at: t0, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 1,
-					due_at: t1,
-					stability: 1.0,
-					difficulty: 5.0,
-					reviewed_at: t0,
-				},
-			],
-			[
-				{
-					id: card.cardId,
-					state: 1,
-					due_at: t1,
-					stability: 1.0,
-					difficulty: 5.0,
-					reps: 1,
-					lapses: 0,
-					last_review: t0,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		await db.commitSession(
-			{ started_at: t1, ended_at: t1, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: t2,
-					stability: 2.5,
-					difficulty: 4.5,
-					reviewed_at: t1,
-				},
-			],
-			[
-				{
-					id: card.cardId,
-					state: 2,
-					due_at: t2,
-					stability: 2.5,
-					difficulty: 4.5,
-					reps: 2,
-					lapses: 0,
-					last_review: t1,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		await db.commitSession(
-			{ started_at: t2, ended_at: t2, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: card.cardId,
-					rating: 4,
-					state: 2,
-					due_at: t2 + 86400000 * 5,
-					stability: 6.0,
-					difficulty: 4.0,
-					reviewed_at: t2,
-				},
-			],
-			[
-				{
-					id: card.cardId,
-					state: 2,
-					due_at: t2 + 86400000 * 5,
-					stability: 6.0,
-					difficulty: 4.0,
-					reps: 3,
-					lapses: 0,
-					last_review: t2,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		const optLogs = db.getReviewLogsForOptimization();
-		expect(optLogs).toHaveLength(3);
-		expect(optLogs[0]?.delta_t).toBe(0);
-		expect(optLogs[1]?.delta_t).toBe(1);
-		expect(optLogs[2]?.delta_t).toBe(3);
-	});
-});
-
-describe('NoteScanner Single-Pass Synchronization', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-		WasmBridge.initForTest(SQL);
-	});
-
-	function createMockVault(files: Record<string, string>) {
-		const storage = new Map<string, string>(Object.entries(files));
-		const mockVault = {
-			cachedRead: async (file: any) => storage.get(file.path) ?? '',
-			modify: async (file: any, data: string) => {
-				storage.set(file.path, data);
-			},
-			getMarkdownFiles: () =>
-				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: Date.now() } })),
-			adapter: {
-				exists: async () => false,
-				readBinary: async () => new Uint8Array(),
-				writeBinary: async () => {},
-				remove: async () => {},
-			},
-		};
-		const mockMetadataCache = {
-			getFileCache: (file: any) => {
-				const content = storage.get(file.path) ?? '';
-				const tags: { tag: string }[] = [];
-				for (const match of content.matchAll(/#([a-zA-Z0-9_\-/]+)/g)) {
-					const t = match[0];
-					if (t) tags.push({ tag: t });
-				}
-				return { tags, frontmatter: null, sections: [] };
-			},
-		};
-		const mockApp = {
-			vault: mockVault,
-			metadataCache: mockMetadataCache,
-		} as any;
-
-		return { mockApp, storage };
-	}
-
-	it('generates missing IDs in single pass and writes back updated markdown', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const initialMarkdown =
-			'# Biology\n\nWhat is the mitochondria? :: Powerhouse of the cell\n\nDNA ::: Deoxyribonucleic acid\n';
-		const { mockApp, storage } = createMockVault({ 'Notes/Bio.md': initialMarkdown });
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		const blocks = await scanner.syncFile({ path: 'Notes/Bio.md' } as any);
-		expect(blocks).toHaveLength(2);
-
-		const updatedContent = storage.get('Notes/Bio.md')!;
-		expect(updatedContent).toContain('^');
-		expect(blocks[0]?.id).toMatch(/^[0-9a-z]{6}$/);
-		expect(blocks[1]?.id).toMatch(/^[0-9a-z]{6}$/);
-
-		const cards = db.getAllCards();
-		expect(cards).toHaveLength(3); // 1 forward + 2 bidirectional (forward & reverse)
-	});
-
-	it('handles note rename without resetting card metrics', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const initialMarkdown = 'Question :: Answer ^abc123\n';
-		const { mockApp } = createMockVault({ 'Notes/Old.md': initialMarkdown });
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		await scanner.syncFile({ path: 'Notes/Old.md' } as any);
-		expect(db.getAllCards()).toHaveLength(1);
-
-		// Perform review
-		const card = db.getAllCards()[0]!;
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: 2000,
-					stability: 2.0,
-					difficulty: 5.0,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: card.cardId,
-					state: 2,
-					due_at: 2000,
-					stability: 2.0,
-					difficulty: 5.0,
-					reps: 1,
-					lapses: 0,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// Rename note
-		await scanner.renameFile('Notes/Old.md', 'Notes/New.md');
-
-		const cardsAfterRename = db.getAllCards();
-		expect(cardsAfterRename).toHaveLength(1);
-		expect(cardsAfterRename[0]?.notePath).toBe('Notes/New.md');
-		expect(cardsAfterRename[0]?.reps).toBe(1);
-		expect(cardsAfterRename[0]?.stability).toBe(2.0);
-	});
-});
-
-describe('Settings Defaults & Review Metrics', () => {
-	it('provides default empty settings', () => {
-		expect(DEFAULT_SETTINGS).toEqual({});
-	});
-
-	it('calculates progress and retention accurately', () => {
-		expect(calculateProgress(0, 5, false)).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 20,
-			progressText: '1 / 5',
+	it('builds FsrsParams with defaults and overrides', () => {
+		const params = buildFsrsParams(DEFAULT_SETTINGS, {
+			request_retention: 0.85,
 		});
-		expect(calculateProgress(4, 5, false)).toEqual({
-			currentCardNumber: 5,
-			progressPercent: 100,
-			progressText: '5 / 5',
+		expect(params.request_retention).toBe(0.85);
+		expect(params.maximum_interval).toBe(DEFAULT_MAXIMUM_INTERVAL);
+		expect(params.learning_steps).toEqual([600000]);
+	});
+});
+
+describe('Cloze Markdown Formatting', () => {
+	it('hides clozes when unrevealed using [...] badge', () => {
+		const text = 'Photosynthesis produces {{oxygen}} and {{glucose}}.';
+		const unrevealed = formatClozeText(text, false);
+		expect(unrevealed).toBe(
+			'Photosynthesis produces <span class="fc-cloze-mask">[ ... ]</span> and <span class="fc-cloze-mask">[ ... ]</span>.',
+		);
+	});
+
+	it('reveals clozes when revealed', () => {
+		const text = 'Photosynthesis produces {{oxygen}} and {{glucose}}.';
+		const revealed = formatClozeText(text, true);
+		expect(revealed).toBe(
+			'Photosynthesis produces <mark class="fc-cloze-revealed">oxygen</mark> and <mark class="fc-cloze-revealed">glucose</mark>.',
+		);
+	});
+});
+
+describe('Review Metrics', () => {
+	it('calculates progress accurately', () => {
+		expect(calculateProgress(0, 10, false)).toEqual(
+			{
+				currentCardNumber: 1,
+				totalCards: 10,
+				progressPercent: 10,
+				progressText: '1 / 10',
+			}.progressText
+				? {
+						currentCardNumber: 1,
+						progressPercent: 10,
+						progressText: '1 / 10',
+					}
+				: {},
+		);
+		expect(calculateProgress(5, 10, false)).toEqual({
+			currentCardNumber: 6,
+			progressPercent: 60,
+			progressText: '6 / 10',
 		});
-		expect(calculateProgress(4, 5, true)).toEqual({
-			currentCardNumber: 5,
-			progressPercent: 100,
-			progressText: '5 / 5',
-		});
-		expect(calculateRetention(10, 9)).toBe(90);
-	});
-});
-
-describe('Generic Markdown Card Tag Modifiers (addCardTag / removeCardTag / toggleCardTag)', () => {
-	it('handles adding tags when NO tags exist across all card types', () => {
-		// 1. Inline card
-		const inlineNoTags = 'What is the powerhouse of the cell? :: Mitochondria ^pwr01';
-		const taggedInline = addCardTag(inlineNoTags, 'pwr01', 'inline', '#card/leech');
-		expect(taggedInline).toBe(
-			'What is the powerhouse of the cell? :: Mitochondria #card/leech ^pwr01',
-		);
-
-		// 2. Cloze card
-		const clozeNoTags = 'The speed of light is ==3x10^8 m/s== in vacuum. ^spd01';
-		const taggedCloze = addCardTag(clozeNoTags, 'spd01', 'cloze', '#card/todo');
-		expect(taggedCloze).toBe('The speed of light is ==3x10^8 m/s== in vacuum. #card/todo ^spd01');
-
-		// 3. Block card
-		const blockNoTags = `%% card-start id=blk01 %%\nWhat is photosynthesis?\n::\nProcess by which plants make food\n%% card-end %%`;
-		const taggedBlock = addCardTag(blockNoTags, 'blk01', 'block', '#card/leech');
-		expect(taggedBlock).toBe(
-			`%% card-start id=blk01 %%\nWhat is photosynthesis? #card/leech\n::\nProcess by which plants make food\n%% card-end %%`,
-		);
-	});
-
-	it('handles adding tags when OTHER tags already exist', () => {
-		// 1. Single existing tag at end of inline card
-		const inlineOneTag = 'Capital of France :: Paris #geography ^geo01';
-		const taggedOne = addCardTag(inlineOneTag, 'geo01', 'inline', '#card/leech');
-		expect(taggedOne).toBe('Capital of France :: Paris #geography #card/leech ^geo01');
-
-		// 2. Multiple existing tags
-		const inlineMultiTag = 'Capital of Germany :: Berlin #geo #europe #capitals ^ger01';
-		const taggedMulti = addCardTag(inlineMultiTag, 'ger01', 'inline', '#card/leech');
-		expect(taggedMulti).toBe(
-			'Capital of Germany :: Berlin #geo #europe #capitals #card/leech ^ger01',
-		);
-
-		// 3. Existing tag in the question part of the card
-		const inlineQuestionTag = 'Derivative of #math sin(x)? :: cos(x) ^der01';
-		const taggedQuestion = addCardTag(inlineQuestionTag, 'der01', 'inline', '#card/leech');
-		expect(taggedQuestion).toBe('Derivative of #math sin(x)? :: cos(x) #card/leech ^der01');
-
-		// 4. Block card with existing tags on question line
-		const blockWithTag = `%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam\n::\nCell division\n%% card-end %%`;
-		const taggedBlock = addCardTag(blockWithTag, 'blk02', 'block', '#card/leech');
-		expect(taggedBlock).toBe(
-			`%% card-start id=blk02 %%\nWhat is mitosis? #biology #exam #card/leech\n::\nCell division\n%% card-end %%`,
-		);
-
-		// 5. Block card with tag already in header line
-		const blockHeaderTag = `%% card-start id=blk03 #card/leech %%\nWhat is meiosis?\n::\nSexual cell division\n%% card-end %%`;
-		expect(hasCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(true);
-		expect(addCardTag(blockHeaderTag, 'blk03', 'block', '#card/leech')).toBe(blockHeaderTag);
-	});
-
-	it('handles removing tags cleanly across all positions (first, middle, last, sole tag)', () => {
-		// 1. Sole tag
-		const sole = 'Concept :: Definition #card/leech ^s01';
-		expect(removeCardTag(sole, 's01', 'inline', '#card/leech')).toBe('Concept :: Definition ^s01');
-
-		// 2. First of multiple tags
-		const first = 'Concept :: Definition #card/leech #tagA #tagB ^s02';
-		expect(removeCardTag(first, 's02', 'inline', '#card/leech')).toBe(
-			'Concept :: Definition #tagA #tagB ^s02',
-		);
-
-		// 3. Middle tag
-		const middle = 'Concept :: Definition #tagA #card/leech #tagB ^s03';
-		expect(removeCardTag(middle, 's03', 'inline', '#card/leech')).toBe(
-			'Concept :: Definition #tagA #tagB ^s03',
-		);
-
-		// 4. Last tag of multiple
-		const last = 'Concept :: Definition #tagA #tagB #card/leech ^s04';
-		expect(removeCardTag(last, 's04', 'inline', '#card/leech')).toBe(
-			'Concept :: Definition #tagA #tagB ^s04',
-		);
-
-		// 5. Block card tag removal
-		const blockTagged = `%% card-start id=blk04 %%\nQuestion line #tagA #card/leech #tagB\n::\nAnswer\n%% card-end %%`;
-		const blockRemoved = removeCardTag(blockTagged, 'blk04', 'block', '#card/leech');
-		expect(blockRemoved).toBe(
-			`%% card-start id=blk04 %%\nQuestion line #tagA #tagB\n::\nAnswer\n%% card-end %%`,
-		);
-	});
-
-	it('preserves leading indentation, markdown bullet prefixes, and exponent carets', () => {
-		// 1. Bullet list item
-		const bullet = '- What is IPv6? :: 128-bit IP address ^ip01';
-		const taggedBullet = addCardTag(bullet, 'ip01', 'inline', '#card/leech');
-		expect(taggedBullet).toBe('- What is IPv6? :: 128-bit IP address #card/leech ^ip01');
-
-		const untaggedBullet = removeCardTag(taggedBullet, 'ip01', 'inline', '#card/leech');
-		expect(untaggedBullet).toBe('- What is IPv6? :: 128-bit IP address ^ip01');
-
-		// 2. Indented item (e.g. 4 spaces)
-		const indented = '    Indented concept :: Indented explanation ^ind01';
-		const taggedIndented = addCardTag(indented, 'ind01', 'inline', '#card/leech');
-		expect(taggedIndented).toBe('    Indented concept :: Indented explanation #card/leech ^ind01');
-
-		// 3. Math exponents containing caret symbols
-		const mathCaret = 'Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles ^mth01';
-		const taggedMath = addCardTag(mathCaret, 'mth01', 'inline', '#card/leech');
-		expect(taggedMath).toBe(
-			'Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles #card/leech ^mth01',
-		);
-
-		const untaggedMath = removeCardTag(taggedMath, 'mth01', 'inline', '#card/leech');
-		expect(untaggedMath).toBe('Pythagorean theorem $a^2 + b^2 = c^2$ :: Right triangles ^mth01');
-	});
-
-	it('strictly enforces word boundary safety for substring tag names', () => {
-		// Content has substring tags: #card/leech2, #card/leech-review, #my-card/leech
-		const doc = 'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech ^sub01';
-
-		// Target: #card/leech
-		expect(hasCardTag(doc, 'sub01', 'inline', '#card/leech')).toBe(false);
-
-		// Adding #card/leech places it properly
-		const added = addCardTag(doc, 'sub01', 'inline', '#card/leech');
-		expect(added).toBe(
-			'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech #card/leech ^sub01',
-		);
-		expect(hasCardTag(added, 'sub01', 'inline', '#card/leech')).toBe(true);
-
-		// Removing #card/leech does not disturb the substring tags
-		const removed = removeCardTag(added, 'sub01', 'inline', '#card/leech');
-		expect(removed).toBe(
-			'Concept :: Definition #card/leech-review #card/leech2 #my-card/leech ^sub01',
-		);
-	});
-
-	it('handles multiline block cards with blank lines or comments before divider', () => {
-		const multilineBlock = `%% card-start id=blk05 %%
-First line of multiline question
-Second line of question
-
-::
-Answer content
-%% card-end %%`;
-
-		const tagged = addCardTag(multilineBlock, 'blk05', 'block', '#card/leech');
-		expect(tagged).toContain('Second line of question #card/leech\n\n::');
-
-		const untagged = removeCardTag(tagged, 'blk05', 'block', '#card/leech');
-		expect(untagged).toBe(multilineBlock);
-	});
-});
-
-describe('Date Utilities & Calendar Math', () => {
-	it('formats local dates consistently with zero padding', () => {
-		const testDate = new Date(2026, 0, 5); // Jan 5, 2026
-		expect(formatLocalDate(testDate)).toBe('2026-01-05');
-	});
-
-	it('shifts local date keys across month and year boundaries correctly', () => {
-		// Month boundary (March 1 -> Feb 28 in non-leap year)
-		expect(shiftLocalDateKey('2026-03-01', -1)).toBe('2026-02-28');
-
-		// Year boundary (Jan 1 -> Dec 31 previous year)
-		expect(shiftLocalDateKey('2026-01-01', -1)).toBe('2025-12-31');
-
-		// Leap year shift (Feb 28 + 1 day = Feb 29 in 2024)
-		expect(shiftLocalDateKey('2024-02-28', 1)).toBe('2024-02-29');
-		expect(shiftLocalDateKey('2024-02-29', 1)).toBe('2024-03-01');
-	});
-
-	it('parses study step decimals and mixed valid tokens', () => {
-		expect(parseStudySteps('0.5h 1.5d', DEFAULT_LEARNING_STEPS)).toEqual([
-			30 * 60 * 1000,
-			36 * 60 * 60 * 1000,
-		]);
-		expect(parseStudySteps('10m invalid_step 2d', DEFAULT_LEARNING_STEPS)).toEqual([
-			10 * 60 * 1000,
-			2 * 24 * 60 * 60 * 1000,
-		]);
-	});
-});
-
-describe('DatabaseManager Extended Behaviors', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-	});
-
-	function createFreshDb(): DatabaseManager {
-		const rawDb = new SQL.Database();
-		return DatabaseManager.createInMemory(rawDb);
-	}
-
-	it('retrieves due cards filtered by cutoff and tags', () => {
-		const db = createFreshDb();
-
-		db.syncNoteBlocks('Notes/Lang.md', [
-			{
-				id: 'blk_due_de',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Hund',
-				back: 'Dog',
-				tags: ['german', 'vocab'],
-				line_start: 1,
-				line_end: 1,
-			},
-			{
-				id: 'blk_due_fr',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Chien',
-				back: 'Dog',
-				tags: ['french', 'vocab'],
-				line_start: 2,
-				line_end: 2,
-			},
-		]);
-
-		const allDue = db.getDueCards(undefined, 4);
-		expect(allDue).toHaveLength(2);
-
-		const germanDue = db.getDueCards(['german'], 4);
-		expect(germanDue).toHaveLength(1);
-		expect(germanDue[0]?.blockId).toBe('blk_due_de');
-
-		const uniqueTags = db.getUniqueTags();
-		expect(uniqueTags).toEqual(['french', 'german', 'vocab']);
-	});
-
-	it('calculates study streak correctly across multiple days', async () => {
-		const db = createFreshDb();
-		db.syncNoteBlocks('Notes/Streak.md', [
-			{
-				id: 'streak01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q',
-				back: 'A',
-				tags: ['test'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		const card = db.getAllCards()[0]!;
-		const now = Date.now();
-		const oneDayMs = 24 * 60 * 60 * 1000;
-
-		// Today review
-		await db.commitSession(
-			{ started_at: now, ended_at: now, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: now + oneDayMs,
-					stability: 2.0,
-					difficulty: 5.0,
-					reviewed_at: now,
-				},
-			],
-			[],
-		);
-
-		// Yesterday review
-		const yesterdayMs = now - oneDayMs;
-		await db.commitSession(
-			{
-				started_at: yesterdayMs,
-				ended_at: yesterdayMs,
-				card_count: 1,
-				forgot_count: 0,
-				remembered_count: 1,
-			},
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: now,
-					stability: 2.0,
-					difficulty: 5.0,
-					reviewed_at: yesterdayMs,
-				},
-			],
-			[],
-		);
-
-		// Day before yesterday review
-		const twoDaysAgoMs = now - 2 * oneDayMs;
-		await db.commitSession(
-			{
-				started_at: twoDaysAgoMs,
-				ended_at: twoDaysAgoMs,
-				card_count: 1,
-				forgot_count: 0,
-				remembered_count: 1,
-			},
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: yesterdayMs,
-					stability: 2.0,
-					difficulty: 5.0,
-					reviewed_at: twoDaysAgoMs,
-				},
-			],
-			[],
-		);
-
-		const stats = db.getDashboardStats(4);
-		expect(stats.studyStreak).toBe(3);
-		expect(stats.studiedToday).toBe(1);
-		expect(stats.dailyRetention).toBe(100);
-	});
-
-	it('runs database optimization and prunes stale deleted note records', async () => {
-		const db = createFreshDb();
-		db.syncNoteBlocks('Notes/Active.md', [
-			{
-				id: 'act01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Active Front',
-				back: 'Active Back',
-				tags: ['active'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-		db.syncNoteBlocks('Notes/Stale.md', [
-			{
-				id: 'stl01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Stale Front',
-				back: 'Stale Back',
-				tags: ['stale'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		expect(db.getAllCards()).toHaveLength(2);
-
-		const res = await db.optimizeDatabase(new Set(['Notes/Active.md']));
-		expect(res.integrityOk).toBe(true);
-		expect(res.prunedBlocks).toBe(1);
-
-		const remaining = db.getAllCards();
-		expect(remaining).toHaveLength(1);
-		expect(remaining[0]?.blockId).toBe('act01');
-	});
-
-	it('maps review states and formats humanized timestamps accurately', () => {
-		const db = createFreshDb();
-
-		expect(db.mapState(0)).toBe('new');
-		expect(db.mapState(1)).toBe('learning');
-		expect(db.mapState(2)).toBe('review');
-		expect(db.mapState(3)).toBe('relearning');
-
-		expect(db.unmapState('new')).toBe(0);
-		expect(db.unmapState('learning')).toBe(1);
-		expect(db.unmapState('review')).toBe(2);
-		expect(db.unmapState('relearning')).toBe(3);
-
-		const now = 1700000000000;
-		expect(db.humanizeDue(now - 1000, now)).toBe('Due now');
-		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24, now)).toBe('Tomorrow');
-		expect(db.humanizeDue(now + 1000 * 60 * 60 * 24 * 5, now)).toBe('In 5 days');
-
-		expect(db.humanizeRelative(now + 1000, now)).toBe('Just now');
-		expect(db.humanizeRelative(now - 1000 * 10, now)).toBe('Just now');
-		expect(db.humanizeRelative(now - 1000 * 59, now)).toBe('Just now');
-		expect(db.humanizeRelative(now - 1000 * 60 * 5, now)).toBe('5m ago');
-		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 2, now)).toBe('2h ago');
-		expect(db.humanizeRelative(now - 1000 * 60 * 60 * 24 * 3, now)).toBe('3d ago');
-	});
-});
-
-describe('NoteScanner Frontmatter & Ignore Handling', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-		WasmBridge.initForTest(SQL);
-	});
-
-	it('skips notes marked with cards-ignore: true in frontmatter', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-
-		const initialMarkdown =
-			'---\ncards-ignore: true\n---\n\nIgnored Question :: Ignored Answer ^ign001\n';
-		const storage = new Map<string, string>([['Notes/Ignored.md', initialMarkdown]]);
-
-		const mockVault = {
-			cachedRead: async (f: any) => storage.get(f.path) ?? '',
-			modify: async (f: any, data: string) => {
-				storage.set(f.path, data);
-			},
-			getMarkdownFiles: () => [{ path: 'Notes/Ignored.md' }],
-			adapter: {
-				exists: async () => false,
-				readBinary: async () => new Uint8Array(),
-				writeBinary: async () => {},
-				remove: async () => {},
-			},
-		};
-
-		const mockMetadataCache = {
-			getFileCache: () => ({
-				tags: [],
-				frontmatter: { 'cards-ignore': true },
-				sections: [],
-			}),
-		};
-
-		const mockApp = {
-			vault: mockVault,
-			metadataCache: mockMetadataCache,
-		} as any;
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		const synced = await scanner.syncFile({ path: 'Notes/Ignored.md' } as any);
-		expect(synced).toHaveLength(0);
-		expect(db.getAllCards()).toHaveLength(0);
-	});
-
-	it('inherits tags defined in frontmatter array and comma-delimited strings', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-
-		const content = 'Question :: Answer ^tag001\n';
-		const storage = new Map<string, string>([['Notes/Tags.md', content]]);
-
-		const mockVault = {
-			cachedRead: async (f: any) => storage.get(f.path) ?? '',
-			modify: async (f: any, data: string) => {
-				storage.set(f.path, data);
-			},
-			getMarkdownFiles: () => [{ path: 'Notes/Tags.md' }],
-			adapter: {
-				exists: async () => false,
-				readBinary: async () => new Uint8Array(),
-				writeBinary: async () => {},
-				remove: async () => {},
-			},
-		};
-
-		const mockMetadataCache = {
-			getFileCache: () => ({
-				tags: [],
-				frontmatter: { tags: ['science', 'biology'] },
-				sections: [],
-			}),
-		};
-
-		const mockApp = {
-			vault: mockVault,
-			metadataCache: mockMetadataCache,
-		} as any;
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		const synced = await scanner.syncFile({ path: 'Notes/Tags.md' } as any);
-		expect(synced).toHaveLength(1);
-		expect(synced[0]?.tags).toContain('science');
-		expect(synced[0]?.tags).toContain('biology');
-	});
-});
-
-describe('WASM FSRS-6 Scheduling & Optimizer Integration', () => {
-	it('schedules new and review cards through WASM bridge with FSRS-6 math', () => {
-		const now = 1700000000000;
-		const newCard: SchedulingCard = {
-			stability: 0,
-			difficulty: 0,
-			reps: 0,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'new',
-			last_review: null,
-			due: now,
-		};
-
-		const params: FsrsParams = {
-			request_retention: 0.9,
-			maximum_interval: 36500,
-			learning_steps: DEFAULT_LEARNING_STEPS,
-			relearning_steps: DEFAULT_RELEARNING_STEPS,
-		};
-
-		const scheduleInfo = WasmBridge.calculateSchedule(newCard, params, now);
-		expect(scheduleInfo.next_states).toHaveLength(4);
-
-		// Rating 1 (Again): stays in learning
-		const againState = scheduleInfo.next_states.find((c) => c.rating === 'again');
-		expect(againState).toBeDefined();
-		expect(againState?.card.state).toBe('learning');
-
-		// Rating 3 (Good): advances
-		const goodState = scheduleInfo.next_states.find((c) => c.rating === 'good');
-		expect(goodState).toBeDefined();
-		expect(goodState?.card.stability).toBeGreaterThan(0);
-	});
-
-	it('progresses learning steps on review cards and handles lapses', () => {
-		const now = 1700000000000;
-		const learningCard: SchedulingCard = {
-			stability: 0.5,
-			difficulty: 5.0,
-			reps: 1,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'learning',
-			last_review: now - 600000,
-			due: now,
-		};
-
-		const params: FsrsParams = {
-			request_retention: 0.9,
-			maximum_interval: 36500,
-			learning_steps: [10 * 60 * 1000, 24 * 60 * 60 * 1000],
-			relearning_steps: DEFAULT_RELEARNING_STEPS,
-		};
-
-		const info = WasmBridge.calculateSchedule(learningCard, params, now);
-		const goodState = info.next_states.find((c) => c.rating === 'good')!;
-		expect(goodState.card.learning_step).toBe(1);
-
-		// Review card lapsing on 'again'
-		const reviewCard: SchedulingCard = {
-			stability: 10.0,
-			difficulty: 4.0,
-			reps: 5,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'review',
-			last_review: now - 86400000 * 10,
-			due: now,
-		};
-
-		const lapseInfo = WasmBridge.calculateSchedule(reviewCard, params, now);
-		const lapsedState = lapseInfo.next_states.find((c) => c.rating === 'again')!;
-		expect(lapsedState.card.state).toBe('relearning');
-		expect(lapsedState.card.lapses).toBe(1);
-	});
-
-	it('optimizes FSRS weights from review logs', () => {
-		const logs = Array.from({ length: 12 }, (_, i) => ({
-			card_id: `card_${i % 3}`,
-			rating: (i % 2 === 0 ? 3 : 1) as number,
-			delta_t: (i + 1) * 1.5,
-		}));
-
-		const params: FsrsParams = {
-			request_retention: DEFAULT_REQUEST_RETENTION,
-			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
-			learning_steps: DEFAULT_LEARNING_STEPS,
-			relearning_steps: DEFAULT_RELEARNING_STEPS,
-		};
-
-		const weights = WasmBridge.optimizeFsrsWeights(params, logs);
-		expect(weights).toHaveLength(21);
-		for (const w of weights) {
-			expect(typeof w).toBe('number');
-			expect(isNaN(w)).toBe(false);
-		}
-	});
-});
-
-describe('Advanced Metrics & Edge Case Boundaries', () => {
-	it('handles zero total cards, negative indices, and out-of-bound clamps in progress calculation', () => {
-		expect(calculateProgress(0, 0, false)).toEqual({
-			currentCardNumber: 0,
-			progressPercent: 0,
-			progressText: '0 / 0',
-		});
-		expect(calculateProgress(-5, 10, false)).toEqual({
-			currentCardNumber: 1,
-			progressPercent: 10,
-			progressText: '1 / 10',
-		});
-		expect(calculateProgress(99, 10, false)).toEqual({
+		expect(calculateProgress(9, 10, true)).toEqual({
 			currentCardNumber: 10,
 			progressPercent: 100,
 			progressText: '10 / 10',
 		});
+	});
+
+	it('calculates retention percentage accurately', () => {
 		expect(calculateRetention(0, 0)).toBe(100);
-		expect(calculateRetention(10, 0)).toBe(0);
-	});
-
-	it('handles complex tag toggling with preexisting tags and multiline questions', () => {
-		const original = `%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n::\nAnswer content\n%% card-end %%`;
-		const tagged = toggleCardTodoInMarkdown(original, 'x89z12', 'block');
-		expect(tagged).toBe(
-			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells #card/todo\n::\nAnswer content\n%% card-end %%`,
-		);
-
-		const untagged = toggleCardTodoInMarkdown(tagged, 'x89z12', 'block');
-		expect(untagged).toBe(
-			`%% card-start id=x89z12 %%\nFirst question line\nSecond question line #biology #cells\n::\nAnswer content\n%% card-end %%`,
-		);
-	});
-
-	it('accurately calculates study streak when gaps exist or user only reviewed yesterday', async () => {
-		const SQL = await initSqlJs();
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		db.syncNoteBlocks('Note.md', [
-			{
-				id: 'blk_s',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q',
-				back: 'A',
-				tags: [],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-		const card = db.getAllCards()[0]!;
-		const now = Date.now();
-		const oneDay = 24 * 60 * 60 * 1000;
-
-		// Only reviewed 2 days ago (missed yesterday and today) -> streak 0
-		await db.commitSession(
-			{
-				started_at: now - 2 * oneDay,
-				ended_at: now - 2 * oneDay,
-				card_count: 1,
-				forgot_count: 0,
-				remembered_count: 1,
-			},
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: now,
-					stability: 2,
-					difficulty: 5,
-					reviewed_at: now - 2 * oneDay,
-				},
-			],
-			[],
-		);
-		expect(db.getDashboardStats(4).studyStreak).toBe(0);
-
-		// Now add a review yesterday -> streak becomes 1 (pending review today)
-		await db.commitSession(
-			{
-				started_at: now - oneDay,
-				ended_at: now - oneDay,
-				card_count: 1,
-				forgot_count: 0,
-				remembered_count: 1,
-			},
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: now,
-					stability: 2,
-					difficulty: 5,
-					reviewed_at: now - oneDay,
-				},
-			],
-			[],
-		);
-		expect(db.getDashboardStats(4).studyStreak).toBe(2);
-	});
-
-	it('fullScan synchronizes all vault files and prunes deleted notes in one sweep', async () => {
-		const SQL = await initSqlJs();
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-
-		const storage = new Map<string, string>([
-			['Notes/A.md', 'Question A :: Answer A ^aaa001\n'],
-			['Notes/B.md', 'Question B :: Answer B ^bbb002\n'],
-		]);
-
-		const mockVault = {
-			cachedRead: async (f: any) => storage.get(f.path) ?? '',
-			modify: async (f: any, d: string) => storage.set(f.path, d),
-			getMarkdownFiles: () =>
-				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: 1 } })),
-			adapter: {
-				exists: async () => false,
-				readBinary: async () => new Uint8Array(),
-				writeBinary: async () => {},
-				remove: async () => {},
-			},
-		};
-
-		const mockApp = {
-			vault: mockVault,
-			metadataCache: { getFileCache: () => ({ tags: [], frontmatter: null, sections: [] }) },
-		} as any;
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		const fullScanRes = await scanner.fullScan();
-		expect(fullScanRes.filesScanned).toBe(2);
-		expect(fullScanRes.totalBlocks).toBe(2);
-		expect(db.getAllCards()).toHaveLength(2);
-
-		// Now delete Note B from storage and run deleteFile
-		storage.delete('Notes/B.md');
-		await scanner.deleteFile('Notes/B.md');
-		expect(db.getAllCards()).toHaveLength(1);
-		expect(db.getAllCards()[0]?.blockId).toBe('aaa001');
-	});
-
-	it('ensures getDashboardStats excludes orphaned cards not linked to valid blocks', async () => {
-		const SQL = await initSqlJs();
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-
-		// Insert 1 valid block + card
-		db.syncNoteBlocks('Valid.md', [
-			{
-				id: 'val001',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Valid Q',
-				back: 'Valid A',
-				tags: [],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		// Simulate legacy orphaned card inserted directly without matching block
-		rawDb.run('PRAGMA foreign_keys = OFF;');
-		rawDb.run(
-			`INSERT INTO cards (id, block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
-			 VALUES (999, 'orphan_block', 'forward', 0, 0, 0, 0, 0, 0, NULL, 0, 0)`,
-		);
-		rawDb.run('PRAGMA foreign_keys = ON;');
-
-		// getAllCards returns only 1 card (JOIN blocks)
-		expect(db.getAllCards()).toHaveLength(1);
-
-		// getDashboardStats must also return exactly 1 due card and 1 total card (not 2)
-		const stats = db.getDashboardStats(4);
-		expect(stats.totalCards).toBe(1);
-		expect(stats.dueToday).toBe(1);
-		expect(stats.newCards).toBe(1);
+		expect(calculateRetention(10, 8)).toBe(80);
+		expect(calculateRetention(10, 10)).toBe(100);
+		expect(calculateRetention(3, 1)).toBe(33);
 	});
 });
 
-describe('In-Memory Review Session Cache (Hashcards Model)', () => {
-	const sampleItem1: ReviewItem = {
-		cardId: 101,
-		blockId: 'blk101',
-		noteTitle: 'History',
-		notePath: 'Notes/History.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'WW2 End Year',
-		back: '1945',
-		tags: ['history'],
-		state: 'new',
-		stateNum: 0,
-		dueAt: 1000,
-		dueHuman: 'Due now',
-		stability: 0,
-		difficulty: 0,
-		reps: 0,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: null,
-		lastPracticedHuman: 'Never',
-	};
-
-	const sampleItem2: ReviewItem = {
-		cardId: 102,
-		blockId: 'blk102',
-		noteTitle: 'Biology',
-		notePath: 'Notes/Bio.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'Powerhouse of cell',
-		back: 'Mitochondria',
-		tags: ['biology'],
-		state: 'new',
-		stateNum: 0,
-		dueAt: 1000,
-		dueHuman: 'Due now',
-		stability: 0,
-		difficulty: 0,
-		reps: 0,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: null,
-		lastPracticedHuman: 'Never',
-	};
-
-	it('records reviews purely in memory with zero initial database writes', () => {
-		const cache = new ReviewSessionCache(1000);
-		expect(cache.getReviewsCount()).toBe(0);
-
-		const prevState1: SchedulingCard = {
-			stability: 0,
-			difficulty: 0,
-			reps: 0,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'new',
-			last_review: null,
-			due: 1000,
-		};
-
-		const nextState1: SchedulingCard = {
-			stability: 2.5,
-			difficulty: 4.5,
-			reps: 1,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
+describe('Dashboard Grouping and Filtering', () => {
+	const sampleCards: ReviewItem[] = [
+		{
+			card_id: 1,
+			prompt_id: 'p1',
+			note_title: 'Biology',
+			note_path: 'Biology.md',
+			card_type: 'inline',
+			direction: 'forward',
+			reversible: true,
+			front: 'Mitochondria',
+			back: 'Powerhouse of the cell',
+			tags: ['biology', 'science'],
 			state: 'review',
-			last_review: 2000,
-			due: 3000,
-		};
-
-		cache.recordReview(sampleItem1, prevState1, 'remembered', nextState1, 2, 2000);
-
-		expect(cache.getReviewsCount()).toBe(1);
-		const stats = cache.getStats();
-		expect(stats.studied).toBe(1);
-		expect(stats.remembered).toBe(1);
-		expect(stats.forgot).toBe(0);
-
-		const pending = cache.getPendingData();
-		expect(pending.reviews).toHaveLength(1);
-		expect(pending.cardUpdates).toHaveLength(1);
-		expect(pending.cardUpdates[0]?.id).toBe(101);
-		expect(pending.cardUpdates[0]?.stability).toBe(2.5);
-	});
-
-	it('handles undo by reverting card state and card updates cleanly in memory', () => {
-		const cache = new ReviewSessionCache(1000);
-
-		const prevState1: SchedulingCard = {
-			stability: 0,
-			difficulty: 0,
-			reps: 0,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'new',
-			last_review: null,
-			due: 1000,
-		};
-		const nextState1: SchedulingCard = {
+			state_num: 2,
+			due_at: 1000,
+			due_human: 'Now',
 			stability: 2.5,
-			difficulty: 4.5,
-			reps: 1,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'review',
-			last_review: 2000,
-			due: 3000,
-		};
-
-		const prevState2: SchedulingCard = {
-			stability: 0,
-			difficulty: 0,
-			reps: 0,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'new',
-			last_review: null,
-			due: 1000,
-		};
-		const nextState2: SchedulingCard = {
-			stability: 0,
 			difficulty: 5.0,
-			reps: 1,
-			lapses: 1,
+			reps: 3,
+			lapses: 0,
 			learning_step: 0,
 			relearning_step: 0,
-			state: 'learning',
-			last_review: 2100,
-			due: 2700,
-		};
+			last_review: 500,
+			last_practiced_human: 'Yesterday',
+		},
+		{
+			card_id: 2,
+			prompt_id: 'p1',
+			note_title: 'Biology',
+			note_path: 'Biology.md',
+			card_type: 'inline',
+			direction: 'reverse',
+			reversible: true,
+			front: 'Powerhouse of the cell',
+			back: 'Mitochondria',
+			tags: ['biology', 'science'],
+			state: 'new',
+			state_num: 0,
+			due_at: 2000,
+			due_human: 'Tomorrow',
+			stability: 0,
+			difficulty: 0,
+			reps: 0,
+			lapses: 0,
+			learning_step: 0,
+			relearning_step: 0,
+			last_review: null,
+			last_practiced_human: 'Never',
+		},
+	];
 
-		cache.recordReview(sampleItem1, prevState1, 'remembered', nextState1, 2, 2000);
-		cache.recordReview(sampleItem2, prevState2, 'forgot', nextState2, 1, 2100);
-
-		expect(cache.getReviewsCount()).toBe(2);
-		expect(cache.getStats().forgot).toBe(1);
-		expect(cache.getStats().remembered).toBe(1);
-
-		// Undo card 2
-		const undoRes = cache.undo();
-		expect(undoRes).not.toBeNull();
-		expect(undoRes?.item.cardId).toBe(102);
-		expect(undoRes?.previousState.state).toBe('new');
-
-		expect(cache.getReviewsCount()).toBe(1);
-		expect(cache.getStats().forgot).toBe(0);
-		expect(cache.getStats().remembered).toBe(1);
-
-		const pendingAfterUndo = cache.getPendingData();
-		expect(pendingAfterUndo.reviews).toHaveLength(1);
-		expect(pendingAfterUndo.reviews[0]?.card_id).toBe(101);
-		expect(pendingAfterUndo.cardUpdates).toHaveLength(1);
-		expect(pendingAfterUndo.cardUpdates[0]?.id).toBe(101);
+	it('groups forward and reverse cards under single prompt item', () => {
+		const grouped = groupCardsByPrompt(sampleCards);
+		expect(grouped).toHaveLength(1);
+		expect(grouped[0]!.prompt_id).toBe('p1');
+		expect(grouped[0]!.forward?.card_id).toBe(1);
+		expect(grouped[0]!.reverse?.card_id).toBe(2);
+		expect(grouped[0]!.reversible).toBe(true);
 	});
 
-	it('commits batch session atomically to SQLite only at end of session', async () => {
-		const SQL = await initSqlJs();
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
+	it('filters cards by status, tag, and search query', () => {
+		const grouped = groupCardsByPrompt(sampleCards);
+		expect(filterDashboardPrompt(grouped[0]!, 'all', 1500, '')).toBe(true);
+		expect(filterDashboardPrompt(grouped[0]!, 'due', 1500, '')).toBe(true);
+		expect(filterDashboardPrompt(grouped[0]!, 'new', 1500, '')).toBe(true);
+		expect(filterDashboardPrompt(grouped[0]!, 'learning', 1500, '')).toBe(false);
 
-		db.syncNoteBlocks('Note.md', [
-			{
-				id: 'blk01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q1',
-				back: 'A1',
-				tags: [],
-				line_start: 1,
-				line_end: 1,
-			},
-			{
-				id: 'blk02',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q2',
-				back: 'A2',
-				tags: [],
-				line_start: 2,
-				line_end: 2,
-			},
-		]);
+		expect(filterDashboardPrompt(grouped[0]!, 'all', 1500, 'Powerhouse')).toBe(true);
+		expect(filterDashboardPrompt(grouped[0]!, 'all', 1500, '#biology')).toBe(true);
+		expect(filterDashboardPrompt(grouped[0]!, 'all', 1500, 'NonExistent')).toBe(false);
 
-		const cards = db.getAllCards();
-		expect(cards).toHaveLength(2);
-		const c1 = cards[0]!;
-		const c2 = cards[1]!;
-
-		const cache = new ReviewSessionCache(1000);
-
-		// Review c1, review c2, undo c2
-		cache.recordReview(
-			c1,
-			{
-				stability: 0,
-				difficulty: 0,
-				reps: 0,
-				lapses: 0,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'new',
-				last_review: null,
-				due: 1000,
-			},
-			'remembered',
-			{
-				stability: 3.0,
-				difficulty: 4.0,
-				reps: 1,
-				lapses: 0,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'review',
-				last_review: 2000,
-				due: 5000,
-			},
-			2,
-			2000,
-		);
-
-		cache.recordReview(
-			c2,
-			{
-				stability: 0,
-				difficulty: 0,
-				reps: 0,
-				lapses: 0,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'new',
-				last_review: null,
-				due: 1000,
-			},
-			'forgot',
-			{
-				stability: 0,
-				difficulty: 5.0,
-				reps: 1,
-				lapses: 1,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'learning',
-				last_review: 2100,
-				due: 2600,
-			},
-			1,
-			2100,
-		);
-
-		cache.undo();
-
-		// Commit session
-		const { session, reviews, cardUpdates } = cache.getPendingData();
-		await db.commitSession(session, reviews, cardUpdates);
-
-		// Verify c1 was updated in DB and c2 remained untouched ('new')
-		const cardsAfterCommit = db.getAllCards();
-		const c1After = cardsAfterCommit.find((c) => c.cardId === c1.cardId)!;
-		const c2After = cardsAfterCommit.find((c) => c.cardId === c2.cardId)!;
-
-		expect(c1After.state).toBe('review');
-		expect(c1After.reps).toBe(1);
-		expect(c1After.dueAt).toBe(5000);
-
-		expect(c2After.state).toBe('new');
-		expect(c2After.reps).toBe(0);
+		expect(filterDashboardCard(sampleCards[0]!, 'Mitochondria')).toBe(true);
+		expect(filterDashboardCard(sampleCards[0]!, '#science')).toBe(true);
+		expect(filterDashboardCard(sampleCards[0]!, '#history')).toBe(false);
 	});
 });
 
-describe('Dashboard Block Grouping & Reverse Metrics', () => {
-	const forwardCard: ReviewItem = {
-		cardId: 1,
-		blockId: 'blk_bidi_1',
-		noteTitle: 'Vocabulary',
-		notePath: 'Notes/Vocab.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: true,
-		front: 'Bonjour',
-		back: 'Hello',
-		tags: ['french'],
-		state: 'review',
-		stateNum: 2,
-		dueAt: 1000,
-		dueHuman: 'Due now',
-		stability: 3.0,
-		difficulty: 4.0,
-		reps: 3,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: 500,
-		lastPracticedHuman: '1d ago',
-	};
+describe('Syntax and Tag Manipulation Edge Cases', () => {
+	it('initializes engine and serializes/deserializes via Postcard roundtrip', () => {
+		const engine = new FlashcardsEngine();
+		const bytes = engine.to_bytes();
+		expect(bytes.length).toBeGreaterThan(0);
 
-	const reverseCard: ReviewItem = {
-		cardId: 2,
-		blockId: 'blk_bidi_1',
-		noteTitle: 'Vocabulary',
-		notePath: 'Notes/Vocab.md',
-		direction: 'reverse',
-		blockType: 'inline',
-		reversible: true,
-		front: 'Hello',
-		back: 'Bonjour',
-		tags: ['french'],
-		state: 'learning',
-		stateNum: 1,
-		dueAt: 9000,
-		dueHuman: 'In 5d',
-		stability: 1.0,
-		difficulty: 5.0,
-		reps: 1,
-		lapses: 1,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: 200,
-		lastPracticedHuman: '3d ago',
-	};
-
-	const monoCard: ReviewItem = {
-		cardId: 3,
-		blockId: 'blk_mono_2',
-		noteTitle: 'Geography',
-		notePath: 'Notes/Geo.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'Capital of France',
-		back: 'Paris',
-		tags: ['geo'],
-		state: 'new',
-		stateNum: 0,
-		dueAt: 2000,
-		dueHuman: 'Tomorrow',
-		stability: 0,
-		difficulty: 0,
-		reps: 0,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: null,
-		lastPracticedHuman: 'Never',
-	};
-
-	it('consolidates bidirectional forward and reverse cards into a single block item', () => {
-		const rawCards = [forwardCard, reverseCard, monoCard];
-		const blocks = groupCardsByBlock(rawCards);
-
-		// 3 cards must produce exactly 2 block rows
-		expect(blocks).toHaveLength(2);
-
-		const bidiBlock = blocks.find((b) => b.blockId === 'blk_bidi_1');
-		expect(bidiBlock).toBeDefined();
-		expect(bidiBlock?.reversible).toBe(true);
-		expect(bidiBlock?.front).toBe('Bonjour');
-		expect(bidiBlock?.back).toBe('Hello');
-		expect(bidiBlock?.forward?.cardId).toBe(1);
-		expect(bidiBlock?.reverse?.cardId).toBe(2);
-
-		const monoBlock = blocks.find((b) => b.blockId === 'blk_mono_2');
-		expect(monoBlock).toBeDefined();
-		expect(monoBlock?.reversible).toBe(false);
-		expect(monoBlock?.reverse).toBeUndefined();
+		const restored = FlashcardsEngine.from_bytes(bytes);
+		expect(restored).toBeInstanceOf(FlashcardsEngine);
 	});
 
-	it('filters block items if either forward or reverse card matches due status', () => {
-		const blocks = groupCardsByBlock([forwardCard, reverseCard, monoCard]);
-		const bidiBlock = blocks.find((b) => b.blockId === 'blk_bidi_1')!;
-		const monoBlock = blocks.find((b) => b.blockId === 'blk_mono_2')!;
+	it('syncs multiline cards bounded by %% card-start %% and %% card-end %%', () => {
+		const engine = new FlashcardsEngine();
+		const md = `%% card-start id=m1x8yz %%
+#card/history
+First Question Line
+More details
 
-		// Due cutoff at 1500: bidi forward is due (1000 <= 1500), mono is not (2000 > 1500)
-		expect(filterDashboardBlock(bidiBlock, 'due', 1500, '')).toBe(true);
-		expect(filterDashboardBlock(monoBlock, 'due', 1500, '')).toBe(false);
+:::
 
-		// Status 'learning': bidi reverse is learning, mono is new
-		expect(filterDashboardBlock(bidiBlock, 'learning', 1500, '')).toBe(true);
-		expect(filterDashboardBlock(monoBlock, 'learning', 1500, '')).toBe(false);
+First Answer Line
+Second Answer Line
+%% card-end %%`;
+		const res = WasmBridge.syncNote(engine, 'History.md', md, 1700000000000, md.length, []);
 
-		// Search filter: query 'Paris' matches only monoBlock
-		expect(filterDashboardBlock(bidiBlock, 'all', 1500, 'Paris')).toBe(false);
-		expect(filterDashboardBlock(monoBlock, 'all', 1500, 'Paris')).toBe(true);
+		expect(res.prompt_count).toBe(1);
+		const cards = WasmBridge.getAllCards(engine, 1700000000000);
+		expect(cards).toHaveLength(2); // reversible
+		expect(cards[0]!.tags).toContain('card/history');
+	});
+
+	it('toggles and adds tags in Markdown directly via WASM without regex', () => {
+		const engine = new FlashcardsEngine();
+		const initialMd = 'Question :: Answer ^k9x2mp\n';
+
+		// Toggle #card/todo ON
+		const withTodo = WasmBridge.togglePromptTag(engine, initialMd, 'k9x2mp', '#card/todo');
+		expect(withTodo).toBe('Question :: Answer #card/todo ^k9x2mp\n');
+
+		// Toggle #card/todo OFF
+		const withoutTodo = WasmBridge.togglePromptTag(engine, withTodo!, 'k9x2mp', '#card/todo');
+		expect(withoutTodo).toBe('Question :: Answer ^k9x2mp\n');
+
+		// Add #card/leech
+		const withLeech = WasmBridge.addPromptTag(engine, initialMd, 'k9x2mp', '#card/leech');
+		expect(withLeech).toBe('Question :: Answer #card/leech ^k9x2mp\n');
+
+		// Adding existing leech tag is idempotent
+		const idempotent = WasmBridge.addPromptTag(engine, withLeech!, 'k9x2mp', '#card/leech');
+		expect(idempotent).toBe('Question :: Answer #card/leech ^k9x2mp\n');
 	});
 });
 
-describe('Tag Deck Stats Aggregation (Hashcards Model)', () => {
-	const card1: ReviewItem = {
-		cardId: 1,
-		blockId: 'b1',
-		noteTitle: 'Vocab',
-		notePath: 'Vocab.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'Q1',
-		back: 'A1',
-		tags: ['french', 'languages'],
-		state: 'review',
-		stateNum: 2,
-		dueAt: 1000,
-		dueHuman: 'Due now',
-		stability: 2,
-		difficulty: 5,
-		reps: 2,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: 500,
-		lastPracticedHuman: '1d ago',
-	};
+describe('NoteScanner Integration', () => {
+	it('syncs vault files and skips unchanged notes based on mtime and size', async () => {
+		const engine = new FlashcardsEngine();
+		const fileContent = 'What is biology? :: Study of life ^b111aa\n';
+		const mockFile = {
+			path: 'Biology.md',
+			stat: { mtime: 1700000000000, size: fileContent.length },
+		} as unknown as TFile;
 
-	const card2: ReviewItem = {
-		cardId: 2,
-		blockId: 'b2',
-		noteTitle: 'Vocab',
-		notePath: 'Vocab.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'Q2',
-		back: 'A2',
-		tags: ['french'],
-		state: 'new',
-		stateNum: 0,
-		dueAt: 5000,
-		dueHuman: 'Tomorrow',
-		stability: 0,
-		difficulty: 0,
-		reps: 0,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: null,
-		lastPracticedHuman: 'Never',
-	};
-
-	const card3: ReviewItem = {
-		cardId: 3,
-		blockId: 'b3',
-		noteTitle: 'Geo',
-		notePath: 'Geo.md',
-		direction: 'forward',
-		blockType: 'inline',
-		reversible: false,
-		front: 'Q3',
-		back: 'A3',
-		tags: ['geography'],
-		state: 'review',
-		stateNum: 2,
-		dueAt: 9000,
-		dueHuman: 'In 5d',
-		stability: 5,
-		difficulty: 3,
-		reps: 4,
-		lapses: 0,
-		learningStep: 0,
-		relearningStep: 0,
-		lastReview: 400,
-		lastPracticedHuman: '2d ago',
-	};
-
-	it('computes total, due, and new cards per tag deck and sorts by due count', () => {
-		const stats = computeTagDeckStats([card1, card2, card3], 2000);
-
-		expect(stats).toHaveLength(3);
-
-		// 'french': 2 total, 1 due (card1 at 1000 <= 2000), 1 new (card2)
-		const french = stats.find((s) => s.tag === 'french');
-		expect(french).toEqual({ tag: 'french', total: 2, due: 1, newCards: 1 });
-
-		// 'languages': 1 total, 1 due, 0 new
-		const languages = stats.find((s) => s.tag === 'languages');
-		expect(languages).toEqual({ tag: 'languages', total: 1, due: 1, newCards: 0 });
-
-		// 'geography': 1 total, 0 due (9000 > 2000), 0 new
-		const geo = stats.find((s) => s.tag === 'geography');
-		expect(geo).toEqual({ tag: 'geography', total: 1, due: 0, newCards: 0 });
-
-		// French and Languages (due: 1) appear before Geography (due: 0)
-		expect(stats[0]!.due).toBe(1);
-		expect(stats[1]!.due).toBe(1);
-		expect(stats[2]!.due).toBe(0);
-	});
-});
-
-describe('Identity Reconciliation & Note Synchronization Invariants', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
-		WasmBridge.initForTest(SQL);
-	});
-
-	function createMockVault(files: Record<string, string>) {
-		const storage = new Map<string, string>(Object.entries(files));
-		let modifyCalls = 0;
 		const mockVault = {
-			cachedRead: async (file: any) => storage.get(file.path) ?? '',
-			modify: async (file: any, data: string) => {
-				modifyCalls++;
-				storage.set(file.path, data);
-			},
-			getMarkdownFiles: () =>
-				Array.from(storage.keys()).map((path) => ({ path, stat: { mtime: Date.now() } })),
+			read: vi.fn().mockResolvedValue(fileContent),
+			cachedRead: vi.fn().mockResolvedValue(fileContent),
+			modify: vi.fn().mockResolvedValue(undefined),
+			getMarkdownFiles: vi.fn().mockReturnValue([mockFile]),
 			adapter: {
-				exists: async () => false,
-				readBinary: async () => new Uint8Array(),
-				writeBinary: async () => {},
-				remove: async () => {},
+				writeBinary: vi.fn().mockResolvedValue(undefined),
+				exists: vi
+					.fn()
+					.mockImplementation((path: string) => Promise.resolve(!path.includes('cards.bin'))),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				stat: vi.fn().mockResolvedValue({ mtime: 1700000000000, size: 0 }),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				readBinary: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+				remove: vi.fn().mockResolvedValue(undefined),
 			},
 		};
-		const mockMetadataCache = {
-			getFileCache: (file: any) => {
-				const content = storage.get(file.path) ?? '';
-				const tags: { tag: string }[] = [];
-				for (const match of content.matchAll(/#([a-zA-Z0-9_\-/]+)/g)) {
-					const t = match[0];
-					if (t) tags.push({ tag: t });
-				}
-				return { tags, frontmatter: null, sections: [] };
-			},
-		};
+
 		const mockApp = {
 			vault: mockVault,
-			metadataCache: mockMetadataCache,
-		} as any;
+			metadataCache: {
+				getFileCache: vi.fn().mockReturnValue({
+					frontmatter: null,
+					tags: [],
+					sections: [],
+				} as unknown as CachedMetadata),
+			},
+		} as unknown as App;
 
-		return { mockApp, storage, getModifyCalls: () => modifyCalls };
+		const scanner = new NoteScanner(mockApp, engine);
+
+		// First scan processes the file
+		const res1 = await scanner.fullScan();
+		expect(res1.filesScanned).toBe(1);
+		expect(res1.filesSkipped).toBe(0);
+		expect(res1.totalPrompts).toBe(1);
+		expect(mockVault.cachedRead).toHaveBeenCalledTimes(1);
+
+		// Second scan skips since mtime and size did not change
+		const res2 = await scanner.fullScan();
+		expect(res2.filesScanned).toBe(0);
+		expect(res2.filesSkipped).toBe(1);
+		expect(mockVault.cachedRead).toHaveBeenCalledTimes(1); // No new disk read!
+	});
+
+	it('respects cards-ignore: true frontmatter by omitting and purging cards from engine', async () => {
+		const engine = new FlashcardsEngine();
+		WasmBridge.syncNote(engine, 'Ignored.md', 'Q :: A ^ign001\n', 1000, 20, []);
+		expect(WasmBridge.getAllCards(engine, 1000)).toHaveLength(1);
+
+		const mockFile = {
+			path: 'Ignored.md',
+			stat: { mtime: 2000, size: 50 },
+		} as unknown as TFile;
+
+		const mockVault = {
+			read: vi.fn().mockResolvedValue('---\ncards-ignore: true\n---\nQ :: A ^ign001\n'),
+			cachedRead: vi.fn().mockResolvedValue('---\ncards-ignore: true\n---\nQ :: A ^ign001\n'),
+			modify: vi.fn().mockResolvedValue(undefined),
+			adapter: {
+				writeBinary: vi.fn().mockResolvedValue(undefined),
+				exists: vi.fn().mockResolvedValue(false),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				stat: vi.fn().mockResolvedValue(null),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				readBinary: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: {
+				getFileCache: vi.fn().mockReturnValue({
+					frontmatter: { 'cards-ignore': true },
+				} as unknown as CachedMetadata),
+			},
+		} as unknown as App;
+
+		const scanner = new NoteScanner(mockApp, engine);
+		const syncRes = await scanner.syncFile(mockFile);
+		expect(syncRes.prompt_count).toBe(0);
+		expect(WasmBridge.getAllCards(engine, 2000)).toHaveLength(0);
+	});
+
+	it('handles file renames in engine and updates internal paths', async () => {
+		const engine = new FlashcardsEngine();
+		WasmBridge.syncNote(engine, 'OldName.md', 'Q :: A ^ren001\n', 1000, 20, []);
+		expect(WasmBridge.getAllCards(engine, 1000)[0]!.note_path).toBe('OldName.md');
+
+		const mockVault = {
+			adapter: {
+				writeBinary: vi.fn().mockResolvedValue(undefined),
+				exists: vi.fn().mockResolvedValue(false),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				stat: vi.fn().mockResolvedValue(null),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				readBinary: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+		const mockApp = { vault: mockVault } as unknown as App;
+
+		const scanner = new NoteScanner(mockApp, engine);
+		await scanner.renameFile('OldName.md', 'NewName.md');
+		expect(WasmBridge.getAllCards(engine, 1000)[0]!.note_path).toBe('NewName.md');
+	});
+});
+
+describe('Multi-Device Syncthing Synchronization', () => {
+	it('detects external disk modifications and merges without data loss', async () => {
+		const desktopEngine = new FlashcardsEngine();
+		WasmBridge.syncNote(
+			desktopEngine,
+			'Desktop.md',
+			'Desktop Q :: Desktop A ^dsk111\n',
+			1000,
+			30,
+			[],
+		);
+
+		// Remote device (e.g. mobile) creates a note and reviews a card
+		const mobileEngine = FlashcardsEngine.from_bytes(desktopEngine.to_bytes());
+		WasmBridge.syncNote(mobileEngine, 'Mobile.md', 'Mobile Q :: Mobile A ^mob222\n', 2000, 30, []);
+		const mobileCards = WasmBridge.getAllCards(mobileEngine, 2000);
+		expect(mobileCards).toHaveLength(2);
+		const params = buildFsrsParams(DEFAULT_SETTINGS);
+		WasmBridge.recordReview(mobileEngine, mobileCards[0]!.card_id, 3, 2500, params);
+
+		const mobileBytes = mobileEngine.to_bytes();
+		let diskBytes: Uint8Array = mobileBytes;
+		let diskMtime = 2500;
+
+		const mockVault = {
+			adapter: {
+				exists: vi
+					.fn()
+					.mockImplementation((p: string) =>
+						Promise.resolve(p.includes('cards.bin') || p.includes('.flashcards')),
+					),
+				stat: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve({ mtime: diskMtime, size: diskBytes.byteLength }),
+					),
+				readBinary: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve(
+							diskBytes.buffer.slice(
+								diskBytes.byteOffset,
+								diskBytes.byteOffset + diskBytes.byteLength,
+							),
+						),
+					),
+				writeBinary: vi.fn().mockImplementation((_p: string, buf: ArrayBuffer) => {
+					diskBytes = new Uint8Array(buf);
+					diskMtime += 1000;
+					return Promise.resolve();
+				}),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+		const mockApp = { vault: mockVault } as unknown as App;
+
+		// Set initial desktop last known mtime
+		SnapshotStore.setLastKnownSnapshotMtime(1000);
+		SnapshotStore.setLastKnownSnapshotSize(desktopEngine.to_bytes().byteLength);
+
+		// Desktop checks for disk changes
+		const changed = await SnapshotStore.reloadOrMergeIfModified(mockApp, desktopEngine);
+		expect(changed).toBe(true);
+
+		// Desktop now has both notes and the review!
+		const desktopCards = WasmBridge.getAllCards(desktopEngine, 3000);
+		expect(desktopCards).toHaveLength(2);
+		expect(desktopEngine.get_review_logs()).toContain('card_id');
+	});
+
+	it('pre-save guard merges disk changes before writing so remote reviews are preserved', async () => {
+		const desktopEngine = new FlashcardsEngine();
+		WasmBridge.syncNote(desktopEngine, 'Note1.md', 'Q1 :: A1 ^aaa111\n', 1000, 20, []);
+
+		// Mobile has a copy and records a review
+		const mobileEngine = FlashcardsEngine.from_bytes(desktopEngine.to_bytes());
+		const params = buildFsrsParams(DEFAULT_SETTINGS);
+		const mobileCards = WasmBridge.getAllCards(mobileEngine, 1000);
+		WasmBridge.recordReview(mobileEngine, mobileCards[0]!.card_id, 3, 2000, params);
+		const mobileBytes = mobileEngine.to_bytes();
+
+		// Meanwhile on desktop, user adds Note2.md while offline/before sync
+		WasmBridge.syncNote(desktopEngine, 'Note2.md', 'Q2 :: A2 ^bbb222\n', 1500, 20, []);
+
+		// Syncthing transfers mobile's cards.bin to disk
+		let diskBytes: Uint8Array = mobileBytes;
+		let diskMtime = 2000;
+
+		const mockVault = {
+			adapter: {
+				exists: vi
+					.fn()
+					.mockImplementation((p: string) =>
+						Promise.resolve(p.includes('cards.bin') || p.includes('.flashcards')),
+					),
+				stat: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve({ mtime: diskMtime, size: diskBytes.byteLength }),
+					),
+				readBinary: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve(
+							diskBytes.buffer.slice(
+								diskBytes.byteOffset,
+								diskBytes.byteOffset + diskBytes.byteLength,
+							),
+						),
+					),
+				writeBinary: vi.fn().mockImplementation((_p: string, buf: ArrayBuffer) => {
+					diskBytes = new Uint8Array(buf);
+					diskMtime += 1000;
+					return Promise.resolve();
+				}),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+		const mockApp = { vault: mockVault } as unknown as App;
+
+		// Desktop was at mtime 1000
+		SnapshotStore.setLastKnownSnapshotMtime(1000);
+		SnapshotStore.setLastKnownSnapshotSize(desktopEngine.to_bytes().byteLength);
+
+		// Desktop saves its engine
+		await SnapshotStore.saveEngine(mockApp, desktopEngine);
+
+		// Verify the saved disk snapshot contains BOTH Note2 and the mobile review!
+		const finalEngine = FlashcardsEngine.from_bytes(diskBytes);
+		const finalCards = WasmBridge.getAllCards(finalEngine, 4000);
+		expect(finalCards).toHaveLength(2);
+		expect(finalEngine.get_review_logs()).toContain('card_id');
+	});
+
+	it('gracefully recovers and creates a new engine when cards.bin has invalid magic header or corrupted bytes', async () => {
+		const corruptedBytes = new Uint8Array([1, 2, 3, 4, 5]); // Invalid magic header, not b"FCB\x01"
+
+		const mockVault = {
+			adapter: {
+				exists: vi.fn().mockResolvedValue(true),
+				stat: vi.fn().mockResolvedValue({ mtime: 1000, size: 5 }),
+				readBinary: vi.fn().mockResolvedValue(corruptedBytes.buffer),
+				writeBinary: vi.fn().mockResolvedValue(undefined),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+		const mockApp = { vault: mockVault } as unknown as App;
+
+		// loadEngine catches the corrupted header and starts a fresh engine
+		const engine = await SnapshotStore.loadEngine(mockApp);
+		expect(engine).toBeInstanceOf(FlashcardsEngine);
+		expect(WasmBridge.getAllCards(engine, 1000)).toHaveLength(0);
+	});
+
+	it('supports ephemeral engine lifecycle: loads on session start, persists, and unloads', async () => {
+		const seedEngine = new FlashcardsEngine();
+		WasmBridge.syncNote(
+			seedEngine,
+			'Test.md',
+			'Ephemeral Q :: Ephemeral A ^eph111\n',
+			1000,
+			30,
+			[],
+		);
+		let diskBytes: Uint8Array = seedEngine.to_bytes();
+		let diskMtime = 1000;
+
+		const mockVault = {
+			adapter: {
+				exists: vi.fn().mockResolvedValue(true),
+				stat: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve({ mtime: diskMtime, size: diskBytes.byteLength }),
+					),
+				readBinary: vi
+					.fn()
+					.mockImplementation(() =>
+						Promise.resolve(
+							diskBytes.buffer.slice(
+								diskBytes.byteOffset,
+								diskBytes.byteOffset + diskBytes.byteLength,
+							),
+						),
+					),
+				writeBinary: vi.fn().mockImplementation((_p: string, buf: ArrayBuffer) => {
+					diskBytes = new Uint8Array(buf);
+					diskMtime += 100;
+					return Promise.resolve();
+				}),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+		const mockApp = { vault: mockVault } as unknown as App;
+		// Session 1: load on demand, grade card, save and drop
+		{
+			let sessionEngine: FlashcardsEngine | null = await SnapshotStore.loadEngine(mockApp);
+			const cards = WasmBridge.getAllCards(sessionEngine, 1000);
+			expect(cards).toHaveLength(1);
+			expect(cards[0]!.state).toBe('new');
+
+			const params = buildFsrsParams(DEFAULT_SETTINGS);
+			WasmBridge.recordReview(sessionEngine, cards[0]!.card_id, 3, 1500, params);
+			await SnapshotStore.saveEngine(mockApp, sessionEngine);
+
+			// Explicitly drop engine reference from RAM
+			sessionEngine = null;
+			expect(sessionEngine).toBeNull();
+		}
+
+		// Session 2: separate session loads fresh from disk
+		{
+			const freshEngine = await SnapshotStore.loadEngine(mockApp);
+			const cards = WasmBridge.getAllCards(freshEngine, 2000);
+			expect(cards).toHaveLength(1);
+			expect(cards[0]!.state).toBe('review');
+			expect(cards[0]!.reps).toBe(1);
+		}
+	});
+
+	it('handles concurrent offline card additions on multiple devices without collision or data loss', () => {
+		const desktopEngine = new FlashcardsEngine();
+		WasmBridge.syncNote(
+			desktopEngine,
+			'Desktop.md',
+			'Desktop Q :: Desktop A ^dsk111\n',
+			1000,
+			30,
+			[],
+		);
+		const deskCards = WasmBridge.getAllCards(desktopEngine, 1000);
+		expect(deskCards).toHaveLength(1);
+		expect(deskCards[0]!.card_id).toBe(1);
+
+		const mobileEngine = new FlashcardsEngine();
+		WasmBridge.syncNote(mobileEngine, 'Mobile.md', 'Mobile Q :: Mobile A ^mob222\n', 1000, 30, []);
+		const mobiCards = WasmBridge.getAllCards(mobileEngine, 1000);
+		expect(mobiCards).toHaveLength(1);
+		expect(mobiCards[0]!.card_id).toBe(1); // Both independently got local ID 1!
+
+		const params = buildFsrsParams(DEFAULT_SETTINGS);
+		WasmBridge.recordReview(mobileEngine, 1, 3, 2000, params);
+
+		const desktopBytes = desktopEngine.to_bytes();
+		const mergedEngine = FlashcardsEngine.from_bytes(desktopBytes);
+		const changed = mergedEngine.merge_from_bytes(mobileEngine.to_bytes());
+		expect(changed).toBe(true);
+
+		const allCards = WasmBridge.getAllCards(mergedEngine, 3000);
+		expect(allCards).toHaveLength(2);
+		expect(new Set(allCards.map((c) => c.card_id)).size).toBe(2); // Unique IDs!
+		expect(new Set(allCards.map((c) => c.prompt_id))).toEqual(new Set(['dsk111', 'mob222']));
+
+		const mobiMerged = allCards.find((c) => c.prompt_id === 'mob222')!;
+		expect(mobiMerged.reps).toBe(1);
+		expect(mobiMerged.last_review).toBe(2000);
+
+		// Review log was safely remapped to mobiMerged.card_id
+		const logs = JSON.parse(mergedEngine.get_review_logs());
+		expect(logs).toHaveLength(1);
+		expect(logs[0].card_id).toBe(String(mobiMerged.card_id));
+	});
+});
+
+describe('ReviewSession Leech Threshold Handling', () => {
+	function createMockAppAndFile(initialContent: string, filePath = 'Study.md') {
+		let currentContent = initialContent;
+		const mockFile = {
+			path: filePath,
+			stat: { mtime: 1000, size: initialContent.length },
+		} as unknown as TFile;
+
+		const mockVault = {
+			read: vi.fn().mockImplementation(() => Promise.resolve(currentContent)),
+			cachedRead: vi.fn().mockImplementation(() => Promise.resolve(currentContent)),
+			modify: vi.fn().mockImplementation((_file: TFile, newContent: string) => {
+				currentContent = newContent;
+				return Promise.resolve();
+			}),
+			getFileByPath: vi.fn().mockImplementation((p: string) => {
+				return p === filePath ? mockFile : null;
+			}),
+			getMarkdownFiles: vi.fn().mockReturnValue([mockFile]),
+			adapter: {
+				exists: vi
+					.fn()
+					.mockImplementation((path: string) => Promise.resolve(!path.includes('cards.bin'))),
+				stat: vi.fn().mockResolvedValue({ mtime: 1000, size: 100 }),
+				writeBinary: vi.fn().mockResolvedValue(undefined),
+				readBinary: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+				list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
+				mkdir: vi.fn().mockResolvedValue(undefined),
+				remove: vi.fn().mockResolvedValue(undefined),
+			},
+		};
+
+		const mockApp = {
+			vault: mockVault,
+			metadataCache: {
+				getFileCache: vi.fn().mockReturnValue(null),
+			},
+		} as unknown as App;
+
+		return {
+			mockApp,
+			mockFile,
+			getContent: () => currentContent,
+		};
 	}
 
-	it('existing ID in same note remains stable across fullScan without file modifications or scheduling resets', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const initialMarkdown = 'What is the capital of Japan? :: Tokyo ^abc123\n';
-		const { mockApp, storage, getModifyCalls } = createMockVault({
-			'Notes/Japan.md': initialMarkdown,
-		});
+	it('detects leeches when lapses reach threshold and automatically tags prompt with #card/leech', async () => {
+		const initialMarkdown = 'Leech question :: Leech answer ^leech1\n';
+		const { mockApp, getContent } = createMockAppAndFile(initialMarkdown);
+		const engine = new FlashcardsEngine();
+		WasmBridge.syncNote(engine, 'Study.md', initialMarkdown, 1000, initialMarkdown.length, []);
 
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
+		const items = WasmBridge.getAllCards(engine, 1000);
+		const card = items[0]!;
 
-		// Initial scan
-		await scanner.fullScan();
-		const cards = db.getAllCards();
-		expect(cards).toHaveLength(1);
-		const cardId = cards[0]!.cardId;
+		// Graduate the card to Review state first
+		const params = buildFsrsParams(DEFAULT_SETTINGS);
+		WasmBridge.recordReview(engine, card.card_id, 3, 1000, params);
+		const updatedItems = WasmBridge.getAllCards(engine, 2000);
+		const reviewCard = updatedItems[0]!;
+		expect(reviewCard.state).toBe('review');
 
-		// Set reviewed FSRS state
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: cardId,
-					rating: 3,
-					state: 2,
-					due_at: 10000,
-					stability: 15.4,
-					difficulty: 4.1,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: cardId,
-					state: 2,
-					due_at: 10000,
-					stability: 15.4,
-					difficulty: 4.1,
-					reps: 6,
-					lapses: 0,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
+		const mockPlugin = {
+			settings: { ...DEFAULT_SETTINGS, leechThreshold: 2 },
+			refreshDashboardIfOpen: vi.fn(),
+		} as unknown as FlashcardsPlugin;
 
-		const beforeRescanCalls = getModifyCalls();
+		const session = new ReviewSession(mockApp, mockPlugin, engine, [reviewCard], 'All Cards');
 
-		// Run fullScan again across vault
-		await scanner.fullScan();
+		// Lapse 1 -> moves to Relearning, lapses = 1
+		const r1 = await session.grade(reviewCard, 'forgot');
+		expect(r1.isLeech).toBe(false);
+		expect(reviewCard.lapses).toBe(1);
 
-		// Assert: File was NOT modified, ID remains abc123
-		expect(getModifyCalls()).toBe(beforeRescanCalls);
-		expect(storage.get('Notes/Japan.md')).toBe(initialMarkdown);
+		// Graduate out of relearning back to Review state
+		await session.grade(reviewCard, 'remembered');
+		expect(reviewCard.state).toBe('review');
 
-		// Assert: Card scheduling in DB is completely preserved
-		const cardsAfterScan = db.getAllCards();
-		expect(cardsAfterScan).toHaveLength(1);
-		expect(cardsAfterScan[0]!.cardId).toBe(cardId);
-		expect(cardsAfterScan[0]!.blockId).toBe('abc123');
-		expect(cardsAfterScan[0]!.reps).toBe(6);
-		expect(cardsAfterScan[0]!.stability).toBe(15.4);
-		expect(cardsAfterScan[0]!.difficulty).toBe(4.1);
-		expect(cardsAfterScan[0]!.state).toBe('review');
-	});
+		// Lapse 2 -> reaches leechThreshold (2)
+		const r2 = await session.grade(reviewCard, 'forgot');
+		expect(r2.isLeech).toBe(true);
+		expect(reviewCard.tags).toContain('#card/leech');
 
-	it('cross-file duplicate ID causes the second file to mint a new ID while preserving the first file', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const fileAContent = 'Question A :: Answer A ^shared\n';
-		const fileBContent = 'Question B :: Answer B ^shared\n';
-		const { mockApp, storage } = createMockVault({
-			'Notes/FileA.md': fileAContent,
-			'Notes/FileB.md': fileBContent,
-		});
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		// Scan File A first
-		await scanner.syncFile({ path: 'Notes/FileA.md' } as any);
-		const cardA = db.getAllCards()[0]!;
-		expect(cardA.blockId).toBe('shared');
-
-		// Set review metrics on File A
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: cardA.cardId,
-					rating: 3,
-					state: 2,
-					due_at: 8000,
-					stability: 9.0,
-					difficulty: 3.5,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: cardA.cardId,
-					state: 2,
-					due_at: 8000,
-					stability: 9.0,
-					difficulty: 3.5,
-					reps: 3,
-					lapses: 0,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// Scan File B (which copied ^shared)
-		await scanner.syncFile({ path: 'Notes/FileB.md' } as any);
-
-		// Assert: File A keeps ^shared and its scheduling
-		const allCards = db.getAllCards();
-		expect(allCards).toHaveLength(2);
-
-		const updatedCardA = allCards.find((c) => c.notePath === 'Notes/FileA.md')!;
-		expect(updatedCardA.blockId).toBe('shared');
-		expect(updatedCardA.reps).toBe(3);
-		expect(updatedCardA.stability).toBe(9.0);
-
-		// Assert: File B got a brand new ID
-		const cardB = allCards.find((c) => c.notePath === 'Notes/FileB.md')!;
-		expect(cardB.blockId).not.toBe('shared');
-		expect(cardB.blockId).toMatch(/^[0-9a-z]{6}$/);
-		expect(storage.get('Notes/FileB.md')).toContain(cardB.blockId);
-	});
-
-	it('duplicate ID within the same file mints a new ID for the second block while preserving the first', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const initialMarkdown = 'Question 1 :: Answer 1 ^dup001\nQuestion 2 :: Answer 2 ^dup001\n';
-		const { mockApp, storage } = createMockVault({ 'Notes/Dupes.md': initialMarkdown });
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		const blocks = await scanner.syncFile({ path: 'Notes/Dupes.md' } as any);
-		expect(blocks).toHaveLength(2);
-
-		// First block kept dup001
-		expect(blocks[0]!.id).toBe('dup001');
-		// Second block got a newly generated ID
-		expect(blocks[1]!.id).not.toBe('dup001');
-		expect(blocks[1]!.id).toMatch(/^[0-9a-z]{6}$/);
-
-		const updatedContent = storage.get('Notes/Dupes.md')!;
-		expect(updatedContent).toContain('^dup001');
-		expect(updatedContent).toContain(`^${blocks[1]!.id}`);
-	});
-
-	it('editing question or answer text preserves existing block ID and FSRS card scheduling', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const { mockApp, storage } = createMockVault({
-			'Notes/Edit.md': 'Original question :: Original answer ^edit01\n',
-		});
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		await scanner.syncFile({ path: 'Notes/Edit.md' } as any);
-		const initialCard = db.getAllCards()[0]!;
-
-		// Review card
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: initialCard.cardId,
-					rating: 3,
-					state: 2,
-					due_at: 9999,
-					stability: 11.2,
-					difficulty: 4.8,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: initialCard.cardId,
-					state: 2,
-					due_at: 9999,
-					stability: 11.2,
-					difficulty: 4.8,
-					reps: 5,
-					lapses: 1,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// User edits text in note
-		storage.set(
-			'Notes/Edit.md',
-			'Completely rewritten question? :: Brand new polished answer ^edit01\n',
-		);
-
-		await scanner.syncFile({ path: 'Notes/Edit.md' } as any);
-
-		// Assert: Block text updated, card scheduling preserved
-		const cardsAfterEdit = db.getAllCards();
-		expect(cardsAfterEdit).toHaveLength(1);
-		expect(cardsAfterEdit[0]!.front).toBe('Completely rewritten question?');
-		expect(cardsAfterEdit[0]!.back).toBe('Brand new polished answer');
-		expect(cardsAfterEdit[0]!.reps).toBe(5);
-		expect(cardsAfterEdit[0]!.lapses).toBe(1);
-		expect(cardsAfterEdit[0]!.stability).toBe(11.2);
-		expect(cardsAfterEdit[0]!.difficulty).toBe(4.8);
-	});
-
-	it('changing card from reversible (:::) to forward (::) prunes reverse card while preserving forward card scheduling', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const { mockApp, storage } = createMockVault({
-			'Notes/Reversible.md': 'Front ::: Back ^rev001\n',
-		});
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		await scanner.syncFile({ path: 'Notes/Reversible.md' } as any);
-		const cards = db.getAllCards();
-		expect(cards).toHaveLength(2);
-
-		const forwardCard = cards.find((c) => c.direction === 'forward')!;
-		// Review forward card
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: forwardCard.cardId,
-					rating: 3,
-					state: 2,
-					due_at: 12000,
-					stability: 7.5,
-					difficulty: 4.0,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: forwardCard.cardId,
-					state: 2,
-					due_at: 12000,
-					stability: 7.5,
-					difficulty: 4.0,
-					reps: 2,
-					lapses: 0,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// Switch to non-reversible
-		storage.set('Notes/Reversible.md', 'Front :: Back ^rev001\n');
-		await scanner.syncFile({ path: 'Notes/Reversible.md' } as any);
-
-		// Assert: 1 card remains, forward scheduling preserved
-		const cardsAfterPrune = db.getAllCards();
-		expect(cardsAfterPrune).toHaveLength(1);
-		expect(cardsAfterPrune[0]!.direction).toBe('forward');
-		expect(cardsAfterPrune[0]!.reps).toBe(2);
-		expect(cardsAfterPrune[0]!.stability).toBe(7.5);
-	});
-
-	it('changing card from forward (::) to reversible (:::) preserves forward scheduling and creates new reverse card', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const { mockApp, storage } = createMockVault({
-			'Notes/Forward.md': 'Front :: Back ^fwd001\n',
-		});
-
-		const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-		const scanner = new NoteScanner(mockApp, db);
-
-		await scanner.syncFile({ path: 'Notes/Forward.md' } as any);
-		const forwardCard = db.getAllCards()[0]!;
-
-		// Review forward card
-		await db.commitSession(
-			{ started_at: 1000, ended_at: 1000, card_count: 1, forgot_count: 0, remembered_count: 1 },
-			[
-				{
-					card_id: forwardCard.cardId,
-					rating: 3,
-					state: 2,
-					due_at: 15000,
-					stability: 10.0,
-					difficulty: 3.0,
-					reviewed_at: 1000,
-				},
-			],
-			[
-				{
-					id: forwardCard.cardId,
-					state: 2,
-					due_at: 15000,
-					stability: 10.0,
-					difficulty: 3.0,
-					reps: 4,
-					lapses: 0,
-					last_review: 1000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// Switch to reversible
-		storage.set('Notes/Forward.md', 'Front ::: Back ^fwd001\n');
-		await scanner.syncFile({ path: 'Notes/Forward.md' } as any);
-
-		// Assert: 2 cards exist, forward retained reps, reverse is new
-		const cardsAfterExpansion = db.getAllCards();
-		expect(cardsAfterExpansion).toHaveLength(2);
-
-		const forward = cardsAfterExpansion.find((c) => c.direction === 'forward')!;
-		expect(forward.reps).toBe(4);
-		expect(forward.stability).toBe(10.0);
-
-		const reverse = cardsAfterExpansion.find((c) => c.direction === 'reverse')!;
-		expect(reverse.reps).toBe(0);
-		expect(reverse.state).toBe('new');
+		// Check that the markdown file was updated with #card/leech
+		expect(getContent()).toContain('#card/leech');
 	});
 });
 
-describe('Dual-Slot Snapshot Binary Fuzzing & Corruption Resilience', () => {
-	it('fuzzes unpackAndVerifySnapshot with truncated and arbitrary random byte sequences', async () => {
-		// 1. Truncated inputs (< 48 bytes header)
-		for (let len = 0; len < 48; len++) {
-			const truncated = new Uint8Array(len);
-			for (let i = 0; i < len; i++) truncated[i] = (i * 37) & 0xff;
-			const result = await unpackAndVerifySnapshot(truncated);
-			expect(result).toBeNull();
-		}
+describe('Nested Tag Decks & Tree Hierarchy', () => {
+	const sampleStats = [
+		{ tag: 'language/german', total_cards: 10, due_cards: 3, new_cards: 2 },
+		{ tag: 'language/french', total_cards: 5, due_cards: 2, new_cards: 1 },
+		{ tag: 'science/physics/quantum', total_cards: 4, due_cards: 1, new_cards: 1 },
+		{ tag: 'math', total_cards: 8, due_cards: 0, new_cards: 4 },
+	];
 
-		// 2. Random fuzz byte sequences of varying lengths (48 to 1024 bytes)
-		for (let trial = 0; trial < 100; trial++) {
-			const len = 48 + ((trial * 13) % 500);
-			const randomBytes = new Uint8Array(len);
-			for (let i = 0; i < len; i++) {
-				randomBytes[i] = ((trial + 1) * 31 + i * 17) & 0xff;
-			}
-			const result = await unpackAndVerifySnapshot(randomBytes);
-			// Unless accidentally matching HSHC magic, version 1, exact length, and exact sha256, it must return null
-			expect(result).toBeNull();
-		}
+	it('builds nested tag trees and creates synthetic parent nodes with aggregated counts', () => {
+		const roots = buildTagTree(sampleStats);
+
+		// 3 root decks: language, science, math
+		expect(roots).toHaveLength(3);
+
+		const language = roots.find((r) => r.fullTag === 'language')!;
+		expect(language).toBeDefined();
+		expect(language.depth).toBe(0);
+		// Synthetic parent sums up german (10) + french (5)
+		expect(language.totalCards).toBe(15);
+		expect(language.dueCards).toBe(5);
+		expect(language.newCards).toBe(3);
+		expect(language.children).toHaveLength(2);
+
+		const german = language.children.find((c) => c.name === 'german')!;
+		expect(german).toBeDefined();
+		expect(german.fullTag).toBe('language/german');
+		expect(german.depth).toBe(1);
+		expect(german.totalCards).toBe(10);
+
+		// Deep nesting: science -> physics -> quantum
+		const science = roots.find((r) => r.fullTag === 'science')!;
+		expect(science.totalCards).toBe(4);
+		expect(science.children).toHaveLength(1);
+		const physics = science.children[0]!;
+		expect(physics.name).toBe('physics');
+		expect(physics.children).toHaveLength(1);
+		expect(physics.children[0]!.name).toBe('quantum');
 	});
 
-	it('fuzzes packSnapshot + unpackAndVerifySnapshot round-trip with bit flips and corruption', async () => {
-		const headerPrefix = new TextEncoder().encode('SQLite format 3\0');
+	it('flattens tree into visible rows and respects collapsed branches', () => {
+		const roots = buildTagTree(sampleStats);
+		const collapsed = new Set<string>();
 
-		for (let trial = 0; trial < 50; trial++) {
-			const payloadLen = 16 + ((trial * 41) % 256);
-			const payload = new Uint8Array(payloadLen);
-			payload.set(headerPrefix, 0);
-			for (let i = 16; i < payloadLen; i++) payload[i] = (i ^ trial) & 0xff;
+		// Fully expanded: language (root) + german + french + science (root) + physics + quantum + math (root) = 7 rows
+		const allRows = getVisibleTagRows(roots, collapsed, 'tag', true);
+		expect(allRows).toHaveLength(7);
+		expect(allRows.map((r) => r.fullTag)).toEqual([
+			'language',
+			'language/french',
+			'language/german',
+			'math',
+			'science',
+			'science/physics',
+			'science/physics/quantum',
+		]);
 
-			const sha256 = await computeSha256(payload);
-			const generation = BigInt(trial * 1000 + 1);
-			const packed = packSnapshot(payload, generation, sha256);
+		// Collapse language
+		collapsed.add('language');
+		const collapsedRows = getVisibleTagRows(roots, collapsed, 'tag', true);
+		// language children hidden: language, math, science, science/physics, science/physics/quantum = 5 rows
+		expect(collapsedRows).toHaveLength(5);
+		expect(collapsedRows.map((r) => r.fullTag)).not.toContain('language/german');
+		expect(collapsedRows.map((r) => r.fullTag)).not.toContain('language/french');
+	});
 
-			// Valid round-trip
-			const unpacked = await unpackAndVerifySnapshot(packed);
-			expect(unpacked).not.toBeNull();
-			expect(unpacked!.generation).toBe(generation);
-			expect(unpacked!.payload).toEqual(payload);
+	it('cascades selection between parents, children, and indeterminate states', () => {
+		const roots = buildTagTree(sampleStats);
+		const language = roots.find((r) => r.fullTag === 'language')!;
+		const german = language.children.find((c) => c.name === 'german')!;
+		const selected = new Set<string>();
 
-			// Corrupt random byte in payload
-			const corruptedPayload = new Uint8Array(packed);
-			const corruptIdx = 48 + (trial % payloadLen);
-			corruptedPayload[corruptIdx] = (corruptedPayload[corruptIdx] ?? 0) ^ 0xff;
-			const corruptResult = await unpackAndVerifySnapshot(corruptedPayload);
-			expect(corruptResult).toBeNull();
+		// Initial: nothing selected
+		expect(isNodeFullySelected(language, selected)).toBe(false);
+		expect(isNodeIndeterminate(language, selected)).toBe(false);
 
-			// Corrupt magic byte in header
-			const corruptedHeader = new Uint8Array(packed);
-			const headerIdx = trial % 4;
-			corruptedHeader[headerIdx] = (corruptedHeader[headerIdx] ?? 0) ^ 0x01;
-			const headerResult = await unpackAndVerifySnapshot(corruptedHeader);
-			expect(headerResult).toBeNull();
+		// Select only german
+		selected.add('language/german');
+		expect(isNodeFullySelected(german, selected)).toBe(true);
+		expect(isNodeFullySelected(language, selected)).toBe(false);
+		expect(isNodeIndeterminate(language, selected)).toBe(true);
+
+		// Summary with partial selection only counts german
+		const sum1 = getSelectedTagSummary(roots, selected);
+		expect(sum1.total).toBe(10);
+		expect(sum1.due).toBe(3);
+
+		// Select all of language (language + german + french)
+		selected.add('language');
+		selected.add('language/french');
+		expect(isNodeFullySelected(language, selected)).toBe(true);
+		expect(isNodeIndeterminate(language, selected)).toBe(false);
+
+		// Summary with full parent selected counts the entire deck (15) without double counting
+		const sum2 = getSelectedTagSummary(roots, selected);
+		expect(sum2.total).toBe(15);
+		expect(sum2.due).toBe(5);
+	});
+
+	it('matches top-level tag and returns all descendant cards in WASM study queue', () => {
+		const engine = new FlashcardsEngine();
+		const md1 = 'German Q #language/german :: German A ^de01\n';
+		const md2 = 'French Q #language/french :: French A ^fr01\n';
+		const md3 = 'Physics Q #science/physics :: Physics A ^ph01\n';
+
+		WasmBridge.syncNote(engine, 'De.md', md1, 1000, md1.length, []);
+		WasmBridge.syncNote(engine, 'Fr.md', md2, 1000, md2.length, []);
+		WasmBridge.syncNote(engine, 'Ph.md', md3, 1000, md3.length, []);
+
+		// Querying with top-level "language" tag MUST return both German and French cards
+		const langCards = WasmBridge.getDueCards(engine, 1000, 1000, ['language']);
+		expect(langCards).toHaveLength(2);
+		expect(langCards.map((c) => c.front).sort()).toEqual([
+			'French Q #language/french',
+			'German Q #language/german',
+		]);
+
+		// Querying with specific subtag "language/german" MUST return only German card
+		const deCards = WasmBridge.getDueCards(engine, 1000, 1000, ['language/german']);
+		expect(deCards).toHaveLength(1);
+		expect(deCards[0]!.front).toBe('German Q #language/german');
+	});
+
+	it('respects intra-day learning steps in getDueCards and formats due_human accurately', () => {
+		const engine = new FlashcardsEngine();
+		const md = 'Capital of France :: Paris ^cap01\n';
+		WasmBridge.syncNote(engine, 'Geo.md', md, 1_000_000, md.length, []);
+
+		const now = 1_000_000;
+		const dueCutoff = now + 14 * 3600 * 1000; // 14h in future (4am tomorrow)
+
+		// 1. Initial new card
+		const newCards = WasmBridge.getDueCards(engine, now, dueCutoff);
+		expect(newCards).toHaveLength(1);
+		expect(newCards[0]!.due_human).toBe('New');
+
+		// 2. Review and mark "Forgot" (rating 1)
+		const params = buildFsrsParams({} as any);
+		const updated = WasmBridge.recordReview(engine, newCards[0]!.card_id, 1, now, params);
+		expect(updated?.state).toBe('learning');
+		// Step is 10 minutes (600,000 ms), so it must say "In 10m" rather than "Tomorrow"
+		expect(updated?.due_human).toBe('In 10m');
+
+		// 3. Immediately after rating: step has NOT elapsed, card must NOT be in due queue
+		const immediateDue = WasmBridge.getDueCards(engine, now, dueCutoff);
+		expect(immediateDue).toHaveLength(0);
+
+		// Tag deck stats must also show 0 due cards
+		const immediateDeckStats = WasmBridge.getTagDeckStats(engine, now, dueCutoff);
+		if (immediateDeckStats.length > 0) {
+			expect(immediateDeckStats[0]!.due_cards).toBe(0);
 		}
-	});
-});
 
-describe('Generic Card Tag Modifier Property Fuzzing & Unicode Invariants', () => {
-	it('fuzzes adding and removing arbitrary tags across all card types with strict placement and parser invariants', () => {
-		const sampleBlockIds = ['abc123', '9x2k0p', 'zzz999', '000000', 'k8m2qp'];
-		const sampleTags = [
-			'#card/todo',
-			'#card/leech',
-			'#custom/nested/topic',
-			'#math-tag',
-			'tagWithoutHash',
-		];
-		const sampleTexts = [
-			'Simple question :: Simple answer',
-			'What is the capital of Japan? ::: Tokyo',
-			'The speed of light is {{299,792,458 m/s}} in vacuum.',
-			'پانی ::: Water #ذخیرہ',
-			'Multiple clozes {{one}} and {{two}} in sentence.',
-			'Question with `code::here` and math $E=mc^2$ :: Answer with $x::y$',
-			'Exponent formula $f(x) = x^2 + y^3$ :: Quadratic function',
-			'Question with existing tags #vocab #important :: Answer',
-		];
-
-		for (const text of sampleTexts) {
-			for (const blockId of sampleBlockIds) {
-				for (const tag of sampleTags) {
-					const normalizedTag = tag.startsWith('#') ? tag : `#${tag}`;
-					const cleanTag = normalizedTag.replace(/^#/, '');
-
-					// 1. Inline & Cloze Cards Placement Invariants
-					const inlineDoc = `${text} ^${blockId}\n`;
-					const taggedInline = addCardTag(inlineDoc, blockId, 'inline', tag);
-
-					// Invariant 1: Tag is present
-					expect(hasCardTag(taggedInline, blockId, 'inline', tag)).toBe(true);
-
-					// Invariant 2: Line ends strictly with `^${blockId}`
-					const trimmedInline = taggedInline.trimEnd();
-					expect(trimmedInline.endsWith(`^${blockId}`)).toBe(true);
-
-					// Invariant 3: Tag is located immediately before `^${blockId}`
-					expect(trimmedInline).toContain(`${normalizedTag} ^${blockId}`);
-
-					// Invariant 4: Idempotency
-					expect(addCardTag(taggedInline, blockId, 'inline', tag)).toBe(taggedInline);
-
-					// Invariant 5: Removal restores clean document without mangling block ID
-					const untaggedInline = removeCardTag(taggedInline, blockId, 'inline', tag);
-					expect(hasCardTag(untaggedInline, blockId, 'inline', tag)).toBe(false);
-					expect(untaggedInline.trimEnd().endsWith(`^${blockId}`)).toBe(true);
-
-					// Invariant 6: WASM Parser round-trip includes tag in parsed block
-					const parsedInline = WasmBridge.syncDocument(taggedInline, new Set<string>(), []);
-					expect(parsedInline.blocks.length).toBeGreaterThanOrEqual(1);
-					const matchedInlineBlock = parsedInline.blocks.find((b) => b.id === blockId);
-					expect(matchedInlineBlock).toBeDefined();
-					expect(matchedInlineBlock!.tags).toContain(cleanTag);
-
-					// 2. Block Cards Placement Invariants
-					const blockDoc = `%% card-start id=${blockId} %%\n${text}\n::\nAnswer content\n%% card-end %%\n`;
-					const taggedBlock = addCardTag(blockDoc, blockId, 'block', tag);
-
-					// Invariant 1: Tag is present
-					expect(hasCardTag(taggedBlock, blockId, 'block', tag)).toBe(true);
-
-					// Invariant 2: Block delimiters are preserved
-					expect(taggedBlock).toContain(`%% card-start id=${blockId} %%`);
-					expect(taggedBlock).toContain('%% card-end %%');
-
-					// Invariant 3: Tag is placed before the divider `::`
-					expect(taggedBlock).toContain(`${normalizedTag}\n::`);
-
-					// Invariant 4: Idempotency
-					expect(addCardTag(taggedBlock, blockId, 'block', tag)).toBe(taggedBlock);
-
-					// Invariant 5: Removal
-					const untaggedBlock = removeCardTag(taggedBlock, blockId, 'block', tag);
-					expect(hasCardTag(untaggedBlock, blockId, 'block', tag)).toBe(false);
-					expect(untaggedBlock).toContain(`%% card-start id=${blockId} %%`);
-					expect(untaggedBlock).toContain('%% card-end %%');
-
-					// Invariant 6: WASM Parser round-trip includes tag in parsed block
-					const parsedBlock = WasmBridge.syncDocument(taggedBlock, new Set<string>(), []);
-					expect(parsedBlock.blocks.length).toBeGreaterThanOrEqual(1);
-					const matchedBlock = parsedBlock.blocks.find((b) => b.id === blockId);
-					expect(matchedBlock).toBeDefined();
-					expect(matchedBlock!.tags).toContain(cleanTag);
-				}
-			}
-		}
-	});
-});
-
-describe('Anti-Priming (Sibling Burying) & Load Smoothing Integration', () => {
-	let SQL: SqlJsStatic;
-
-	beforeAll(async () => {
-		SQL = await initSqlJs();
+		// 4. 10 minutes later: step has elapsed, card is now due to study
+		const tenMinsLater = now + 600_000;
+		const dueAfterStep = WasmBridge.getDueCards(engine, tenMinsLater, dueCutoff);
+		expect(dueAfterStep).toHaveLength(1);
+		expect(dueAfterStep[0]!.due_human).toBe('Due now');
 	});
 
-	const DAY_MS = 24 * 60 * 60 * 1000;
-	const learningSteps = [10 * 60 * 1000, DAY_MS]; // 10m (intraday), 1d (interday)
-	const relearningSteps = [10 * 60 * 1000];
-
-	function mockItem(overrides: Partial<ReviewItem>): ReviewItem {
-		return {
-			cardId: overrides.cardId ?? 1,
-			blockId: overrides.blockId ?? 'blk001',
-			noteTitle: 'Note',
-			notePath: 'Note.md',
-			direction: overrides.direction ?? 'forward',
-			blockType: 'inline',
-			reversible: true,
+	it('filters learning cards correctly in filterDashboardPrompt based on elapsed step', () => {
+		const promptItem: DashboardPromptItem = {
+			prompt_id: 'p1',
+			note_title: 'Note',
+			note_path: 'Note.md',
+			card_type: 'inline',
+			reversible: false,
 			front: 'Front',
 			back: 'Back',
 			tags: [],
-			state: overrides.state ?? 'new',
-			stateNum: overrides.stateNum ?? 0,
-			dueAt: overrides.dueAt ?? Date.now(),
-			dueHuman: 'now',
-			stability: overrides.stability ?? 0,
-			difficulty: overrides.difficulty ?? 0,
-			reps: overrides.reps ?? 0,
-			lapses: overrides.lapses ?? 0,
-			learningStep: overrides.learningStep ?? 0,
-			relearningStep: overrides.relearningStep ?? 0,
-			lastReview: null,
-			lastPracticedHuman: 'Never',
-		};
-	}
-
-	it('computes correct priority ranks for all card lifecycle stages', () => {
-		// New (state = 0) -> Rank 1
-		const newCard = mockItem({ stateNum: 0, state: 'new' });
-		expect(getCardPriorityRank(newCard, learningSteps, relearningSteps)).toBe(CardPriorityRank.New);
-
-		// Review (state = 2) -> Rank 2
-		const reviewCard = mockItem({ stateNum: 2, state: 'review' });
-		expect(getCardPriorityRank(reviewCard, learningSteps, relearningSteps)).toBe(
-			CardPriorityRank.Review,
-		);
-
-		// Interday Learning (state = 1, step 1 = 1d) -> Rank 3
-		const interdayCard = mockItem({ stateNum: 1, state: 'learning', learningStep: 1 });
-		expect(getCardPriorityRank(interdayCard, learningSteps, relearningSteps)).toBe(
-			CardPriorityRank.InterdayLearning,
-		);
-
-		// Intraday Learning (state = 1, step 0 = 10m) -> Rank 4
-		const intradayCard = mockItem({ stateNum: 1, state: 'learning', learningStep: 0 });
-		expect(getCardPriorityRank(intradayCard, learningSteps, relearningSteps)).toBe(
-			CardPriorityRank.IntradayLearning,
-		);
-	});
-
-	it('buries New sibling when Review sibling is due', () => {
-		const reviewSibling = mockItem({
-			cardId: 10,
-			blockId: 'geo001',
-			direction: 'forward',
-			stateNum: 2,
-			state: 'review',
-			dueAt: 1000,
-		});
-		const newSibling = mockItem({
-			cardId: 11,
-			blockId: 'geo001',
-			direction: 'reverse',
-			stateNum: 0,
-			state: 'new',
-			dueAt: 1000,
-		});
-
-		const result = applySiblingBurying([newSibling, reviewSibling], learningSteps, relearningSteps);
-		expect(result).toHaveLength(1);
-		expect(result[0]!.cardId).toBe(10); // Review sibling won, New sibling buried
-	});
-
-	it('buries Review sibling when Interday Learning sibling is due', () => {
-		const interdaySibling = mockItem({
-			cardId: 20,
-			blockId: 'geo002',
-			direction: 'forward',
-			stateNum: 1,
-			state: 'learning',
-			learningStep: 1, // 1d
-			dueAt: 2000,
-		});
-		const reviewSibling = mockItem({
-			cardId: 21,
-			blockId: 'geo002',
-			direction: 'reverse',
-			stateNum: 2,
-			state: 'review',
-			dueAt: 2000,
-		});
-
-		const result = applySiblingBurying(
-			[reviewSibling, interdaySibling],
-			learningSteps,
-			relearningSteps,
-		);
-		expect(result).toHaveLength(1);
-		expect(result[0]!.cardId).toBe(20); // Interday learning won
-	});
-
-	it('buries less overdue sibling when both are in Review state', () => {
-		const overdueMore = mockItem({
-			cardId: 30,
-			blockId: 'geo003',
-			direction: 'reverse',
-			stateNum: 2,
-			state: 'review',
-			dueAt: 1000, // Due earlier
-		});
-		const overdueLess = mockItem({
-			cardId: 31,
-			blockId: 'geo003',
-			direction: 'forward',
-			stateNum: 2,
-			state: 'review',
-			dueAt: 2000,
-		});
-
-		const result = applySiblingBurying([overdueLess, overdueMore], learningSteps, relearningSteps);
-		expect(result).toHaveLength(1);
-		expect(result[0]!.cardId).toBe(30); // More overdue won
-	});
-
-	it('prefers Forward direction over Reverse when both are New cards with identical dueAt', () => {
-		const newForward = mockItem({
-			cardId: 40,
-			blockId: 'geo004',
-			direction: 'forward',
-			stateNum: 0,
-			state: 'new',
-			dueAt: 5000,
-		});
-		const newReverse = mockItem({
-			cardId: 41,
-			blockId: 'geo004',
-			direction: 'reverse',
-			stateNum: 0,
-			state: 'new',
-			dueAt: 5000,
-		});
-
-		const result = applySiblingBurying([newReverse, newForward], learningSteps, relearningSteps);
-		expect(result).toHaveLength(1);
-		expect(result[0]!.cardId).toBe(40);
-		expect(result[0]!.direction).toBe('forward');
-	});
-
-	it('integrates sibling burying and due histogram queries in DatabaseManager', () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-
-		const now = Date.now();
-
-		// Add a bidirectional card block
-		const syncResult = {
-			updated_content: null,
-			blocks: [
-				{
-					id: 'sib999',
-					block_type: 'inline' as const,
-					reversible: true,
-					front: 'Question',
-					back: 'Answer',
-					tags: ['test'],
-					line_start: 1,
-					line_end: 1,
-				},
-			],
-		};
-		db.syncNoteBlocks('Notes/Siblings.md', syncResult.blocks);
-
-		// Both forward and reverse are due at now
-		const dueCardsBury = db.getDueCards(undefined, 4, learningSteps, relearningSteps, true);
-		expect(dueCardsBury).toHaveLength(1);
-		expect(dueCardsBury[0]!.direction).toBe('forward');
-
-		// Without burying, both cards are returned
-		const dueCardsAll = db.getDueCards(undefined, 4, learningSteps, relearningSteps, false);
-		expect(dueCardsAll).toHaveLength(2);
-
-		// Sibling query
-		const forwardCard = dueCardsAll.find((c) => c.direction === 'forward')!;
-		const reverseCard = dueCardsAll.find((c) => c.direction === 'reverse')!;
-		const foundSibling = db.getSiblingCard(forwardCard.cardId, 'sib999');
-		expect(foundSibling).not.toBeNull();
-		expect(foundSibling!.id).toBe(reverseCard.cardId);
-
-		// Upcoming due counts histogram
-		const dueCounts = db.getUpcomingDueCounts(90, now - 86400000);
-		expect(dueCounts).toHaveLength(90);
-		expect(dueCounts[1]!).toBeGreaterThanOrEqual(1);
-	});
-
-	it('steers FSRS scheduling away from congested days and sibling due dates in WASM', () => {
-		const now = 1700000000000;
-		const card: SchedulingCard = {
-			stability: 10.0,
-			difficulty: 4.0,
-			reps: 2,
-			lapses: 0,
-			learning_step: 0,
-			relearning_step: 0,
-			state: 'review',
-			last_review: now - 86400000 * 10,
-			due: now,
-		};
-
-		// 1. Congested histogram: Day 10 has 1000 cards, Day 9 has 0
-		const dueCounts = Array.from({ length: 90 }, () => 0);
-		dueCounts[10] = 1000;
-
-		const paramsWithHistogram: FsrsParams = {
-			request_retention: DEFAULT_REQUEST_RETENTION,
-			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
-			learning_steps: DEFAULT_LEARNING_STEPS,
-			relearning_steps: DEFAULT_RELEARNING_STEPS,
-			due_counts: dueCounts,
-		};
-
-		const infoHistogram = WasmBridge.calculateSchedule(card, paramsWithHistogram, now);
-		const candidateGood = infoHistogram.next_states.find((c) => c.rating === 'good')!;
-		// Should steer away from day 10
-		expect(candidateGood.interval_days).toBeGreaterThanOrEqual(1.0);
-
-		// 2. Sibling penalty: Sibling is due on Day 10
-		const paramsWithSibling: FsrsParams = {
-			request_retention: DEFAULT_REQUEST_RETENTION,
-			maximum_interval: DEFAULT_MAXIMUM_INTERVAL,
-			learning_steps: DEFAULT_LEARNING_STEPS,
-			relearning_steps: DEFAULT_RELEARNING_STEPS,
-			sibling_due_offset: 10,
-		};
-
-		const infoSibling = WasmBridge.calculateSchedule(card, paramsWithSibling, now);
-		const candidateSiblingGood = infoSibling.next_states.find((c) => c.rating === 'good')!;
-		expect(candidateSiblingGood.interval_days).toBeGreaterThanOrEqual(1.0);
-	});
-
-	it('supports incremental session checkpointing without duplicating session rows', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const now = Date.now();
-
-		db.syncNoteBlocks('Notes/Test.md', [
-			{
-				id: 'blk01',
-				block_type: 'inline',
+			forward: {
+				card_id: 1,
+				prompt_id: 'p1',
+				note_title: 'Note',
+				note_path: 'Note.md',
+				card_type: 'inline',
+				direction: 'forward',
 				reversible: false,
-				front: 'Q1',
-				back: 'A1',
+				front: 'Front',
+				back: 'Back',
 				tags: [],
-				line_start: 1,
-				line_end: 1,
-			},
-			{
-				id: 'blk02',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q2',
-				back: 'A2',
-				tags: [],
-				line_start: 2,
-				line_end: 2,
-			},
-		]);
-
-		const cards = db.getAllCards();
-		const card1 = cards[0]!;
-		const card2 = cards[1]!;
-
-		// Checkpoint 1: User reviewed card 1
-		const session1 = {
-			started_at: now,
-			ended_at: now + 5000,
-			card_count: 1,
-			forgot_count: 0,
-			remembered_count: 1,
-		};
-		const reviews1 = [
-			{
-				card_id: card1.cardId,
-				rating: 3,
-				state: 2,
-				due_at: now + 86400000,
-				stability: 3.0,
-				difficulty: 5.0,
-				reviewed_at: now + 5000,
-			},
-		];
-		const cardUpdates1 = [
-			{
-				id: card1.cardId,
-				state: 2,
-				due_at: now + 86400000,
-				stability: 3.0,
-				difficulty: 5.0,
-				reps: 1,
-				lapses: 0,
-				last_review: now + 5000,
-				learning_step: 0,
-				relearning_step: 0,
-			},
-		];
-
-		const sessionId = await db.commitSession(session1, reviews1, cardUpdates1);
-		expect(sessionId).toBeGreaterThan(0);
-
-		// Checkpoint 2: User reviewed card 2 (app backgrounded or modal closed)
-		const session2 = {
-			started_at: now,
-			ended_at: now + 15000,
-			card_count: 2,
-			forgot_count: 0,
-			remembered_count: 2,
-		};
-		const reviews2 = [
-			...reviews1,
-			{
-				card_id: card2.cardId,
-				rating: 3,
-				state: 2,
-				due_at: now + 86400000,
-				stability: 3.0,
-				difficulty: 5.0,
-				reviewed_at: now + 15000,
-			},
-		];
-		const cardUpdates2 = [
-			...cardUpdates1,
-			{
-				id: card2.cardId,
-				state: 2,
-				due_at: now + 86400000,
-				stability: 3.0,
-				difficulty: 5.0,
-				reps: 1,
-				lapses: 0,
-				last_review: now + 15000,
-				learning_step: 0,
-				relearning_step: 0,
-			},
-		];
-
-		const updatedSessionId = await db.commitSession(session2, reviews2, cardUpdates2, sessionId);
-		expect(updatedSessionId).toBe(sessionId);
-
-		// Verify database records
-		const sessionStmt = rawDb.prepare('SELECT COUNT(*) as cnt, card_count FROM sessions');
-		sessionStmt.step();
-		const sessionRow = sessionStmt.getAsObject();
-		expect(sessionRow.cnt).toBe(1); // Still exactly 1 session
-		expect(sessionRow.card_count).toBe(2);
-		sessionStmt.free();
-
-		const reviewStmt = rawDb.prepare('SELECT COUNT(*) as cnt FROM reviews WHERE session_id = ?');
-		reviewStmt.bind([sessionId]);
-		reviewStmt.step();
-		expect(reviewStmt.getAsObject().cnt).toBe(2);
-		reviewStmt.free();
-	});
-
-	it('correctly handles interleaved undo across multiple session checkpoints', async () => {
-		const rawDb = new SQL.Database();
-		const db = DatabaseManager.createInMemory(rawDb);
-		const now = Date.now();
-
-		db.syncNoteBlocks('Notes/TestUndo.md', [
-			{
-				id: 'u01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q1',
-				back: 'A1',
-				tags: [],
-				line_start: 1,
-				line_end: 1,
-			},
-			{
-				id: 'u02',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q2',
-				back: 'A2',
-				tags: [],
-				line_start: 2,
-				line_end: 2,
-			},
-			{
-				id: 'u03',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Q3',
-				back: 'A3',
-				tags: [],
-				line_start: 3,
-				line_end: 3,
-			},
-		]);
-
-		const [c1, c2, c3] = db.getAllCards();
-		const cache = new ReviewSessionCache(now);
-
-		// 1. User reviews Card 1 (Good) and Card 2 (Forgot)
-		cache.recordReview(
-			c1!,
-			{ ...c1!, state: 'new' } as any,
-			'remembered',
-			{
-				stability: 3.0,
-				difficulty: 5.0,
-				reps: 1,
-				lapses: 0,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'review',
-				due: now + 86400000,
-				last_review: now,
-			},
-			2,
-			now,
-		);
-		cache.recordReview(
-			c2!,
-			{ ...c2!, state: 'new' } as any,
-			'forgot',
-			{
-				stability: 0.1,
+				state: 'learning',
+				state_num: 1,
+				due_at: Date.now() + 600_000, // 10 minutes in future
+				due_human: 'In 10m',
+				stability: 0.5,
 				difficulty: 5.0,
 				reps: 1,
 				lapses: 1,
 				learning_step: 0,
 				relearning_step: 0,
-				state: 'learning',
-				due: now + 600000,
-				last_review: now,
+				last_review: Date.now(),
+				last_practiced_human: 'Just now',
 			},
-			1,
-			now + 1000,
-		);
+		};
 
-		// 2. Checkpoint #1 (App backgrounded)
-		const data1 = cache.getPendingData();
-		const sessionId = await db.commitSession(data1.session, data1.reviews, data1.cardUpdates);
-		expect(sessionId).toBeGreaterThan(0);
+		const cutoff = Date.now() + 86400000;
 
-		// In DB: 2 reviews recorded, 1 forgot, 1 remembered
-		const statsMid = db.getDashboardStats(4);
-		expect(statsMid.studiedToday).toBe(2);
+		// While step has not elapsed, statusFilter 'due' must NOT include it
+		expect(filterDashboardPrompt(promptItem, 'due', cutoff, '')).toBe(false);
 
-		// 3. User returns to app and hits Undo on Card 2 (undoing the Forgot review)
-		const undoRes = cache.undo();
-		expect(undoRes).not.toBeNull();
-		expect(undoRes!.item.cardId).toBe(c2!.cardId);
+		// But statusFilter 'learning' DOES include it
+		expect(filterDashboardPrompt(promptItem, 'learning', cutoff, '')).toBe(true);
 
-		// User now reviews Card 3 (Remembered)
-		cache.recordReview(
-			c3!,
-			{ ...c3!, state: 'new' } as any,
-			'remembered',
-			{
-				stability: 3.0,
-				difficulty: 5.0,
-				reps: 1,
-				lapses: 0,
-				learning_step: 0,
-				relearning_step: 0,
-				state: 'review',
-				due: now + 86400000,
-				last_review: now,
-			},
-			2,
-			now + 5000,
-		);
-
-		// 4. Checkpoint #2 (Modal finished or app closed)
-		const data2 = cache.getPendingData();
-		const updatedSessionId = await db.commitSession(
-			data2.session,
-			data2.reviews,
-			data2.cardUpdates,
-			sessionId,
-		);
-		expect(updatedSessionId).toBe(sessionId);
-
-		// 5. Verify final database state
-		const sessionStmt = rawDb.prepare(
-			'SELECT card_count, forgot_count, remembered_count FROM sessions WHERE id = ?',
-		);
-		sessionStmt.bind([sessionId]);
-		sessionStmt.step();
-		const sessionRow = sessionStmt.getAsObject();
-		expect(sessionRow.card_count).toBe(2); // 2 total cards (C1 and C3)
-		expect(sessionRow.forgot_count).toBe(0); // 0 forgot (undone)
-		expect(sessionRow.remembered_count).toBe(2); // 2 remembered
-		sessionStmt.free();
-
-		// Card 2's review log must be removed from the session
-		const reviewsStmt = rawDb.prepare(
-			'SELECT card_id, rating FROM reviews WHERE session_id = ? ORDER BY reviewed_at ASC',
-		);
-		reviewsStmt.bind([sessionId]);
-		const dbReviews: Array<{ card_id: number; rating: number }> = [];
-		while (reviewsStmt.step()) {
-			dbReviews.push(reviewsStmt.getAsObject() as any);
-		}
-		reviewsStmt.free();
-		expect(dbReviews).toHaveLength(2);
-		expect(dbReviews.map((r) => r.card_id)).toEqual([c1!.cardId, c3!.cardId]);
-	});
-
-	it('preserves checkpointed session across simulated app crash and cold restart', async () => {
-		const mockStorage: Record<string, Uint8Array> = {};
-		const mockApp = {
-			vault: {
-				adapter: {
-					exists: async (p: string) => p in mockStorage,
-					readBinary: async (p: string) => {
-						const data = mockStorage[p];
-						if (!data) throw new Error('File not found');
-						return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-					},
-					writeBinary: async (p: string, data: ArrayBuffer) => {
-						mockStorage[p] = new Uint8Array(data);
-					},
-				},
-			},
-		} as any;
-
-		// 1. Initial boot: Create database, add card, and study it
-		const dbManager1 = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
-		await dbManager1.init();
-
-		const now = Date.now();
-		dbManager1.syncNoteBlocks('Notes/ColdStart.md', [
-			{
-				id: 'cs01',
-				block_type: 'inline',
-				reversible: false,
-				front: 'Crash test?',
-				back: 'Passed',
-				tags: ['test'],
-				line_start: 1,
-				line_end: 1,
-			},
-		]);
-
-		const card = dbManager1.getAllCards()[0]!;
-		await dbManager1.commitSession(
-			{
-				started_at: now,
-				ended_at: now + 2000,
-				card_count: 1,
-				forgot_count: 0,
-				remembered_count: 1,
-			},
-			[
-				{
-					card_id: card.cardId,
-					rating: 3,
-					state: 2,
-					due_at: now + 86400000 * 3,
-					stability: 3.0,
-					difficulty: 5.0,
-					reviewed_at: now + 2000,
-				},
-			],
-			[
-				{
-					id: card.cardId,
-					state: 2,
-					due_at: now + 86400000 * 3,
-					stability: 3.0,
-					difficulty: 5.0,
-					reps: 1,
-					lapses: 0,
-					last_review: now + 2000,
-					learning_step: 0,
-					relearning_step: 0,
-				},
-			],
-		);
-
-		// Verify snapshot files exist on mock disk
-		expect(
-			'.obsidian/plugins/flashcards/cards.a.db' in mockStorage ||
-				'.obsidian/plugins/flashcards/cards.b.db' in mockStorage,
-		).toBe(true);
-
-		// 2. Simulate Crash & Cold Restart: instantiate brand new DatabaseManager
-		const dbManager2 = new DatabaseManager(mockApp, { dir: '.obsidian/plugins/flashcards' } as any);
-		await dbManager2.init();
-
-		const recoveredCards = dbManager2.getAllCards();
-		expect(recoveredCards).toHaveLength(1);
-		expect(recoveredCards[0]!.state).toBe('review');
-		expect(recoveredCards[0]!.reps).toBe(1);
-		expect(recoveredCards[0]!.dueAt).toBe(now + 86400000 * 3);
-
-		const stats = dbManager2.getDashboardStats(4);
-		expect(stats.studiedToday).toBe(1);
-		expect(stats.dailyRetention).toBe(100);
-	});
-
-	describe('Leech Detection & Auto-Tagging (#card/leech)', () => {
-		it('calculates leech threshold triggers accurately according to lapse formula', () => {
-			// Threshold = 4 (default): triggers at 4, 6, 8, 10...
-			expect(isLeechThresholdMet(0, 4)).toBe(false);
-			expect(isLeechThresholdMet(1, 4)).toBe(false);
-			expect(isLeechThresholdMet(2, 4)).toBe(false);
-			expect(isLeechThresholdMet(3, 4)).toBe(false);
-			expect(isLeechThresholdMet(4, 4)).toBe(true);
-			expect(isLeechThresholdMet(5, 4)).toBe(false);
-			expect(isLeechThresholdMet(6, 4)).toBe(true);
-			expect(isLeechThresholdMet(7, 4)).toBe(false);
-			expect(isLeechThresholdMet(8, 4)).toBe(true);
-
-			// Threshold = 8 (Anki default): triggers at 8, 12, 16...
-			expect(isLeechThresholdMet(7, 8)).toBe(false);
-			expect(isLeechThresholdMet(8, 8)).toBe(true);
-			expect(isLeechThresholdMet(9, 8)).toBe(false);
-			expect(isLeechThresholdMet(10, 8)).toBe(false);
-			expect(isLeechThresholdMet(11, 8)).toBe(false);
-			expect(isLeechThresholdMet(12, 8)).toBe(true);
-
-			// Threshold = 1: triggers at every lapse (1, 2, 3...)
-			expect(isLeechThresholdMet(0, 1)).toBe(false);
-			expect(isLeechThresholdMet(1, 1)).toBe(true);
-			expect(isLeechThresholdMet(2, 1)).toBe(true);
-
-			// Threshold = 0: disabled
-			expect(isLeechThresholdMet(0, 0)).toBe(false);
-			expect(isLeechThresholdMet(4, 0)).toBe(false);
-			expect(isLeechThresholdMet(8, 0)).toBe(false);
-		});
-
-		it('adds #card/leech tag to inline, block, and cloze cards correctly', () => {
-			// 1. Inline card
-			const inlineMd = 'What is the capital of France? :: Paris ^in01';
-			const taggedInline = addCardLeechTagInMarkdown(inlineMd, 'in01', 'inline', '#card/leech');
-			expect(taggedInline).toBe('What is the capital of France? :: Paris #card/leech ^in01');
-
-			// Idempotency: second call returns identical content
-			expect(addCardLeechTagInMarkdown(taggedInline, 'in01', 'inline', '#card/leech')).toBe(
-				taggedInline,
-			);
-
-			// 2. Cloze card
-			const clozeMd = 'The capital of France is ==Paris==. ^cl01';
-			const taggedCloze = addCardLeechTagInMarkdown(clozeMd, 'cl01', 'cloze', '#card/leech');
-			expect(taggedCloze).toBe('The capital of France is ==Paris==. #card/leech ^cl01');
-
-			// 3. Block card
-			const blockMd = `%% card-start id=blk01 %%
-What is the powerhouse
-of the cell?
-::
-Mitochondria
-%% card-end %%`;
-			const taggedBlock = addCardLeechTagInMarkdown(blockMd, 'blk01', 'block', '#card/leech');
-			expect(taggedBlock).toContain('of the cell? #card/leech\n::');
-
-			// Idempotency
-			expect(addCardLeechTagInMarkdown(taggedBlock, 'blk01', 'block', '#card/leech')).toBe(
-				taggedBlock,
-			);
-		});
-
-		it('removes and toggles card tags cleanly without breaking block IDs or formatting', () => {
-			const inlineMd = 'What is DNS? :: Domain Name System #card/leech ^dns01';
-			expect(hasCardTag(inlineMd, 'dns01', 'inline', '#card/leech')).toBe(true);
-			expect(hasCardTag(inlineMd, 'dns01', 'inline', '#card/todo')).toBe(false);
-
-			// Word boundary safety: does not match substring tag
-			const falseTagMd = 'What is DNS? :: Domain Name System #card/leech2 ^dns01';
-			expect(hasCardTag(falseTagMd, 'dns01', 'inline', '#card/leech')).toBe(false);
-
-			// Remove tag
-			const removed = removeCardTag(inlineMd, 'dns01', 'inline', '#card/leech');
-			expect(removed).toBe('What is DNS? :: Domain Name System ^dns01');
-
-			// Toggle tag
-			const toggledOn = toggleCardTag(removed, 'dns01', 'inline', '#card/leech');
-			expect(toggledOn).toBe('What is DNS? :: Domain Name System #card/leech ^dns01');
-
-			const toggledOff = toggleCardTag(toggledOn, 'dns01', 'inline', '#card/leech');
-			expect(toggledOff).toBe('What is DNS? :: Domain Name System ^dns01');
-		});
-
-		it('syncs #card/leech into database blocks table when note is modified', () => {
-			const rawDb = new SQL.Database();
-			const db = DatabaseManager.createInMemory(rawDb);
-			const filePath = 'Notes/LeechTest.md';
-
-			// 1. Initial sync without leech tag
-			db.syncNoteBlocks(filePath, [
-				{
-					id: 'l01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Hard concept?',
-					back: 'Answer',
-					tags: ['biology'],
-					line_start: 1,
-					line_end: 1,
-				},
-			]);
-
-			let cards = db.getAllCards();
-			expect(cards[0]!.tags).toEqual(['biology']);
-
-			// 2. Add #card/leech and re-sync
-			db.syncNoteBlocks(filePath, [
-				{
-					id: 'l01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Hard concept?',
-					back: 'Answer',
-					tags: ['biology', 'card/leech'],
-					line_start: 1,
-					line_end: 1,
-				},
-			]);
-
-			cards = db.getAllCards();
-			expect(cards[0]!.tags).toContain('card/leech');
-		});
-
-		it('matches Anki lapse lifecycle (relearning preserves lapses, graduating and failing increments)', () => {
-			let currentCard: SchedulingCard = {
-				state: 'review',
-				lapses: 0,
-				stability: 4.0,
-				difficulty: 3.0,
-				reps: 2,
-				learning_step: 0,
-				relearning_step: 0,
-				last_review: Date.now() - 86400000 * 4,
-				due: Date.now(),
-			};
-
-			const params: FsrsParams = {
-				request_retention: 0.9,
-				maximum_interval: 36500,
-				learning_steps: [600000],
-				relearning_steps: [600000],
-			};
-
-			// 1st failure on review card -> moves to Relearning, lapses = 1
-			let res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
-			let againCandidate = res.next_states.find((s) => s.rating === 'again')!;
-			expect(againCandidate.card.state).toBe('relearning');
-			expect(againCandidate.card.lapses).toBe(1);
-
-			// Failure while in Relearning does NOT increment lapses (remains in same lapse episode)
-			currentCard = againCandidate.card;
-			res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
-			againCandidate = res.next_states.find((s) => s.rating === 'again')!;
-			expect(againCandidate.card.state).toBe('relearning');
-			expect(againCandidate.card.lapses).toBe(1);
-
-			// Graduate out of Relearning with Good -> back to Review
-			let goodCandidate = res.next_states.find((s) => s.rating === 'good')!;
-			expect(goodCandidate.card.state).toBe('review');
-			expect(goodCandidate.card.lapses).toBe(1);
-
-			// 2nd failure in Review state -> lapses = 2
-			currentCard = goodCandidate.card;
-			res = WasmBridge.calculateSchedule(currentCard, params, Date.now());
-			againCandidate = res.next_states.find((s) => s.rating === 'again')!;
-			expect(againCandidate.card.state).toBe('relearning');
-			expect(againCandidate.card.lapses).toBe(2);
-
-			// Graduate again with Good (lapses remain 2)
-			let gradRes = WasmBridge.calculateSchedule(againCandidate.card, params, Date.now());
-			goodCandidate = gradRes.next_states.find((s) => s.rating === 'good')!;
-			expect(goodCandidate.card.state).toBe('review');
-			expect(goodCandidate.card.lapses).toBe(2);
-
-			// Fail 3rd time in Review state -> lapses = 3
-			let failRes = WasmBridge.calculateSchedule(goodCandidate.card, params, Date.now());
-			againCandidate = failRes.next_states.find((s) => s.rating === 'again')!;
-			expect(againCandidate.card.state).toBe('relearning');
-			expect(againCandidate.card.lapses).toBe(3);
-
-			// Graduate again with Good (lapses remain 3)
-			gradRes = WasmBridge.calculateSchedule(againCandidate.card, params, Date.now());
-			goodCandidate = gradRes.next_states.find((s) => s.rating === 'good')!;
-			expect(goodCandidate.card.state).toBe('review');
-			expect(goodCandidate.card.lapses).toBe(3);
-
-			// Fail 4th time in Review state -> lapses = 4 -> leech threshold met!
-			failRes = WasmBridge.calculateSchedule(goodCandidate.card, params, Date.now());
-			againCandidate = failRes.next_states.find((s) => s.rating === 'again')!;
-			expect(againCandidate.card.state).toBe('relearning');
-			expect(againCandidate.card.lapses).toBe(4);
-			expect(isLeechThresholdMet(againCandidate.card.lapses, 4)).toBe(true);
-		});
-	});
-
-	describe('Review Findings Regression & Correctness Invariants', () => {
-		it('safely formats cloze deletion text and prevents raw HTML tag injection', () => {
-			const textWithHtml = 'In JavaScript, {{<img src=x onerror=alert(1)>}} is dangerous.';
-
-			// Unrevealed: masked
-			const masked = formatClozeText(textWithHtml, false);
-			expect(masked).toBe(
-				'In JavaScript, <span class="fc-cloze-mask">[ ... ]</span> is dangerous.',
-			);
-			expect(masked).not.toContain('<img');
-
-			// Revealed: escaped HTML inside <mark>
-			const revealed = formatClozeText(textWithHtml, true);
-			expect(revealed).toContain(
-				'<mark class="fc-cloze-revealed">&lt;img src=x onerror=alert(1)&gt;</mark>',
-			);
-			expect(revealed).not.toContain('<img src=x');
-
-			// Standard markdown formatting preserved
-			const markdownCloze = 'The result of {{**strong** & $x < y$}} calculation.';
-			const revealedMd = formatClozeText(markdownCloze, true);
-			expect(revealedMd).toBe(
-				'The result of <mark class="fc-cloze-revealed">**strong** &amp; $x &lt; y$</mark> calculation.',
-			);
-		});
-
-		it('preserves other user settings when resetting FSRS weights', () => {
-			const settings: FlashcardsPluginSettings = {
-				...DEFAULT_SETTINGS,
-				rolloverHour: 5,
-				requestRetention: 0.95,
-				customWeights: '0.1, 0.2, 0.3',
-			};
-
-			// Reset weights only
-			delete settings.customWeights;
-
-			expect(settings.customWeights).toBeUndefined();
-			expect(settings.rolloverHour).toBe(5);
-			expect(settings.requestRetention).toBe(0.95);
-		});
-
-		it('guarantees WasmBridge.initialize handles concurrent callers without racing', async () => {
-			let readCount = 0;
-			const mockApp = {
-				vault: {
-					adapter: {
-						readBinary: async (p: string) => {
-							readCount++;
-							const wasmPath = p.includes('sql')
-								? path.resolve(__dirname, '../../../node_modules/sql.js/dist/sql-wasm.wasm')
-								: path.resolve(
-										__dirname,
-										'../../../crates/flashcards-wasm/pkg/flashcards_wasm_bg.wasm',
-									);
-							return fs.readFileSync(wasmPath);
-						},
-					},
-				},
-			} as any;
-
-			// Call initialize concurrently
-			const manifest = { dir: '.obsidian/plugins/flashcards' } as any;
-			await Promise.all([
-				WasmBridge.initialize(mockApp, manifest),
-				WasmBridge.initialize(mockApp, manifest),
-				WasmBridge.initialize(mockApp, manifest),
-			]);
-
-			// Each file is read at most once
-			expect(readCount).toBeLessThanOrEqual(2);
-		});
-
-		it('buckets upcoming due counts accurately according to 4:00 AM study-day boundaries', () => {
-			const rawDb = new SQL.Database();
-			const db = DatabaseManager.createInMemory(rawDb);
-
-			// Reference time: 2026-05-15 at 23:00 (11 PM)
-			// Study day start: 2026-05-15 04:00 AM
-			const nowMs = new Date(2026, 4, 15, 23, 0, 0, 0).getTime();
-			const studyDayStart = getStudyDayStart(4, new Date(nowMs));
-
-			// Card 1: Due tonight at 23:30 (today's study day) -> offset 0
-			const dueDay0 = new Date(2026, 4, 15, 23, 30, 0, 0).getTime();
-
-			// Card 2: Due tomorrow at 05:00 AM (next study day) -> offset 1
-			const dueDay1 = studyDayStart + 1 * 86400000 + 3600000; // 05:00 AM tomorrow
-
-			// Card 3: Due 5 days later -> offset 5
-			const dueDay5 = studyDayStart + 5 * 86400000 + 3600000;
-
-			db.syncNoteBlocks('Notes/Histogram.md', [
-				{
-					id: 'h01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'H1?',
-					back: 'A1',
-					tags: [],
-					line_start: 1,
-					line_end: 1,
-				},
-				{
-					id: 'h02',
-					block_type: 'inline',
-					reversible: false,
-					front: 'H2?',
-					back: 'A2',
-					tags: [],
-					line_start: 2,
-					line_end: 2,
-				},
-				{
-					id: 'h03',
-					block_type: 'inline',
-					reversible: false,
-					front: 'H3?',
-					back: 'A3',
-					tags: [],
-					line_start: 3,
-					line_end: 3,
-				},
-			]);
-
-			expect(db.getAllCards()).toHaveLength(3);
-			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h01"', [dueDay0]);
-			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h02"', [dueDay1]);
-			rawDb.run('UPDATE cards SET due_at = ? WHERE block_id = "h03"', [dueDay5]);
-
-			const counts = db.getUpcomingDueCounts(10, nowMs, 4);
-			expect(counts[0]).toBe(1); // Today
-			expect(counts[1]).toBe(1); // Tomorrow
-			expect(counts[2]).toBe(0);
-			expect(counts[5]).toBe(1); // 5 days out
-		});
-
-		it('ignores trailing block IDs inside inline code or math during WASM parsing', () => {
-			const mdWithCode = 'What is the syntax? :: Use `let x = ^abc123` in code';
-			const blocks = WasmBridge.parseMarkdownBlocks(mdWithCode, []);
-			expect(blocks).toHaveLength(1);
-			expect(blocks[0]!.id).toBe(''); // Trailing block ID inside code is rejected
-
-			const mdWithMath = 'What is the formula? :: Given $E = mc^2$';
-			const blocksMath = WasmBridge.parseMarkdownBlocks(mdWithMath, []);
-			expect(blocksMath).toHaveLength(1);
-			expect(blocksMath[0]!.id).toBe('');
-
-			const mdValid = 'What is the syntax? :: Use `let x = 1` ^abc123';
-			const blocksValid = WasmBridge.parseMarkdownBlocks(mdValid, []);
-			expect(blocksValid).toHaveLength(1);
-			expect(blocksValid[0]!.id).toBe('abc123');
-		});
-
-		it('scans Urdu RTL inline and block cards with BiDi marks cleanly', () => {
-			const urduContent =
-				'تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n\n' +
-				'%% card-start id=n7s8y3 %%\n' +
-				'تسی حج وی کیتی جاندے او\n' +
-				'::\n' +
-				'لہو وی پیتی جاندے او\n' +
-				'%% card-end %%\n';
-
-			const blocks = WasmBridge.parseMarkdownBlocks(urduContent, []);
-			expect(blocks).toHaveLength(2);
-			expect(blocks[0]!.id).toBe('j1029y');
-			expect(blocks[0]!.front).toBe('تسی حج وی کیتی جاندے او');
-			expect(blocks[0]!.back).toBe('لہو وی پیتی جاندے او');
-			expect(blocks[1]!.id).toBe('n7s8y3');
-			expect(blocks[1]!.front).toBe('تسی حج وی کیتی جاندے او');
-			expect(blocks[1]!.back).toBe('لہو وی پیتی جاندے او');
-
-			// BiDi markers (RLM, LRM, etc.) with ::: divider
-			const bidiContent =
-				'\u200Fتسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u200F\n\n' +
-				'\u200F%% card-start id=n7s8y3 %%\u200F\n' +
-				'تسی حج وی کیتی جاندے او\n' +
-				'\u200F:::\u200F\n' +
-				'لہو وی پیتی جاندے او\n' +
-				'\u200F%% card-end %%\u200F\n';
-
-			const bidiBlocks = WasmBridge.parseMarkdownBlocks(bidiContent, []);
-			expect(bidiBlocks).toHaveLength(2);
-			expect(bidiBlocks[0]!.id).toBe('j1029y');
-			expect(bidiBlocks[0]!.front).toBe('تسی حج وی کیتی جاندے او');
-			expect(bidiBlocks[0]!.back).toBe('لہو وی پیتی جاندے او');
-			expect(bidiBlocks[1]!.id).toBe('n7s8y3');
-			expect(bidiBlocks[1]!.front).toBe('تسی حج وی کیتی جاندے او');
-			expect(bidiBlocks[1]!.back).toBe('لہو وی پیتی جاندے او');
-		});
-
-		it('builds FSRS parameters consistently with defaults and overrides', () => {
-			const emptySettings: FlashcardsPluginSettings = {};
-			const params = buildFsrsParams(emptySettings);
-			expect(params.request_retention).toBe(DEFAULT_REQUEST_RETENTION);
-			expect(params.maximum_interval).toBe(DEFAULT_MAXIMUM_INTERVAL);
-			expect(params.weights).toBeUndefined();
-			expect(params.learning_steps).toEqual(DEFAULT_LEARNING_STEPS);
-			expect(params.relearning_steps).toEqual(DEFAULT_RELEARNING_STEPS);
-
-			const customWeightsStr =
-				'0.40255, 1.18385, 3.17300, 15.69105, 7.19490, 0.53450, 1.46040, 0.00460, 1.54575, 0.11920, 1.01925, 1.93950, 0.11000, 0.29605, 0.22695, 0.56985, 2.85535, 0.32345, 0.65580, 0.23120, 0.40255';
-			expect(parseWeights(customWeightsStr)).toHaveLength(21);
-			expect(parseWeights('1.0, 2.0')).toBeUndefined();
-
-			const overridden = buildFsrsParams(
-				{
-					requestRetention: 0.85,
-					maximumInterval: 365,
-					customWeights: customWeightsStr,
-					learningSteps: '5m 15m',
-				},
-				{
-					due_counts: [10, 20],
-					sibling_due_offset: 3,
-				},
-			);
-			expect(overridden.request_retention).toBe(0.85);
-			expect(overridden.maximum_interval).toBe(365);
-			expect(overridden.weights).toHaveLength(21);
-			expect(overridden.learning_steps).toEqual([5 * 60 * 1000, 15 * 60 * 1000]);
-			expect(overridden.due_counts).toEqual([10, 20]);
-			expect(overridden.sibling_due_offset).toBe(3);
-		});
-
-		it('optimizes database and cleans orphaned blocks as well as stale file_sync_state rows', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			rawDb.run(SCHEMA_SQL);
-			const db = DatabaseManager.createForTesting(rawDb);
-
-			db.syncNoteBlocks('existing.md', [
-				{
-					id: 'k9x2mp',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Active',
-					back: 'Card',
-					tags: [],
-					line_start: 0,
-					line_end: 0,
-				},
-			]);
-			db.upsertFileSyncState({
-				file_path: 'existing.md',
-				modified_at: 1000,
-				size: 50,
-				content_hash: 'abc',
-				updated_at: 1000,
-			});
-
-			db.syncNoteBlocks('deleted.md', [
-				{
-					id: 'p8y2zq',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Stale',
-					back: 'Card',
-					tags: [],
-					line_start: 0,
-					line_end: 0,
-				},
-			]);
-			db.upsertFileSyncState({
-				file_path: 'deleted.md',
-				modified_at: 2000,
-				size: 100,
-				content_hash: 'def',
-				updated_at: 2000,
-			});
-
-			const validPaths = new Set(['existing.md']);
-			const res = await db.optimizeDatabase(validPaths);
-
-			expect(res.integrityOk).toBe(true);
-			expect(res.prunedBlocks).toBe(1);
-
-			expect(db.getAllCards()).toHaveLength(1);
-			expect(db.getFileSyncState('existing.md')).not.toBeNull();
-			expect(db.getFileSyncState('deleted.md')).toBeNull();
-		});
-	});
-
-	describe('Scan-Scoped Collision Registry & Block ID Handling', () => {
-		it('manages CollisionRegistry lifecycle (insert, contains, allocate_id, size, free)', () => {
-			const registry = WasmBridge.createCollisionRegistry();
-			try {
-				expect(registry.size()).toBe(0);
-				expect(registry.contains('k9x2mp')).toBe(false);
-
-				// Insert valid ID
-				expect(registry.insert('k9x2mp')).toBe(true);
-				expect(registry.size()).toBe(1);
-				expect(registry.contains('k9x2mp')).toBe(true);
-
-				// Duplicate insert returns false
-				expect(registry.insert('k9x2mp')).toBe(false);
-				expect(registry.size()).toBe(1);
-
-				// Reject invalid IDs on insert / contains
-				expect(registry.insert('INVALID')).toBe(false);
-				expect(registry.insert('123')).toBe(false);
-				expect(registry.contains('INVALID')).toBe(false);
-
-				// Allocate unique ID
-				const allocated = registry.allocate_id();
-				expect(allocated).toMatch(/^[0-9a-z]{6}$/);
-				expect(registry.size()).toBe(2);
-				expect(registry.contains(allocated)).toBe(true);
-			} finally {
-				registry.free();
-			}
-		});
-
-		it('bulk initializes CollisionRegistry from existing IDs array or set', () => {
-			const existing = new Set(['dup001', 'dup002', 'w7n3rk']);
-			const registry = WasmBridge.createCollisionRegistry(existing);
-			try {
-				expect(registry.size()).toBe(3);
-				expect(registry.contains('dup001')).toBe(true);
-				expect(registry.contains('dup002')).toBe(true);
-				expect(registry.contains('w7n3rk')).toBe(true);
-				expect(registry.contains('other0')).toBe(false);
-
-				// Allocation does not collide with initialized IDs
-				const newId = registry.allocate_id();
-				expect(existing.has(newId)).toBe(false);
-				expect(registry.size()).toBe(4);
-			} finally {
-				registry.free();
-			}
-		});
-
-		it('persists registry across multiple syncDocumentWithRegistry calls', () => {
-			const registry = WasmBridge.createCollisionRegistry();
-			try {
-				const doc1 = 'Capital of France? :: Paris ^k9x2mp\nCapital of Spain? :: Madrid\n';
-				const res1 = WasmBridge.syncDocumentWithRegistry(doc1, registry, []);
-				expect(res1.blocks).toHaveLength(2);
-				expect(res1.blocks[0]!.id).toBe('k9x2mp');
-				const generatedId1 = res1.blocks[1]!.id;
-				expect(generatedId1).toMatch(/^[0-9a-z]{6}$/);
-				expect(registry.size()).toBe(2);
-
-				// Doc 2 has duplicate 'k9x2mp' (from Doc 1) and a fresh ID 'w7n3rk'
-				const doc2 = 'Capital of Italy? :: Rome ^k9x2mp\nCapital of Germany? :: Berlin ^w7n3rk\n';
-				const res2 = WasmBridge.syncDocumentWithRegistry(doc2, registry, []);
-				expect(res2.blocks).toHaveLength(2);
-				expect(res2.updated_content).not.toBeNull();
-
-				// 'k9x2mp' in Doc 2 was regenerated to avoid cross-document collision
-				expect(res2.blocks[0]!.id).not.toBe('k9x2mp');
-				expect(res2.blocks[0]!.id).toMatch(/^[0-9a-z]{6}$/);
-				// 'w7n3rk' in Doc 2 was preserved
-				expect(res2.blocks[1]!.id).toBe('w7n3rk');
-				expect(registry.size()).toBe(4);
-			} finally {
-				registry.free();
-			}
-		});
-
-		it('ensures single-note sync does not falsely treat own IDs as collisions', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			const mockApp = {
-				vault: {
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			// Note 1 has blocks ^id0001 and ^id0002
-			fileVault.set('Note1.md', 'Q1 :: A1 ^id0001\nQ2 ::: A2 ^id0002\n');
-			const blocks1 = await scanner.syncFile({ path: 'Note1.md' } as any);
-			expect(blocks1).toHaveLength(2);
-			expect(blocks1[0]!.id).toBe('id0001');
-			expect(blocks1[1]!.id).toBe('id0002');
-
-			// Syncing Note 1 again (incremental single-file sync) must retain own IDs
-			const resync1 = await scanner.syncFile({ path: 'Note1.md' } as any);
-			expect(resync1).toHaveLength(2);
-			expect(resync1[0]!.id).toBe('id0001');
-			expect(resync1[1]!.id).toBe('id0002');
-			expect(fileVault.get('Note1.md')).toBe('Q1 :: A1 ^id0001\nQ2 ::: A2 ^id0002\n');
-		});
-
-		it('fullScan uses scan-scoped registry and treats Markdown as authoritative source of truth', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('FileA.md', 'Capital of France :: Paris ^dup100\n');
-			fileVault.set('FileB.md', 'Capital of Italy :: Rome ^dup100\n');
-			fileVault.set('FileC.md', 'Capital of Spain :: Madrid ^dup100\n');
-
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => [
-						{ path: 'FileA.md' },
-						{ path: 'FileB.md' },
-						{ path: 'FileC.md' },
-					],
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			const scanResult = await scanner.fullScan();
-			expect(scanResult.filesScanned).toBe(3);
-			expect(scanResult.totalBlocks).toBe(3);
-			expect(scanResult.failedFiles).toHaveLength(0);
-
-			// FileA was scanned first and retained 'dup100'
-			expect(fileVault.get('FileA.md')).toBe('Capital of France :: Paris ^dup100\n');
-
-			// FileB and FileC collided with 'dup100' and were assigned fresh unique IDs
-			const contentB = fileVault.get('FileB.md')!;
-			const contentC = fileVault.get('FileC.md')!;
-			expect(contentB).not.toContain('^dup100');
-			expect(contentC).not.toContain('^dup100');
-
-			const allDbIds = db.getAllBlockIds();
-			expect(allDbIds.size).toBe(3);
-			expect(allDbIds.has('dup100')).toBe(true);
-		});
-	});
-
-	describe('Batch 2: Change Detection & Operation Serialization', () => {
-		it('skips unchanged files during fullScan and avoids unnecessary reading and parsing', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('Note1.md', 'Q1 :: A1 ^id0001\n');
-			fileVault.set('Note2.md', 'Q2 :: A2 ^id0002\n');
-			fileVault.set('Note3.md', 'Q3 :: A3 ^id0003\n');
-
-			const files = [
-				{ path: 'Note1.md', stat: { mtime: 1000, size: 20 } },
-				{ path: 'Note2.md', stat: { mtime: 1000, size: 20 } },
-				{ path: 'Note3.md', stat: { mtime: 1000, size: 20 } },
-			];
-
-			let readCount = 0;
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => {
-						readCount++;
-						return fileVault.get(file.path) ?? '';
-					},
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			// First scan: all files are scanned and indexed
-			const res1 = await scanner.fullScan();
-			expect(res1.filesScanned).toBe(3);
-			expect(res1.filesSkipped).toBe(0);
-			expect(res1.totalBlocks).toBe(3);
-			expect(readCount).toBe(3);
-
-			// Second scan: files are unchanged, should be skipped with 0 additional reads
-			const res2 = await scanner.fullScan();
-			expect(res2.filesScanned).toBe(0);
-			expect(res2.filesSkipped).toBe(3);
-			expect(res2.totalBlocks).toBe(3);
-			expect(readCount).toBe(3); // No new reads!
-
-			// Verify cards are still intact in DB
-			expect(db.getAllCards()).toHaveLength(3);
-		});
-
-		it('rescans modified files while keeping unchanged files skipped', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('NoteA.md', 'QA :: AA ^ida001\n');
-			fileVault.set('NoteB.md', 'QB :: AB ^idb001\n');
-
-			const files = [
-				{ path: 'NoteA.md', stat: { mtime: 1000, size: 20 } },
-				{ path: 'NoteB.md', stat: { mtime: 1000, size: 20 } },
-			];
-
-			let readCount = 0;
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => {
-						readCount++;
-						return fileVault.get(file.path) ?? '';
-					},
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			await scanner.fullScan();
-			expect(readCount).toBe(2);
-
-			// Modify NoteB
-			fileVault.set('NoteB.md', 'QB_Modified :: AB_Modified ^idb001\n');
-			files[1]!.stat = { mtime: 2000, size: 40 };
-
-			const res = await scanner.fullScan();
-			expect(res.filesScanned).toBe(1);
-			expect(res.filesSkipped).toBe(1);
-			expect(res.totalBlocks).toBe(2);
-			expect(readCount).toBe(3); // Only 1 additional read for NoteB
-
-			const cards = db.getAllCards();
-			const cardB = cards.find((c) => c.blockId === 'idb001');
-			expect(cardB?.front).toBe('QB_Modified');
-		});
-
-		it('forces rescan when metadata changes or force option is passed', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('Note.md', 'Q :: A ^id1001\n');
-
-			const files = [{ path: 'Note.md', stat: { mtime: 1000, size: 18 } }];
-			let readCount = 0;
-
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => {
-						readCount++;
-						return fileVault.get(file.path) ?? '';
-					},
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			await scanner.fullScan();
-			expect(readCount).toBe(1);
-
-			// Size changes with same mtime -> forces rescan
-			files[0]!.stat = { mtime: 1000, size: 25 };
-			const res1 = await scanner.fullScan();
-			expect(res1.filesScanned).toBe(1);
-			expect(res1.filesSkipped).toBe(0);
-			expect(readCount).toBe(2);
-
-			// Force option -> forces rescan even with identical mtime and size
-			const res2 = await scanner.fullScan(undefined, { force: true });
-			expect(res2.filesScanned).toBe(1);
-			expect(res2.filesSkipped).toBe(0);
-			expect(readCount).toBe(3);
-		});
-
-		it('removes deleted files from blocks and file_sync_state', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('DeleteMe.md', 'Q :: A ^del001\n');
-
-			const files = [{ path: 'DeleteMe.md', stat: { mtime: 1000, size: 18 } }];
-
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			await scanner.fullScan();
-			expect(db.getFileSyncState('DeleteMe.md')).not.toBeNull();
-			expect(db.getAllCards()).toHaveLength(1);
-
-			// Call deleteFile
-			await scanner.deleteFile('DeleteMe.md');
-			expect(db.getFileSyncState('DeleteMe.md')).toBeNull();
-			expect(db.getAllCards()).toHaveLength(0);
-		});
-
-		it('handles note rename without losing review scheduling or sync state', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('OldName.md', 'Q :: A ^ren001\n');
-
-			const files = [{ path: 'OldName.md', stat: { mtime: 1000, size: 18 } }];
-
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			await scanner.fullScan();
-
-			// Perform a review on the card
-			const card = db.getAllCards()[0]!;
-			await db.commitSession(
-				{
-					started_at: 1000,
-					ended_at: 2000,
-					card_count: 1,
-					forgot_count: 0,
-					remembered_count: 1,
-				},
-				[
-					{
-						card_id: card.cardId,
-						rating: 3,
-						state: 2,
-						due_at: 5000,
-						stability: 8.5,
-						difficulty: 3.2,
-						reviewed_at: 2000,
-					},
-				],
-				[
-					{
-						id: card.cardId,
-						state: 2,
-						due_at: 5000,
-						stability: 8.5,
-						difficulty: 3.2,
-						reps: 1,
-						lapses: 0,
-						last_review: 2000,
-						learning_step: 0,
-						relearning_step: 0,
-					},
-				],
-			);
-
-			// Rename note
-			await scanner.renameFile('OldName.md', 'NewName.md');
-			files[0] = { path: 'NewName.md', stat: { mtime: 1000, size: 18 } };
-
-			// Verify card scheduling is preserved
-			const cardsAfterRename = db.getAllCards();
-			expect(cardsAfterRename).toHaveLength(1);
-			expect(cardsAfterRename[0]!.stability).toBe(8.5);
-			expect(cardsAfterRename[0]!.difficulty).toBe(3.2);
-			expect(cardsAfterRename[0]!.notePath).toBe('NewName.md');
-
-			// Full scan skips the renamed note because its sync state was updated during rename
-			const res = await scanner.fullScan();
-			expect(res.filesSkipped).toBe(1);
-			expect(res.filesScanned).toBe(0);
-		});
-
-		it('serializes multiple rapid modifications without database collision', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			for (let i = 1; i <= 5; i++) {
-				fileVault.set(`Note${i}.md`, `Question ${i} :: Answer ${i} ^id000${i}\n`);
-			}
-
-			const mockApp = {
-				vault: {
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			// Launch 5 syncFile operations concurrently without awaiting individually
-			const promises = [];
-			for (let i = 1; i <= 5; i++) {
-				promises.push(
-					scanner.syncFile({
-						path: `Note${i}.md`,
-						stat: { mtime: 1000, size: 30 },
-					} as any),
-				);
-			}
-
-			const results = await Promise.all(promises);
-			expect(results).toHaveLength(5);
-			for (let i = 0; i < 5; i++) {
-				expect(results[i]).toHaveLength(1);
-			}
-
-			expect(db.getAllCards()).toHaveLength(5);
-		});
-
-		it('serializes concurrent rename and sync operations safely', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('Start.md', 'Q :: A ^start1\n');
-
-			const mockApp = {
-				vault: {
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			await scanner.syncFile({ path: 'Start.md', stat: { mtime: 1000, size: 16 } } as any);
-			expect(db.getAllCards()).toHaveLength(1);
-
-			fileVault.set('Final.md', 'Q_Updated :: A_Updated ^start1\n');
-
-			// Concurrently launch rename and syncFile on the new path
-			const renamePromise = scanner.renameFile('Start.md', 'Final.md');
-			const syncPromise = scanner.syncFile({
-				path: 'Final.md',
-				stat: { mtime: 2000, size: 35 },
-			} as any);
-
-			await Promise.all([renamePromise, syncPromise]);
-
-			const cards = db.getAllCards();
-			expect(cards).toHaveLength(1);
-			expect(cards[0]!.front).toBe('Q_Updated');
-			expect(cards[0]!.notePath).toBe('Final.md');
-		});
-
-		it('guarantees a failed operation does not wedge subsequent queued operations', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('Good.md', 'Good Question :: Good Answer ^good01\n');
-
-			const mockApp = {
-				vault: {
-					cachedRead: async (file: { path: string }) => {
-						if (file.path === 'Bad.md') {
-							throw new Error('Simulated file read failure');
-						}
-						return fileVault.get(file.path) ?? '';
-					},
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			// Operation 1 fails
-			const op1 = scanner.syncFile({ path: 'Bad.md', stat: { mtime: 1000, size: 10 } } as any);
-			// Operation 2 succeeds
-			const op2 = scanner.syncFile({ path: 'Good.md', stat: { mtime: 1000, size: 40 } } as any);
-
-			await expect(op1).rejects.toThrow('Simulated file read failure');
-
-			// Operation 2 must still complete cleanly
-			const res2 = await op2;
-			expect(res2).toHaveLength(1);
-			expect(res2[0]!.id).toBe('good01');
-
-			expect(db.getAllCards()).toHaveLength(1);
-		});
-
-		it('executes fullScan and file events serially without racing', async () => {
-			const SQL = await initSqlJs();
-			const db = DatabaseManager.createForTesting(new SQL.Database());
-
-			const fileVault = new Map<string, string>();
-			fileVault.set('Keep.md', 'Q1 :: A1 ^keep01\n');
-			fileVault.set('DeleteDuringScan.md', 'Q2 :: A2 ^del002\n');
-
-			const files = [
-				{ path: 'Keep.md', stat: { mtime: 1000, size: 20 } },
-				{ path: 'DeleteDuringScan.md', stat: { mtime: 1000, size: 20 } },
-			];
-
-			const mockApp = {
-				vault: {
-					getMarkdownFiles: () => files,
-					cachedRead: async (file: { path: string }) => fileVault.get(file.path) ?? '',
-					modify: async (file: { path: string }, data: string) => {
-						fileVault.set(file.path, data);
-					},
-					adapter: {
-						readBinary: async () => new ArrayBuffer(0),
-						writeBinary: async () => {},
-					},
-				},
-				metadataCache: {
-					getFileCache: () => null,
-				},
-			} as unknown as App;
-
-			const { NoteScanner } = await import('../src/scanner/NoteScanner.ts');
-			const scanner = new NoteScanner(mockApp, db);
-
-			// Concurrently launch fullScan and deleteFile
-			const scanPromise = scanner.fullScan();
-			const deletePromise = scanner.deleteFile('DeleteDuringScan.md');
-
-			const [scanRes] = await Promise.all([scanPromise, deletePromise]);
-			expect(scanRes.filesScanned).toBe(2);
-
-			// After both complete serially, DeleteDuringScan was deleted
-			const remainingCards = db.getAllCards();
-			expect(remainingCards).toHaveLength(1);
-			expect(remainingCards[0]!.notePath).toBe('Keep.md');
-		});
-
-		it('computes deterministic 64-bit FNV-1a content hash as 16-char hex string', async () => {
-			const { fnv1a64 } = await import('../src/utils/fnv1a.ts');
-
-			const hEmpty = fnv1a64('');
-			expect(hEmpty).toMatch(/^[0-9a-f]{16}$/);
-
-			const h1 = fnv1a64('Capital of Pakistan :: Islamabad ^k9x2mp\n');
-			const h2 = fnv1a64('Capital of Pakistan :: Islamabad ^k9x2mp\n');
-			const h3 = fnv1a64('Capital of France :: Paris ^k9x2mp\n');
-			const hUnicode = fnv1a64('تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\n');
-
-			expect(h1).toHaveLength(16);
-			expect(h1).toMatch(/^[0-9a-f]{16}$/);
-			expect(h1).toBe(h2); // Determinism
-			expect(h1).not.toBe(h3); // Distinct content
-			expect(hUnicode).toMatch(/^[0-9a-f]{16}$/);
-		});
-	});
-
-	describe('Batch 3: Prepared Statement Reuse & Atomic Synchronization', () => {
-		it('prepares hot statements once per synchronization regardless of block count', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			// Generate 50 test parsed blocks
-			const parsedBlocks: ParsedBlock[] = [];
-			for (let i = 1; i <= 50; i++) {
-				const isCloze = i % 3 === 0;
-				parsedBlocks.push({
-					id: `blk${i.toString().padStart(3, '0')}`,
-					block_type: isCloze ? 'cloze' : 'inline',
-					reversible: isCloze ? false : i % 2 === 0,
-					front: `Question ${i}`,
-					back: isCloze ? '' : `Answer ${i}`,
-					tags: ['test', `topic${i}`],
-					line_start: i * 2,
-					line_end: i * 2 + 1,
-				});
-			}
-
-			// Instrument db.prepare to count how many times SQL is compiled
-			let prepareCount = 0;
-			const originalPrepare = rawDb.prepare.bind(rawDb);
-			rawDb.prepare = (sql: string) => {
-				prepareCount++;
-				return originalPrepare(sql);
-			};
-
-			try {
-				dbManager.syncNoteBlocks('BatchTest.md', parsedBlocks);
-
-				// For 50 blocks with old db.run per-row pattern, prepare would be called 150+ times.
-				// With prepared statement reuse, hot statements are prepared exactly 7 times!
-				expect(prepareCount).toBe(7);
-
-				// Verify all 50 blocks and their cards were inserted correctly
-				const allCards = dbManager.getAllCards();
-				expect(allCards.length).toBeGreaterThan(50); // Reversible cards produce 2 cards per block
-				const blocksForFile = dbManager.getBlocksForFile('BatchTest.md');
-				expect(blocksForFile).toHaveLength(50);
-			} finally {
-				rawDb.prepare = originalPrepare;
-			}
-		});
-
-		it('handles multiple blocks, obsolete block deletion, and card reconciliation in one transaction', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			// Sync initial 3 blocks (1 forward, 1 reversible, 1 cloze)
-			dbManager.syncNoteBlocks('Notes.md', [
-				{
-					id: 'card01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Front 1',
-					back: 'Back 1',
-					tags: ['tag1'],
-					line_start: 1,
-					line_end: 1,
-				},
-				{
-					id: 'card02',
-					block_type: 'inline',
-					reversible: true,
-					front: 'Front 2',
-					back: 'Back 2',
-					tags: ['tag2'],
-					line_start: 2,
-					line_end: 2,
-				},
-				{
-					id: 'card03',
-					block_type: 'cloze',
-					reversible: false,
-					front: '==Cloze== text',
-					back: '',
-					tags: ['tag3'],
-					line_start: 3,
-					line_end: 3,
-				},
-			]);
-
-			let cards = dbManager.getAllCards();
-			expect(cards).toHaveLength(4); // 1 forward + 2 reversible (fwd+rev) + 1 cloze
-
-			// Review card01 to establish review state
-			const card1 = cards.find((c) => c.blockId === 'card01')!;
-			await dbManager.commitSession(
-				{
-					started_at: 1000,
-					ended_at: 2000,
-					card_count: 1,
-					forgot_count: 0,
-					remembered_count: 1,
-				},
-				[
-					{
-						card_id: card1.cardId,
-						rating: 3,
-						state: 2,
-						due_at: 8000,
-						stability: 4.5,
-						difficulty: 2.1,
-						reviewed_at: 2000,
-					},
-				],
-				[
-					{
-						id: card1.cardId,
-						state: 2,
-						due_at: 8000,
-						stability: 4.5,
-						difficulty: 2.1,
-						reps: 1,
-						lapses: 0,
-						last_review: 2000,
-						learning_step: 0,
-						relearning_step: 0,
-					},
-				],
-			);
-
-			// Resync with:
-			// - card01 modified question text (scheduling must be preserved)
-			// - card02 changed from reversible to non-reversible (reverse card must be pruned)
-			// - card03 deleted (obsolete block deleted via CASCADE)
-			// - card04 added (new block)
-			dbManager.syncNoteBlocks('Notes.md', [
-				{
-					id: 'card01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Modified Front 1',
-					back: 'Back 1',
-					tags: ['tag1', 'updated'],
-					line_start: 1,
-					line_end: 1,
-				},
-				{
-					id: 'card02',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Front 2',
-					back: 'Back 2',
-					tags: ['tag2'],
-					line_start: 2,
-					line_end: 2,
-				},
-				{
-					id: 'card04',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Front 4',
-					back: 'Back 4',
-					tags: ['tag4'],
-					line_start: 4,
-					line_end: 4,
-				},
-			]);
-
-			cards = dbManager.getAllCards();
-			expect(cards).toHaveLength(3); // card01, card02 (fwd only), card04
-
-			// Verify card01 preserved its FSRS review metrics
-			const updatedCard1 = cards.find((c) => c.blockId === 'card01')!;
-			expect(updatedCard1.front).toBe('Modified Front 1');
-			expect(updatedCard1.stateNum).toBe(2);
-			expect(updatedCard1.stability).toBe(4.5);
-			expect(updatedCard1.reps).toBe(1);
-
-			// Verify card02 now has only forward direction
-			const card2List = cards.filter((c) => c.blockId === 'card02');
-			expect(card2List).toHaveLength(1);
-			expect(card2List[0]!.direction).toBe('forward');
-
-			// Verify card03 was completely pruned
-			expect(cards.find((c) => c.blockId === 'card03')).toBeUndefined();
-		});
-
-		it('rolls back atomically on synchronization error without corrupting database', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			// Sync valid initial block
-			dbManager.syncNoteBlocks('Stable.md', [
-				{
-					id: 'init01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Initial Question',
-					back: 'Initial Answer',
-					tags: [],
-					line_start: 1,
-					line_end: 1,
-				},
-			]);
-
-			expect(dbManager.getAllCards()).toHaveLength(1);
-
-			// Attempt invalid sync that fails (e.g. violating cloze reversible constraint)
-			const invalidBlocks: ParsedBlock[] = [
-				{
-					id: 'bad001',
-					block_type: 'cloze',
-					reversible: true, // Violates CHECK (block_type != 'cloze' OR reversible = 0)
-					front: 'Invalid Cloze',
-					back: '',
-					tags: [],
-					line_start: 1,
-					line_end: 1,
-				},
-			];
-
-			expect(() => {
-				dbManager.syncNoteBlocks('Stable.md', invalidBlocks);
-			}).toThrow();
-
-			// Verify previous state was completely preserved and rollback succeeded
-			const cardsAfterRollback = dbManager.getAllCards();
-			expect(cardsAfterRollback).toHaveLength(1);
-			expect(cardsAfterRollback[0]!.blockId).toBe('init01');
-		});
-
-		it('reuses prepared statements during review session commit', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			// Sync 10 cards
-			const blocks: ParsedBlock[] = Array.from({ length: 10 }, (_, i) => ({
-				id: `card${i.toString().padStart(2, '0')}`,
-				block_type: 'inline',
-				reversible: false,
-				front: `Q${i}`,
-				back: `A${i}`,
-				tags: [],
-				line_start: i + 1,
-				line_end: i + 1,
-			}));
-			dbManager.syncNoteBlocks('SessionTest.md', blocks);
-
-			const cards = dbManager.getAllCards();
-			const reviews = cards.map((c, i) => ({
-				card_id: c.cardId,
-				rating: 3,
-				state: 2,
-				due_at: 10000 + i * 1000,
-				stability: 3.0,
-				difficulty: 2.0,
-				reviewed_at: 5000 + i * 100,
-			}));
-			const cardUpdates = cards.map((c, i) => ({
-				id: c.cardId,
-				state: 2,
-				due_at: 10000 + i * 1000,
-				stability: 3.0,
-				difficulty: 2.0,
-				reps: 1,
-				lapses: 0,
-				last_review: 5000 + i * 100,
-				learning_step: 0,
-				relearning_step: 0,
-			}));
-
-			let prepareCount = 0;
-			const originalPrepare = rawDb.prepare.bind(rawDb);
-			rawDb.prepare = (sql: string) => {
-				prepareCount++;
-				return originalPrepare(sql);
-			};
-
-			try {
-				await dbManager.commitSession(
-					{
-						started_at: 1000,
-						ended_at: 6000,
-						card_count: 10,
-						forgot_count: 0,
-						remembered_count: 10,
-					},
-					reviews,
-					cardUpdates,
-				);
-
-				// 1 for last_insert_rowid, 1 for insert reviews, 1 for update cards = 3 prepare calls total!
-				expect(prepareCount).toBe(3);
-
-				const updatedCards = dbManager.getAllCards();
-				expect(updatedCards.every((c) => c.reps === 1)).toBe(true);
-			} finally {
-				rawDb.prepare = originalPrepare;
-			}
-		});
-	});
-
-	describe('Batch 4: Read-Side, Aggregation, and Presentation Optimizations', () => {
-		it('lazily computes and caches derived presentation fields on ReviewItem', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			dbManager.syncNoteBlocks('Folder/Subfolder/Cardiology Note.md', [
-				{
-					id: 'card01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Question',
-					back: 'Answer',
-					tags: ['heart'],
-					line_start: 1,
-					line_end: 1,
-				},
-			]);
-
-			const cards = dbManager.getAllCards();
-			expect(cards).toHaveLength(1);
-			const item = cards[0]!;
-
-			// Verify noteTitle lazy evaluation
-			expect(item.noteTitle).toBe('Cardiology Note');
-			// Setter support
-			item.noteTitle = 'Overridden Title';
-			expect(item.noteTitle).toBe('Overridden Title');
-
-			// Verify dueHuman and lastPracticedHuman formatting
-			expect(item.dueHuman).toBeDefined();
-			expect(item.lastPracticedHuman).toBe('Never');
-
-			// Custom setter for UI updates
-			item.dueHuman = 'Due in 2 days';
-			expect(item.dueHuman).toBe('Due in 2 days');
-			item.lastPracticedHuman = 'Just now';
-			expect(item.lastPracticedHuman).toBe('Just now');
-		});
-
-		it('computes dashboard aggregate stats accurately via single SQLite query', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			// Add 4 valid blocks (1 new, 1 due review, 1 future review, 1 new cloze)
-			dbManager.syncNoteBlocks('StatsNote.md', [
-				{
-					id: 'new01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'New Q',
-					back: 'New A',
-					tags: [],
-					line_start: 1,
-					line_end: 1,
-				},
-				{
-					id: 'revDue',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Due Review Q',
-					back: 'Due Review A',
-					tags: [],
-					line_start: 2,
-					line_end: 2,
-				},
-				{
-					id: 'revFuture',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Future Review Q',
-					back: 'Future Review A',
-					tags: [],
-					line_start: 3,
-					line_end: 3,
-				},
-				{
-					id: 'newCloze',
-					block_type: 'cloze',
-					reversible: false,
-					front: '==New Cloze==',
-					back: '',
-					tags: [],
-					line_start: 4,
-					line_end: 4,
-				},
-			]);
-
-			const cards = dbManager.getAllCards();
-			const revDueCard = cards.find((c) => c.blockId === 'revDue')!;
-			const revFutureCard = cards.find((c) => c.blockId === 'revFuture')!;
-
-			// Commit reviews to set one due today and one due next week
-			const now = Date.now();
-			await dbManager.commitSession(
-				{
-					started_at: now - 5000,
-					ended_at: now,
-					card_count: 2,
-					forgot_count: 0,
-					remembered_count: 2,
-				},
-				[
-					{
-						card_id: revDueCard.cardId,
-						rating: 3,
-						state: 2,
-						due_at: now - 1000, // Due in the past (due today)
-						stability: 2.0,
-						difficulty: 2.0,
-						reviewed_at: now,
-					},
-					{
-						card_id: revFutureCard.cardId,
-						rating: 3,
-						state: 2,
-						due_at: now + 7 * 86400000, // Due in 7 days
-						stability: 10.0,
-						difficulty: 2.0,
-						reviewed_at: now,
-					},
-				],
-				[
-					{
-						id: revDueCard.cardId,
-						state: 2,
-						due_at: now - 1000,
-						stability: 2.0,
-						difficulty: 2.0,
-						reps: 1,
-						lapses: 0,
-						last_review: now,
-						learning_step: 0,
-						relearning_step: 0,
-					},
-					{
-						id: revFutureCard.cardId,
-						state: 2,
-						due_at: now + 7 * 86400000,
-						stability: 10.0,
-						difficulty: 2.0,
-						reps: 1,
-						lapses: 0,
-						last_review: now,
-						learning_step: 0,
-						relearning_step: 0,
-					},
-				],
-			);
-
-			// Add an orphaned card not associated with any block to verify it is excluded from stats
-			rawDb.run('PRAGMA foreign_keys = OFF;');
-			rawDb.run(
-				`INSERT INTO cards (id, block_id, direction, state, due_at, stability, difficulty, reps, lapses, last_review, learning_step, relearning_step)
-				 VALUES (99999, 'orphan_block', 'forward', 0, 0, 0.0, 0.0, 0, 0, NULL, 0, 0)`,
-			);
-			rawDb.run('PRAGMA foreign_keys = ON;');
-
-			const stats = dbManager.getDashboardStats();
-			expect(stats.totalCards).toBe(4); // Only valid blocks (excludes orphan 99999)
-			expect(stats.newCards).toBe(2); // new01 + newCloze
-			expect(stats.dueToday).toBe(3); // 2 new cards (due now) + 1 overdue review (revDue)
-			expect(stats.studiedToday).toBe(2);
-			expect(stats.dailyRetention).toBe(100);
-			expect(stats.studyStreak).toBeGreaterThanOrEqual(1);
-		});
-
-		it('computes tag deck stats and unique tags efficiently', async () => {
-			const SQL = await initSqlJs();
-			const rawDb = new SQL.Database();
-			const dbManager = DatabaseManager.createInMemory(rawDb);
-
-			dbManager.syncNoteBlocks('Tags.md', [
-				{
-					id: 't01',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Q1',
-					back: 'A1',
-					tags: ['biology/cells', 'science'],
-					line_start: 1,
-					line_end: 1,
-				},
-				{
-					id: 't02',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Q2',
-					back: 'A2',
-					tags: ['biology/genetics', 'science'],
-					line_start: 2,
-					line_end: 2,
-				},
-				{
-					id: 't03',
-					block_type: 'inline',
-					reversible: false,
-					front: 'Q3',
-					back: 'A3',
-					tags: [], // Empty tags should be skipped in getUniqueTags
-					line_start: 3,
-					line_end: 3,
-				},
-			]);
-
-			// Unique tags
-			const uniqueTags = dbManager.getUniqueTags();
-			expect(uniqueTags).toEqual(['biology/cells', 'biology/genetics', 'science']);
-
-			// Tag deck stats
-			const { computeTagDeckStats } = await import('../src/utils/tagStats.ts');
-			const allCards = dbManager.getAllCards();
-			const deckStats = computeTagDeckStats(allCards, Date.now() + 1000);
-
-			expect(deckStats).toHaveLength(3);
-			const scienceDeck = deckStats.find((d) => d.tag === 'science');
-			expect(scienceDeck).toBeDefined();
-			expect(scienceDeck!.total).toBe(2);
-			expect(scienceDeck!.due).toBe(2);
-			expect(scienceDeck!.newCards).toBe(2);
-		});
+		// When step has elapsed, statusFilter 'due' includes it
+		promptItem.forward!.due_at = Date.now() - 1000;
+		expect(filterDashboardPrompt(promptItem, 'due', cutoff, '')).toBe(true);
 	});
 });

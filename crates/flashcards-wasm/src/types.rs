@@ -1,32 +1,23 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CardBlockType {
+pub enum CardType {
     Inline,
-    Block,
+    Qa,
+    Multiline,
     Cloze,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ParsedBlock {
-    pub id: String,
-    pub block_type: CardBlockType,
-    pub reversible: bool,
-    pub front: String,
-    pub back: String,
-    pub tags: Vec<String>,
-    pub line_start: usize,
-    pub line_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DocumentSyncResult {
-    pub updated_content: Option<String>,
-    pub blocks: Vec<ParsedBlock>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Forward,
+    Reverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rating {
     Again = 1,
@@ -35,7 +26,8 @@ pub enum Rating {
     Easy = 4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum State {
     New = 0,
     Learning = 1,
@@ -43,72 +35,155 @@ pub enum State {
     Relearning = 3,
 }
 
-impl Serialize for State {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            State::New => serializer.serialize_str("new"),
-            State::Learning => serializer.serialize_str("learning"),
-            State::Review => serializer.serialize_str("review"),
-            State::Relearning => serializer.serialize_str("relearning"),
+impl State {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            1 => State::Learning,
+            2 => State::Review,
+            3 => State::Relearning,
+            _ => State::New,
         }
     }
 }
 
-impl<'de> Deserialize<'de> for State {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct StateVisitor;
+/// 1. Markdown Source Prompt extracted from markdown note
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prompt {
+    pub id: String, // 6-char lowercase base-36
+    pub file_path: String,
+    pub card_type: CardType,
+    pub reversible: bool,
+    pub front: String,
+    pub back: String,
+    pub tags: Vec<String>,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub updated_at: i64,
+}
 
-        impl<'de> serde::de::Visitor<'de> for StateVisitor {
-            type Value = State;
+/// 2. Flashcard Review Entity (FSRS item)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+    pub id: u32,
+    pub prompt_id: String,
+    pub direction: Option<Direction>,
+    pub state: State,
+    pub due_at: i64,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub reps: u32,
+    pub lapses: u32,
+    pub last_review: Option<i64>,
+    pub learning_step: u32,
+    pub relearning_step: u32,
+}
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str(
-                    "a state integer (0..=3) or string ('new', 'learning', 'review', 'relearning')",
-                )
-            }
+/// 3. Historical Review Log
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewLog {
+    pub id: u32,
+    pub card_id: u32,
+    pub rating: Rating,
+    pub review_time: i64,
+    pub elapsed_days: f64,
+    pub scheduled_days: f64,
+    pub state: State,
+    pub due_at: i64,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub learning_step: u32,
+    pub relearning_step: u32,
+}
 
-            fn visit_i64<E>(self, value: i64) -> Result<State, E>
-            where
-                E: serde::de::Error,
-            {
-                match value {
-                    0 => Ok(State::New),
-                    1 => Ok(State::Learning),
-                    2 => Ok(State::Review),
-                    3 => Ok(State::Relearning),
-                    _ => Err(E::custom(format!("invalid state integer: {value}"))),
-                }
-            }
+/// 4. File Sync State for rapid change detection
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileSyncState {
+    pub file_path: String,
+    pub modified_at: i64,
+    pub size: u64,
+    pub prompt_ids: Vec<String>,
+}
 
-            fn visit_u64<E>(self, value: u64) -> Result<State, E>
-            where
-                E: serde::de::Error,
-            {
-                self.visit_i64(value as i64)
-            }
+/// 5. Root In-Memory Store persisted to cards.bin via Postcard
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlashcardsStore {
+    pub prompts: HashMap<String, Prompt>,
+    pub cards: HashMap<u32, Card>,
+    pub reviews: Vec<ReviewLog>,
+    pub file_sync: HashMap<String, FileSyncState>,
+    pub next_card_id: u32,
+    pub next_review_id: u32,
+}
 
-            fn visit_str<E>(self, value: &str) -> Result<State, E>
-            where
-                E: serde::de::Error,
-            {
-                match value.to_ascii_lowercase().as_str() {
-                    "new" | "0" => Ok(State::New),
-                    "learning" | "1" => Ok(State::Learning),
-                    "review" | "2" => Ok(State::Review),
-                    "relearning" | "3" => Ok(State::Relearning),
-                    _ => Err(E::custom(format!("invalid state string: {value}"))),
-                }
-            }
-        }
+/// Parsed prompt structure emitted by markdown parser
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParsedPrompt {
+    pub id: String,
+    pub card_type: CardType,
+    pub reversible: bool,
+    pub front: String,
+    pub back: String,
+    pub tags: Vec<String>,
+    pub line_start: usize,
+    pub line_end: usize,
+}
 
-        deserializer.deserialize_any(StateVisitor)
-    }
+/// Document sync outcome from note parsing
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentSyncResult {
+    pub updated_content: Option<String>,
+    pub prompts: Vec<ParsedPrompt>,
+}
+
+/// Svelte UI view model (joined Card + Prompt)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewItem {
+    pub card_id: u32,
+    pub prompt_id: String,
+    pub note_title: String,
+    pub note_path: String,
+    pub direction: Option<Direction>,
+    pub card_type: CardType,
+    pub reversible: bool,
+    pub front: String,
+    pub back: String,
+    pub tags: Vec<String>,
+    pub state: State,
+    pub state_num: u8,
+    pub due_at: i64,
+    pub due_human: String,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub reps: u32,
+    pub lapses: u32,
+    pub learning_step: u32,
+    pub relearning_step: u32,
+    pub last_review: Option<i64>,
+    pub last_practiced_human: String,
+}
+
+/// High-level dashboard statistics
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardStats {
+    pub studied_today: u32,
+    pub daily_retention: u32,
+    pub study_streak: u32,
+    pub total_cards: u32,
+    pub due_today: u32,
+    pub new_cards: u32,
+}
+
+/// Tag deck statistics for deck picker modal
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagDeckStats {
+    pub tag: String,
+    pub total_cards: u32,
+    pub due_cards: u32,
+    pub new_cards: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

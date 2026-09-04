@@ -194,26 +194,6 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 					this.display();
 				});
 			});
-
-		new Setting(containerEl)
-			.setName('Database maintenance')
-			.setDesc(
-				'Run integrity checks, prune stale notes, clean orphaned blocks, and defragment SQLite storage.',
-			)
-			.addButton((btn) => {
-				btn.setButtonText('Optimize database').onClick(async () => {
-					new Notice('Optimizing database...');
-					const files = this.app.vault.getMarkdownFiles();
-					const validPaths = new Set(files.map((f) => f.path));
-					const res = await this.plugin.db.optimizeDatabase(validPaths);
-					if (!res.integrityOk) {
-						new Notice('Database integrity check reported warnings.');
-					} else {
-						new Notice(`Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
-					}
-					this.plugin.refreshDashboardIfOpen();
-				});
-			});
 	}
 
 	private async optimizeWeights(): Promise<void> {
@@ -221,7 +201,7 @@ export class FlashcardsSettingTab extends PluginSettingTab {
 			const params = buildFsrsParams(this.plugin.settings);
 
 			// Query review logs
-			const logs = this.plugin.getReviewLogs();
+			const logs = await this.plugin.getReviewLogs();
 			if (logs.length < 8) {
 				new Notice('Need at least 8 review logs to optimize weights.');
 				return;

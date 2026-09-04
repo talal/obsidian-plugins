@@ -1,6 +1,6 @@
 export interface FilterableCard {
-	noteTitle: string;
-	notePath: string;
+	note_title: string;
+	note_path: string;
 	front: string;
 	back: string;
 	tags: string[];
@@ -36,8 +36,8 @@ export function filterDashboardCard(card: FilterableCard, searchQuery: string): 
 		// Text tokens filter by note title / note path or card content
 		matchesText = textTokens.every(
 			(tok) =>
-				card.noteTitle.toLowerCase().includes(tok) ||
-				card.notePath.toLowerCase().includes(tok) ||
+				card.note_title.toLowerCase().includes(tok) ||
+				card.note_path.toLowerCase().includes(tok) ||
 				card.front.toLowerCase().includes(tok) ||
 				card.back.toLowerCase().includes(tok),
 		);

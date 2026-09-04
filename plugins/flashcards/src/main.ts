@@ -1,48 +1,32 @@
 import { type Editor, Notice, Plugin, TFile } from 'obsidian';
 
-import { DatabaseManager } from './db/DatabaseManager.js';
 import { NoteScanner } from './scanner/NoteScanner.js';
 import { FlashcardsSettingTab } from './settings.js';
+import { SnapshotStore } from './storage.js';
 import { type FlashcardsPluginSettings, type ReviewLogEntry } from './types.js';
 import { DashboardView, FLASHCARDS_DASHBOARD_VIEW_TYPE } from './ui/DashboardView.js';
 import { ReviewModal } from './ui/ReviewModal.js';
 import { TagPickerModal } from './ui/TagPickerModal.js';
-import {
-	DEFAULT_LEARNING_STEPS,
-	DEFAULT_RELEARNING_STEPS,
-	parseStudySteps,
-} from './utils/studySteps.js';
+import { getStudyDayCutoff } from './utils/studyDay.js';
 import { WasmBridge } from './wasm.js';
 
 export default class FlashcardsPlugin extends Plugin {
-	public db!: DatabaseManager;
-	public scanner!: NoteScanner;
 	public settings!: FlashcardsPluginSettings;
 	public activeReviewModal: ReviewModal | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		// 1. Initialize Rust WASM + SQLite WASM
+		// 1. Initialize Rust WASM binary
 		try {
 			await WasmBridge.initialize(this.app, this.manifest);
 		} catch (err) {
-			console.error('Failed to initialize Flashcards WASM modules:', err);
-			new Notice('Failed to initialize Flashcards WASM modules.');
+			console.error('Failed to initialize Flashcards WASM module:', err);
+			new Notice('Failed to initialize Flashcards WASM module.');
 			return;
 		}
 
-		try {
-			this.db = new DatabaseManager(this.app, this.manifest);
-			await this.db.init();
-			this.scanner = new NoteScanner(this.app, this.db);
-		} catch (err) {
-			console.error('Failed to initialize Flashcards SQLite database:', err);
-			new Notice('Failed to initialize Flashcards SQLite database.');
-			return;
-		}
-
-		// 2. Register Dashboard View & Settings Tab
+		// 2. Register Views & Settings Tab
 		this.registerView(FLASHCARDS_DASHBOARD_VIEW_TYPE, (leaf) => new DashboardView(leaf, this));
 		this.addSettingTab(new FlashcardsSettingTab(this.app, this));
 
@@ -50,7 +34,7 @@ export default class FlashcardsPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
 				if (file instanceof TFile && file.extension === 'md') {
-					void this.scanner.deleteFile(file.path);
+					void this.deleteFile(file.path);
 				}
 			}),
 		);
@@ -58,46 +42,34 @@ export default class FlashcardsPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (file instanceof TFile && file.extension === 'md') {
-					void this.scanner.renameFile(oldPath, file.path);
+					void this.renameFile(oldPath, file.path);
 				}
 			}),
 		);
 
-		// 4. Register Lifecycle Checkpointing Events
-		this.registerDomEvent(document, 'visibilitychange', () => {
-			if (document.visibilityState === 'hidden' && this.activeReviewModal) {
-				void this.activeReviewModal.flushSessionData();
-			}
-		});
-
-		this.registerDomEvent(window, 'beforeunload', () => {
-			if (this.activeReviewModal) {
-				void this.activeReviewModal.flushSessionData();
-			}
-		});
-
 		// 4. Register Commands
 
-		// Command 1: Study all cards
+		// Command 1: Study all cards (Modal)
 		this.addCommand({
 			id: 'study-all-cards',
 			name: 'Study all cards',
-			callback: () => {
+			callback: async () => {
+				const engine = await SnapshotStore.loadEngine(this.app);
+				const now = Date.now();
 				const rollover = this.settings.rolloverHour ?? 4;
-				const learningSteps = parseStudySteps(this.settings.learningSteps, DEFAULT_LEARNING_STEPS);
-				const relearningSteps = parseStudySteps(
-					this.settings.relearningSteps,
-					DEFAULT_RELEARNING_STEPS,
-				);
-				const dueCards = this.db.getDueCards(undefined, rollover, learningSteps, relearningSteps);
-				const queue = dueCards.length > 0 ? dueCards : this.db.getAllCards();
-
-				if (queue.length === 0) {
-					new Notice('No flashcards found in your vault. Run "Sync" first!');
+				const dueCutoff = getStudyDayCutoff(rollover, new Date(now));
+				const dueCards = WasmBridge.getDueCards(engine, now, dueCutoff);
+				if (dueCards.length === 0) {
+					const allCards = WasmBridge.getAllCards(engine, now);
+					if (allCards.length === 0) {
+						new Notice('No flashcards found in your vault. Run "Sync" first!');
+					} else {
+						new Notice('All due cards completed for now!');
+					}
 					return;
 				}
 
-				new ReviewModal(this.app, this, queue, 'All Cards').open();
+				new ReviewModal(this.app, this, engine, dueCards, 'All Cards').open();
 			},
 		});
 
@@ -105,12 +77,13 @@ export default class FlashcardsPlugin extends Plugin {
 		this.addCommand({
 			id: 'study-deck',
 			name: 'Study deck',
-			callback: () => {
-				new TagPickerModal(this.app, this).open();
+			callback: async () => {
+				const engine = await SnapshotStore.loadEngine(this.app);
+				new TagPickerModal(this.app, this, engine).open();
 			},
 		});
 
-		// Command 3: Open dashboard
+		// Command 4: Open dashboard
 		this.addCommand({
 			id: 'open-dashboard',
 			name: 'Open dashboard',
@@ -119,7 +92,7 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 4: Sync
+		// Command 5: Sync
 		this.addCommand({
 			id: 'sync',
 			name: 'Sync',
@@ -128,7 +101,7 @@ export default class FlashcardsPlugin extends Plugin {
 			},
 		});
 
-		// Command 5: Insert card block
+		// Command 6: Insert card block
 		this.addCommand({
 			id: 'insert-card-block',
 			name: 'Insert card block',
@@ -141,41 +114,41 @@ export default class FlashcardsPlugin extends Plugin {
 				editor.setCursor({ line: targetLine, ch: 0 });
 			},
 		});
-
-		// Command 6: Optimize database
-		this.addCommand({
-			id: 'optimize-database',
-			name: 'Optimize database',
-			callback: async () => {
-				new Notice('Running database health check & optimization...');
-				const files = this.app.vault.getMarkdownFiles();
-				const validPaths = new Set(files.map((f) => f.path));
-				const res = await this.db.optimizeDatabase(validPaths);
-				if (!res.integrityOk) {
-					new Notice('Database integrity check reported warnings.');
-				} else {
-					new Notice(`Database optimized: ${res.prunedBlocks} stale blocks cleaned.`);
-				}
-				this.refreshDashboardIfOpen();
-			},
-		});
 	}
 
-	public getReviewLogs(): ReviewLogEntry[] {
-		return this.db.getReviewLogsForOptimization();
+	public async getReviewLogs(): Promise<ReviewLogEntry[]> {
+		const engine = await SnapshotStore.loadEngine(this.app);
+		const json = engine.get_review_logs();
+		return JSON.parse(json) as ReviewLogEntry[];
+	}
+
+	public async deleteFile(filePath: string): Promise<void> {
+		const engine = await SnapshotStore.loadEngine(this.app);
+		engine.remove_file(filePath);
+		await SnapshotStore.saveEngine(this.app, engine);
+		this.refreshDashboardIfOpen();
+	}
+
+	public async renameFile(oldPath: string, newPath: string): Promise<void> {
+		const engine = await SnapshotStore.loadEngine(this.app);
+		engine.rename_file(oldPath, newPath);
+		await SnapshotStore.saveEngine(this.app, engine);
+		this.refreshDashboardIfOpen();
 	}
 
 	public async syncVault(force = false): Promise<void> {
 		new Notice('Syncing flashcards across vault...');
 		try {
-			const res = await this.scanner.fullScan(undefined, { force });
+			const engine = await SnapshotStore.loadEngine(this.app);
+			const scanner = new NoteScanner(this.app, engine);
+			const res = await scanner.fullScan(undefined, { force });
 			const failureNotice =
 				res.failedFiles.length > 0
 					? ` (${res.failedFiles.length} note(s) had errors, see console)`
 					: '';
 			const skipNotice = res.filesSkipped > 0 ? ` (${res.filesSkipped} unchanged skipped)` : '';
 			new Notice(
-				`Vault sync complete: ${res.totalBlocks} cards across ${res.filesScanned} notes scanned${skipNotice}${failureNotice}.`,
+				`Vault sync complete: ${res.totalPrompts} cards across ${res.filesScanned} notes scanned${skipNotice}${failureNotice}.`,
 			);
 			this.refreshDashboardIfOpen();
 		} catch (error) {
@@ -188,7 +161,7 @@ export default class FlashcardsPlugin extends Plugin {
 		const leaves = this.app.workspace.getLeavesOfType(FLASHCARDS_DASHBOARD_VIEW_TYPE);
 		for (const leaf of leaves) {
 			if (leaf.view instanceof DashboardView) {
-				leaf.view.refresh();
+				void leaf.view.refresh();
 			}
 		}
 	}
@@ -228,12 +201,6 @@ export default class FlashcardsPlugin extends Plugin {
 	}
 
 	onunload() {
-		if (this.activeReviewModal) {
-			void this.activeReviewModal.flushSessionData();
-		}
-		if (this.db) {
-			void this.db.persist();
-		}
 		this.app.workspace.detachLeavesOfType(FLASHCARDS_DASHBOARD_VIEW_TYPE);
 	}
 }

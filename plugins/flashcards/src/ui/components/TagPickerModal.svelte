@@ -1,8 +1,17 @@
 <script lang="ts">
-	import type { TagDeckStat } from '../../utils/tagStats.ts';
+	import type { TagDeckStats } from '../../types.ts';
+	import {
+		buildTagTree,
+		getAllDescendantTags,
+		getSelectedTagSummary,
+		getVisibleTagRows,
+		isNodeFullySelected,
+		isNodeIndeterminate,
+		type TagTreeNode,
+	} from '../../utils/tagTree.js';
 
 	interface Props {
-		tagStats?: TagDeckStat[];
+		tagStats?: TagDeckStats[];
 		onSelectTags: (tags: string[]) => void;
 		onClose: () => void;
 	}
@@ -10,59 +19,69 @@
 	let { tagStats = [], onSelectTags, onClose }: Props = $props();
 
 	let selectedTags = $state<Set<string>>(new Set());
-	let sortColumn = $state<'tag' | 'due' | 'new' | 'total'>('due');
-	let sortAsc = $state(false);
+	let collapsedTags = $state<Set<string>>(new Set());
+	let sortColumn = $state<'tag' | 'due' | 'new' | 'total'>('tag');
+	let sortAsc = $state(true);
 
-	let sortedTags = $derived(
-		[...tagStats].sort((a, b) => {
-			let cmp = 0;
-			if (sortColumn === 'tag') {
-				cmp = a.tag.localeCompare(b.tag);
-			} else if (sortColumn === 'due') {
-				cmp = a.due - b.due;
-			} else if (sortColumn === 'new') {
-				cmp = a.newCards - b.newCards;
-			} else if (sortColumn === 'total') {
-				cmp = a.total - b.total;
-			}
-			return sortAsc ? cmp : -cmp;
-		}),
+	let treeRoots = $derived(buildTagTree(tagStats));
+	let visibleRows = $derived(
+		getVisibleTagRows(treeRoots, collapsedTags, sortColumn, sortAsc),
 	);
+
+	// Collect all tag keys across entire tree
+	let allTagsList = $derived.by(() => {
+		const list: string[] = [];
+		for (const root of treeRoots) {
+			list.push(...getAllDescendantTags(root));
+		}
+		return list;
+	});
 
 	let allSelected = $derived(
-		sortedTags.length > 0 && sortedTags.every((t) => selectedTags.has(t.tag.toLowerCase())),
+		allTagsList.length > 0 && allTagsList.every((t) => selectedTags.has(t)),
 	);
 
-	let selectedSummary = $derived.by(() => {
-		let due = 0;
-		let newCards = 0;
-		let total = 0;
-		for (const item of tagStats) {
-			if (selectedTags.has(item.tag.toLowerCase())) {
-				due += item.due;
-				newCards += item.newCards;
-				total += item.total;
-			}
-		}
-		return { due, newCards, total };
-	});
+	let isHeaderIndeterminate = $derived(
+		allTagsList.length > 0 &&
+			!allSelected &&
+			allTagsList.some((t) => selectedTags.has(t)),
+	);
+
+	let selectedSummary = $derived(getSelectedTagSummary(treeRoots, selectedTags));
 
 	function toggleSort(col: 'tag' | 'due' | 'new' | 'total') {
 		if (sortColumn === col) {
 			sortAsc = !sortAsc;
 		} else {
 			sortColumn = col;
-			sortAsc = col === 'tag' ? true : false;
+			sortAsc = col === 'tag';
 		}
 	}
 
-	function toggleTag(tag: string) {
-		const next = new Set(selectedTags);
-		const lower = tag.toLowerCase();
+	function toggleCollapse(fullTag: string) {
+		const next = new Set(collapsedTags);
+		const lower = fullTag.toLowerCase();
 		if (next.has(lower)) {
 			next.delete(lower);
 		} else {
 			next.add(lower);
+		}
+		collapsedTags = next;
+	}
+
+	function toggleNode(node: TagTreeNode) {
+		const next = new Set(selectedTags);
+		const descendants = getAllDescendantTags(node);
+		const fullySelected = isNodeFullySelected(node, selectedTags);
+
+		if (fullySelected) {
+			for (const d of descendants) {
+				next.delete(d);
+			}
+		} else {
+			for (const d of descendants) {
+				next.add(d);
+			}
 		}
 		selectedTags = next;
 	}
@@ -72,8 +91,8 @@
 		if (allSelected) {
 			next.clear();
 		} else {
-			for (const item of tagStats) {
-				next.add(item.tag.toLowerCase());
+			for (const t of allTagsList) {
+				next.add(t);
 			}
 		}
 		selectedTags = next;
@@ -98,7 +117,9 @@
 
 <svelte:window onkeydown={handleKeyDown} />
 
-<p class="setting-item-description fc-tag-modal-description">Select tags to assemble a custom study queue.</p>
+<p class="setting-item-description fc-tag-modal-description">
+	Select tags or decks to assemble a study queue. Selecting a parent tag includes its nested tags.
+</p>
 
 <div class="fc-tag-table-container">
 	<table class="fc-table fc-tag-table">
@@ -108,12 +129,13 @@
 					<input
 						type="checkbox"
 						checked={allSelected}
+						indeterminate={isHeaderIndeterminate}
 						aria-label="Select all tags"
 						onchange={toggleSelectAll}
 					/>
 				</th>
 				<th onclick={() => toggleSort('tag')} class="fc-sortable fc-col-tag">
-					Tag {sortColumn === 'tag' ? (sortAsc ? '↑' : '↓') : ''}
+					Tag / Deck {sortColumn === 'tag' ? (sortAsc ? '↑' : '↓') : ''}
 				</th>
 				<th onclick={() => toggleSort('due')} class="fc-sortable fc-col-num">
 					Due {sortColumn === 'due' ? (sortAsc ? '↑' : '↓') : ''}
@@ -127,37 +149,82 @@
 			</tr>
 		</thead>
 		<tbody>
-			{#if sortedTags.length === 0}
+			{#if visibleRows.length === 0}
 				<tr>
 					<td colspan="5" class="fc-empty-row">No tags found.</td>
 				</tr>
 			{:else}
-				{#each sortedTags as item (item.tag)}
-					{@const isChecked = selectedTags.has(item.tag.toLowerCase())}
+				{#each visibleRows as node (node.fullTag)}
+					{@const isChecked = isNodeFullySelected(node, selectedTags)}
+					{@const isIndeterminate = isNodeIndeterminate(node, selectedTags)}
+					{@const isCollapsed = collapsedTags.has(node.fullTag.toLowerCase())}
 					<tr
 						class="fc-tag-row"
-						class:is-selected={isChecked}
-						onclick={() => toggleTag(item.tag)}
+						class:is-selected={isChecked || isIndeterminate}
+						onclick={() => toggleNode(node)}
 					>
 						<td class="fc-col-select" onclick={(e) => e.stopPropagation()}>
 							<input
 								type="checkbox"
 								checked={isChecked}
-								aria-label={`Select tag ${item.tag}`}
-								onchange={() => toggleTag(item.tag)}
+								indeterminate={isIndeterminate}
+								aria-label={`Select tag ${node.fullTag}`}
+								onchange={() => toggleNode(node)}
 							/>
 						</td>
-						<td class="fc-col-tag">
-							<span class="tag" dir="auto">#{item.tag}</span>
+						<td
+							class="fc-col-tag"
+							style="padding-inline-start: calc(var(--size-4-2) + {node.depth * 20}px);"
+						>
+							<div class="fc-tag-cell">
+								{#if node.children.length > 0}
+									<button
+										type="button"
+										class="clickable-icon fc-tree-toggle"
+										aria-label={isCollapsed ? 'Expand deck' : 'Collapse deck'}
+										onclick={(e) => {
+											e.stopPropagation();
+											toggleCollapse(node.fullTag);
+										}}
+									>
+										<span class="fc-tree-chevron" class:is-collapsed={isCollapsed}>
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="2.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<polyline points="6 9 12 15 18 9"></polyline>
+											</svg>
+										</span>
+									</button>
+								{:else}
+									<span class="fc-tree-spacer"></span>
+								{/if}
+								<span class="tag" dir="auto" title={node.fullTag}>#{node.name}</span>
+							</div>
 						</td>
-						<td class="fc-col-num" class:fc-stat-due={item.due > 0} class:fc-stat-zero={item.due === 0}>
-							{item.due}
+						<td
+							class="fc-col-num"
+							class:fc-stat-due={node.dueCards > 0}
+							class:fc-stat-zero={node.dueCards === 0}
+						>
+							{node.dueCards}
 						</td>
-						<td class="fc-col-num" class:fc-stat-new={item.newCards > 0} class:fc-stat-zero={item.newCards === 0}>
-							{item.newCards}
+						<td
+							class="fc-col-num"
+							class:fc-stat-new={node.newCards > 0}
+							class:fc-stat-zero={node.newCards === 0}
+						>
+							{node.newCards}
 						</td>
 						<td class="fc-col-num">
-							{item.total}
+							{node.totalCards}
 						</td>
 					</tr>
 				{/each}

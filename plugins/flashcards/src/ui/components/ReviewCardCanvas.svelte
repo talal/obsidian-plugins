@@ -55,7 +55,7 @@
 <div class="fc-card-container">
 	<article class="fc-card">
 		<div class="fc-card-meta">
-			<span class="fc-note-title" dir="auto">{card.noteTitle}</span>
+			<span class="fc-note-title" dir="auto">{card.note_title}</span>
 			<div class="fc-meta-badges">
 				{#if card.direction === 'reverse'}
 					<span class="fc-badge fc-badge-reverse">Reverse</span>
@@ -63,7 +63,7 @@
 				{#if card.tags.includes('card/todo')}
 					<span class="fc-badge fc-badge-todo">Todo</span>
 				{/if}
-				<span class="fc-card-due" dir="auto">{card.dueHuman}</span>
+				<span class="fc-card-due" dir="auto">{card.due_human}</span>
 			</div>
 		</div>
 
@@ -74,7 +74,7 @@
 				use:renderMarkdownAction={{
 					app,
 					markdown: cardDisplay?.frontMarkdown ?? '',
-					sourcePath: card.notePath,
+					sourcePath: card.note_path,
 				}}
 			></div>
 
@@ -86,7 +86,7 @@
 					use:renderMarkdownAction={{
 						app,
 						markdown: cardDisplay.backMarkdown,
-						sourcePath: card.notePath,
+						sourcePath: card.note_path,
 					}}
 				></div>
 			{/if}

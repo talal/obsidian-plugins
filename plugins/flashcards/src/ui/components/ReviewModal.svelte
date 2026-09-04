@@ -59,7 +59,7 @@
 
 	let cardDisplay = $derived.by(() => {
 		if (!currentCard) return null;
-		if (currentCard.blockType === 'cloze') {
+		if (currentCard.card_type === 'cloze') {
 			return {
 				isCloze: true,
 				frontMarkdown: formatClozeText(currentCard.front, isRevealed),

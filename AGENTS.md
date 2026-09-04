@@ -49,8 +49,10 @@ Do not run `playwright install` or attempt to download browser binaries; Playwri
 Prefer targeted commands while iterating:
 
 - Plugin quality gate (format, lint, type check): `npm run check -w <plugin>`
-- Plugin build: `npm run build -w <plugin>`
-- Plugin tests: `npm run test -w <plugin>`
+- Plugin build (bundles release WASM): `npm run build -w <plugin>`
+- Plugin tests (runs against existing WASM): `npm run test -w <plugin>`
+- Fast dev WASM build (unoptimized, for rapid test loop): `npm run build:wasm:dev -w <plugin>`
+- Release WASM build: `npm run build:wasm -w <plugin>`
 - Plugin code formatting: `npm run fmt -w <plugin>`
 - Plugin linting: `npm run lint -w <plugin>`
 - Plugin type checking only: `npm run check:types -w <plugin>`
@@ -58,6 +60,8 @@ Prefer targeted commands while iterating:
 - Rust lint: `cargo clippy -p <crate> --all-targets -- -D warnings`
 - Rust formatting: `cargo fmt -p <crate>`
 - Rust fuzzing (run from the crate's `fuzz/` directory): `cd crates/<crate>/fuzz && ASAN_OPTIONS=detect_leaks=0 cargo fuzz run <target> --release -- -max_total_time=30 -detect_leaks=0` (see `cd crates/<crate>/fuzz && cargo fuzz list` for target list)
+
+Plugin tests (`npm run test -w <plugin>`) run against the compiled WASM artifact in `crates/<crate>/pkg/` without automatically recompiling WASM to avoid build churn. When modifying Rust crates, run `npm run build:wasm:dev -w <plugin>` before running tests for a fast, incremental developer loop.
 
 Typst Math plugin has additional fuzz campaigns:
 

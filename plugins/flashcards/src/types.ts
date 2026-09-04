@@ -1,89 +1,28 @@
 export type CardDirection = 'forward' | 'reverse' | null;
-export type CardBlockType = 'inline' | 'block' | 'cloze';
+export type CardType = 'inline' | 'qa' | 'multiline' | 'cloze';
 export type ReviewState = 'new' | 'learning' | 'review' | 'relearning';
 export type ReviewRating = 'again' | 'hard' | 'good' | 'easy';
 
-/** 1. Canonical Markdown Source Block (1:1 with SQLite blocks table) */
-export interface Block {
+/** 1. Markdown Source Prompt */
+export interface Prompt {
 	id: string;
 	file_path: string;
-	block_type: CardBlockType;
-	reversible: number; // 0 or 1
+	card_type: CardType;
+	reversible: boolean;
 	front: string;
 	back: string;
-	tags: string; // Space-separated string (e.g. 'german vocab')
-	updated_at: number; // UTC epoch ms
-}
-
-/** 2. Flashcard Review Entity (1:1 with SQLite cards table) */
-export interface CardRecord {
-	id: number;
-	block_id: string;
-	direction: 'forward' | 'reverse' | null;
-	state: number; // 0=New, 1=Learning, 2=Review, 3=Relearning
-	due_at: number; // UTC epoch ms
-	stability: number;
-	difficulty: number;
-	reps: number;
-	lapses: number;
-	last_review: number | null;
-	learning_step: number;
-	relearning_step: number;
-}
-
-/** 3. Study Session Record (1:1 with SQLite sessions table) */
-export interface SessionRecord {
-	id?: number;
-	started_at: number;
-	ended_at: number | null;
-	card_count: number;
-	forgot_count: number;
-	remembered_count: number;
-}
-
-/** 4. Immutable Review Log (1:1 with SQLite reviews table) */
-export interface ReviewRecord {
-	id?: number;
-	session_id?: number;
-	card_id: number;
-	rating: number; // 1=Again, 2=Hard, 3=Good, 4=Easy
-	state: number;
-	due_at: number;
-	stability: number;
-	difficulty: number;
-	reviewed_at: number; // UTC epoch ms
-}
-
-/** 5. File Sync State (1:1 with SQLite file_sync_state table) */
-export interface FileSyncState {
-	file_path: string;
-	modified_at: number;
-	size: number;
-	content_hash: string | null;
+	tags: string[];
+	line_start: number;
+	line_end: number;
 	updated_at: number;
 }
 
-export interface ScanResult {
-	filesScanned: number;
-	filesSkipped: number;
-	totalBlocks: number;
-	failedFiles: string[];
-}
-
-export interface SyncFileOptions {
-	force?: boolean;
-	externalCollisionIds?: Set<string> | import('./wasm.js').CollisionRegistry;
-	skipPersist?: boolean;
-}
-
-export interface FullScanOptions {
-	force?: boolean;
-}
-
-/** In-memory Card Performance update committed at end of session */
-export interface CardPerformanceUpdate {
+/** 2. Flashcard Review Entity (FSRS item) */
+export interface Card {
 	id: number;
-	state: number;
+	prompt_id: string;
+	direction: CardDirection;
+	state: ReviewState;
 	due_at: number;
 	stability: number;
 	difficulty: number;
@@ -94,44 +33,65 @@ export interface CardPerformanceUpdate {
 	relearning_step: number;
 }
 
-/** Svelte UI View Model (Joined cards JOIN blocks) */
+/** 3. Svelte UI View Model (joined Card + Prompt) */
 export interface ReviewItem {
-	cardId: number;
-	blockId: string;
-	noteTitle: string;
-	notePath: string;
-	direction: 'forward' | 'reverse' | null;
-	blockType: CardBlockType;
+	card_id: number;
+	prompt_id: string;
+	note_title: string;
+	note_path: string;
+	direction: CardDirection;
+	card_type: CardType;
 	reversible: boolean;
 	front: string;
 	back: string;
 	tags: string[];
 	state: ReviewState;
-	stateNum: number;
-	dueAt: number; // epoch ms
-	dueHuman: string;
+	state_num: number;
+	due_at: number;
+	due_human: string;
 	stability: number;
 	difficulty: number;
 	reps: number;
 	lapses: number;
-	learningStep: number;
-	relearningStep: number;
-	lastReview: number | null;
-	lastPracticedHuman: string;
+	learning_step: number;
+	relearning_step: number;
+	last_review: number | null;
+	last_practiced_human: string;
 }
 
+/** 4. Dashboard Statistics */
 export interface DashboardStats {
-	studiedToday: number;
-	dailyRetention: number;
-	studyStreak: number;
-	totalCards: number;
-	dueToday: number;
-	newCards: number;
+	studied_today: number;
+	daily_retention: number;
+	study_streak: number;
+	total_cards: number;
+	due_today: number;
+	new_cards: number;
 }
 
-export interface ParsedBlock {
+/** 5. Tag Deck Statistics for TagPickerModal */
+export interface TagDeckStats {
+	tag: string;
+	total_cards: number;
+	due_cards: number;
+	new_cards: number;
+}
+
+export interface ScanResult {
+	filesScanned: number;
+	filesSkipped: number;
+	totalPrompts: number;
+	failedFiles: string[];
+}
+
+export interface SyncNoteResult {
+	updated_content: string | null;
+	prompt_count: number;
+}
+
+export interface ParsedPrompt {
 	id: string;
-	block_type: CardBlockType;
+	card_type: CardType;
 	reversible: boolean;
 	front: string;
 	back: string;
@@ -142,7 +102,7 @@ export interface ParsedBlock {
 
 export interface DocumentSyncResult {
 	updated_content: string | null;
-	blocks: ParsedBlock[];
+	prompts: ParsedPrompt[];
 }
 
 /** Block ranges reported by Obsidian's MetadataCache. */

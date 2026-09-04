@@ -1,15 +1,9 @@
 import { App, Modal, Notice } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
-import { getStudyDayCutoff } from '../db/DatabaseManager.js';
 import type FlashcardsPlugin from '../main.js';
-import { matchCardTags } from '../utils/dashboardFilter.js';
-import {
-	DEFAULT_LEARNING_STEPS,
-	DEFAULT_RELEARNING_STEPS,
-	parseStudySteps,
-} from '../utils/studySteps.js';
-import { computeTagDeckStats } from '../utils/tagStats.js';
+import { getStudyDayCutoff } from '../utils/studyDay.js';
+import { type FlashcardsEngine, WasmBridge } from '../wasm.js';
 import TagPickerModalComponent from './components/TagPickerModal.svelte';
 import { ReviewModal } from './ReviewModal.js';
 
@@ -19,6 +13,7 @@ export class TagPickerModal extends Modal {
 	constructor(
 		app: App,
 		private plugin: FlashcardsPlugin,
+		private engine: FlashcardsEngine,
 	) {
 		super(app);
 	}
@@ -27,10 +22,10 @@ export class TagPickerModal extends Modal {
 		this.setTitle('Study deck');
 		this.contentEl.empty();
 
+		const now = Date.now();
 		const rollover = this.plugin.settings.rolloverHour ?? 4;
-		const allCards = this.plugin.db.getAllCards();
-		const dueCutoff = getStudyDayCutoff(rollover);
-		const tagStats = computeTagDeckStats(allCards, dueCutoff);
+		const dueCutoff = getStudyDayCutoff(rollover, new Date(now));
+		const tagStats = WasmBridge.getTagDeckStats(this.engine, now, dueCutoff);
 
 		if (tagStats.length === 0) {
 			new Notice('No tagged cards found in your vault. Run "Sync" first.');
@@ -44,30 +39,20 @@ export class TagPickerModal extends Modal {
 				tagStats,
 				onSelectTags: (tags: string[]) => {
 					this.close();
-					const learningSteps = parseStudySteps(
-						this.plugin.settings.learningSteps,
-						DEFAULT_LEARNING_STEPS,
-					);
-					const relearningSteps = parseStudySteps(
-						this.plugin.settings.relearningSteps,
-						DEFAULT_RELEARNING_STEPS,
-					);
-					const dueItems = this.plugin.db.getDueCards(
-						tags,
-						rollover,
-						learningSteps,
-						relearningSteps,
-					);
-					const allDeckItems = allCards.filter((item) => matchCardTags(item.tags, tags));
+					const dueItems = WasmBridge.getDueCards(this.engine, now, dueCutoff, tags);
 
-					const targetQueue = dueItems.length > 0 ? dueItems : allDeckItems;
-
-					if (targetQueue.length === 0) {
-						new Notice(`No cards found matching tags: ${tags.join(', ')}`);
+					if (dueItems.length === 0) {
+						new Notice(`No due cards matching: ${tags.join(', ')}`);
 						return;
 					}
 
-					new ReviewModal(this.app, this.plugin, targetQueue, `#${tags.join(' #')}`).open();
+					new ReviewModal(
+						this.app,
+						this.plugin,
+						this.engine,
+						dueItems,
+						`#${tags.join(' #')}`,
+					).open();
 				},
 				onClose: () => this.close(),
 			},

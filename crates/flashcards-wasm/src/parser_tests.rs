@@ -151,24 +151,24 @@
         // Doc 1: Has one card with ID 'dup001' and one missing ID
         let doc1 = "Question 1 :: Answer 1 ^dup001\nQuestion 2 :: Answer 2\n";
         let res1 = sync_document_with_reg(doc1, &mut registry, &[], &[]);
-        assert_eq!(res1.blocks.len(), 2);
-        assert_eq!(res1.blocks[0].id, "dup001");
-        assert!(syntax::is_valid_block_id(&res1.blocks[1].id));
-        assert_ne!(res1.blocks[1].id, "dup001");
+        assert_eq!(res1.prompts.len(), 2);
+        assert_eq!(res1.prompts[0].id, "dup001");
+        assert!(syntax::is_valid_block_id(&res1.prompts[1].id));
+        assert_ne!(res1.prompts[1].id, "dup001");
         assert_eq!(registry.len(), 2);
 
         // Doc 2: Has a card that collides with doc1's 'dup001', and one card with fresh 'uniq01'
         let doc2 = "Question 3 :: Answer 3 ^dup001\nQuestion 4 :: Answer 4 ^uniq01\n";
         let res2 = sync_document_with_reg(doc2, &mut registry, &[], &[]);
-        assert_eq!(res2.blocks.len(), 2);
+        assert_eq!(res2.prompts.len(), 2);
         assert!(res2.updated_content.is_some());
         let updated2 = res2.updated_content.unwrap();
 
         // Collision 'dup001' in Doc 2 was regenerated, while 'uniq01' was preserved!
-        assert_ne!(res2.blocks[0].id, "dup001");
-        assert!(syntax::is_valid_block_id(&res2.blocks[0].id));
-        assert_eq!(res2.blocks[1].id, "uniq01");
-        assert!(updated2.contains(&res2.blocks[0].id));
+        assert_ne!(res2.prompts[0].id, "dup001");
+        assert!(syntax::is_valid_block_id(&res2.prompts[0].id));
+        assert_eq!(res2.prompts[1].id, "uniq01");
+        assert!(updated2.contains(&res2.prompts[0].id));
         assert!(updated2.contains("uniq01"));
 
         // Registry now holds all 4 unique IDs from both documents
@@ -183,10 +183,10 @@
 
         // None of the blocks should be modified or considered collisions
         assert_eq!(res.updated_content, None);
-        assert_eq!(res.blocks.len(), 3);
-        assert_eq!(res.blocks[0].id, "own001");
-        assert_eq!(res.blocks[1].id, "own002");
-        assert_eq!(res.blocks[2].id, "own003");
+        assert_eq!(res.prompts.len(), 3);
+        assert_eq!(res.prompts[0].id, "own001");
+        assert_eq!(res.prompts[1].id, "own002");
+        assert_eq!(res.prompts[2].id, "own003");
         assert_eq!(registry.len(), 3);
     }
 
@@ -200,11 +200,11 @@
 
         let res = sync_document_with_reg(&doc, &mut registry, &[], &[]);
         assert!(res.updated_content.is_some());
-        assert_eq!(res.blocks.len(), 50);
+        assert_eq!(res.prompts.len(), 50);
         assert_eq!(registry.len(), 50);
 
         let mut seen = HashSet::new();
-        for b in &res.blocks {
+        for b in &res.prompts {
             assert!(syntax::is_valid_block_id(&b.id));
             assert!(seen.insert(b.id.clone()), "Every generated ID must be unique");
             assert!(registry.contains(syntax::decode_block_id(&b.id).unwrap()));
@@ -222,14 +222,14 @@ die Entscheidung ::: the decision #german ^c9f4d1
         let blocks = parse_markdown_blocks(content, &tags);
         assert_eq!(blocks.len(), 2);
 
-        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[0].card_type, CardType::Inline);
         assert!(!blocks[0].reversible);
         assert_eq!(blocks[0].front, "Capital of France?");
         assert_eq!(blocks[0].back, "Paris");
         assert_eq!(blocks[0].id, "8a1b2c");
         assert_eq!(blocks[0].tags, vec!["geography"]);
 
-        assert_eq!(blocks[1].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[1].card_type, CardType::Inline);
         assert!(blocks[1].reversible);
         assert_eq!(blocks[1].front, "die Entscheidung");
         assert_eq!(blocks[1].back, "the decision #german");
@@ -255,7 +255,7 @@ What are the largest cities of Pakistan?
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.block_type, CardBlockType::Block);
+        assert_eq!(b.card_type, CardType::Multiline);
         assert!(b.reversible);
         assert_eq!(b.id, "37066d");
         assert_eq!(b.front, "What are the largest cities of Pakistan?");
@@ -306,7 +306,7 @@ Paris
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.block_type, CardBlockType::Cloze);
+        assert_eq!(b.card_type, CardType::Cloze);
         assert!(!b.reversible);
         assert_eq!(b.id, "e3d2c1");
         assert_eq!(b.front, "The register {{%rax}} holds the return value.");
@@ -320,7 +320,7 @@ Paris
         assert_eq!(blocks.len(), 1);
 
         let b = &blocks[0];
-        assert_eq!(b.block_type, CardBlockType::Cloze);
+        assert_eq!(b.card_type, CardType::Cloze);
         assert_eq!(b.id, "");
         assert_eq!(b.front, "The capital of France is {{Paris}}.");
         assert_eq!(b.back, "");
@@ -331,7 +331,7 @@ Paris
         let content = "The C++ namespace is {{std::vector}} ^123456\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block_type, CardBlockType::Cloze);
+        assert_eq!(blocks[0].card_type, CardType::Cloze);
         assert_eq!(blocks[0].id, "123456");
         assert_eq!(blocks[0].front, "The C++ namespace is {{std::vector}}");
         assert_eq!(blocks[0].back, "");
@@ -349,7 +349,7 @@ Paris
         let content = "What is `const` in Rust? :: A constant declaration ^123456\n";
         let blocks = parse_markdown_blocks(content, &[]);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[0].card_type, CardType::Inline);
         assert_eq!(blocks[0].front, "What is `const` in Rust?");
         assert_eq!(blocks[0].back, "A constant declaration");
     }
@@ -550,7 +550,7 @@ tags: [پنجابی, الفاظ]
         assert_eq!(blocks.len(), 3);
 
         // 1. Bidirectional card
-        assert_eq!(blocks[0].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[0].card_type, CardType::Inline);
         assert!(blocks[0].reversible);
         assert_eq!(blocks[0].front, "پانی");
         assert_eq!(blocks[0].back, "Water #ذخیرہ");
@@ -559,14 +559,14 @@ tags: [پنجابی, الفاظ]
         assert!(blocks[0].tags.contains(&"ذخیرہ".to_string()));
 
         // 2. Forward card
-        assert_eq!(blocks[1].block_type, CardBlockType::Inline);
+        assert_eq!(blocks[1].card_type, CardType::Inline);
         assert!(!blocks[1].reversible);
         assert_eq!(blocks[1].front, "سورج");
         assert_eq!(blocks[1].back, "Sun");
         assert_eq!(blocks[1].id, "c9f4d1");
 
         // 3. Cloze card
-        assert_eq!(blocks[2].block_type, CardBlockType::Cloze);
+        assert_eq!(blocks[2].card_type, CardType::Cloze);
         assert!(!blocks[2].reversible);
         assert_eq!(blocks[2].front, "زمین سورج دے گرد {{چکر}} کٹدی اے۔");
         assert_eq!(blocks[2].back, "");
@@ -588,7 +588,7 @@ tags: [پنجابی, الفاظ]
         let content_no_id = "تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\n\n%% card-start %%\nتسی حج وی کیتی جاندے او\n::\nلہو وی پیتی جاندے او\n%% card-end %%\n";
         let result = sync_document(content_no_id, &HashSet::new(), &[], &[]);
         assert!(result.updated_content.is_some());
-        assert_eq!(result.blocks.len(), 2);
+        assert_eq!(result.prompts.len(), 2);
 
         // BiDi marks test (RLM, LRM, ALM, etc.) with dividers
         let content_bidi = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او ^j1029y\u{200F}\n\n\u{200F}%% card-start id=n7s8y3 %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}::\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
@@ -605,11 +605,11 @@ tags: [پنجابی, الفاظ]
         let content_bidi_no_id = "\u{200F}تسی حج وی کیتی جاندے او :: لہو وی پیتی جاندے او\u{200F}\n\n\u{200F}%% card-start %%\u{200F}\nتسی حج وی کیتی جاندے او\n\u{200F}:::\u{200F}\nلہو وی پیتی جاندے او\n\u{200F}%% card-end %%\u{200F}\n";
         let sync_bidi = sync_document(content_bidi_no_id, &HashSet::new(), &[], &[]);
         assert!(sync_bidi.updated_content.is_some());
-        assert_eq!(sync_bidi.blocks.len(), 2);
+        assert_eq!(sync_bidi.prompts.len(), 2);
         let updated_bidi = sync_bidi.updated_content.unwrap();
         let resync_bidi = sync_document(&updated_bidi, &HashSet::new(), &[], &[]);
         assert_eq!(resync_bidi.updated_content, None, "Resync must be idempotent");
-        assert_eq!(resync_bidi.blocks.len(), 2);
+        assert_eq!(resync_bidi.prompts.len(), 2);
     }
 
     #[test]
@@ -660,7 +660,7 @@ tags: [پنجابی, الفاظ]
         let sync_result = sync_document(input, &external_ids, &tags, &hints);
         let synced_text = sync_result.updated_content.as_deref().unwrap_or(input);
         println!("Synced text:\n{}", synced_text);
-        println!("Synced blocks:\n{:#?}", sync_result.blocks);
+        println!("Synced blocks:\n{:#?}", sync_result.prompts);
 
         let second_sync = sync_document(synced_text, &external_ids, &tags, &hints);
         println!("Second sync:\n{:#?}", second_sync);
@@ -690,9 +690,9 @@ List three states of matter:
         let result = sync_document(input, &HashSet::new(), &[], &[]);
         assert!(result.updated_content.is_some());
         let updated = result.updated_content.unwrap();
-        assert_eq!(result.blocks.len(), 4);
+        assert_eq!(result.prompts.len(), 4);
 
-        for block in &result.blocks {
+        for block in &result.prompts {
             assert!(syntax::is_valid_block_id(&block.id));
             assert!(updated.contains(&block.id));
         }
@@ -700,8 +700,8 @@ List three states of matter:
         // Re-syncing the updated document should produce NO modifications
         let second_sync = sync_document(&updated, &HashSet::new(), &[], &[]);
         assert!(second_sync.updated_content.is_none());
-        assert_eq!(second_sync.blocks.len(), 4);
-        for (b1, b2) in result.blocks.iter().zip(second_sync.blocks.iter()) {
+        assert_eq!(second_sync.prompts.len(), 4);
+        for (b1, b2) in result.prompts.iter().zip(second_sync.prompts.iter()) {
             assert_eq!(b1.id, b2.id);
             assert_eq!(b1.front, b2.front);
             assert_eq!(b1.back, b2.back);
@@ -715,12 +715,12 @@ List three states of matter:
         let result = sync_document(input, &HashSet::new(), &[], &[]);
         assert!(result.updated_content.is_some());
         let updated = result.updated_content.unwrap();
-        assert_eq!(result.blocks.len(), 2);
+        assert_eq!(result.prompts.len(), 2);
 
-        assert_eq!(result.blocks[0].id, "dup001");
-        assert_ne!(result.blocks[1].id, "dup001");
-        assert!(syntax::is_valid_block_id(&result.blocks[1].id));
-        assert!(updated.contains(&result.blocks[1].id));
+        assert_eq!(result.prompts[0].id, "dup001");
+        assert_ne!(result.prompts[1].id, "dup001");
+        assert!(syntax::is_valid_block_id(&result.prompts[1].id));
+        assert!(updated.contains(&result.prompts[1].id));
     }
 
     #[test]
@@ -732,11 +732,11 @@ List three states of matter:
         let result = sync_document(input, &existing, &[], &[]);
         assert!(result.updated_content.is_some());
         let updated = result.updated_content.unwrap();
-        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.prompts.len(), 1);
 
-        assert_ne!(result.blocks[0].id, "col001");
-        assert!(syntax::is_valid_block_id(&result.blocks[0].id));
-        assert!(updated.contains(&result.blocks[0].id));
+        assert_ne!(result.prompts[0].id, "col001");
+        assert!(syntax::is_valid_block_id(&result.prompts[0].id));
+        assert!(updated.contains(&result.prompts[0].id));
     }
 
     #[test]
@@ -827,11 +827,11 @@ Real Cloze with {{valid cloze}} here.
         let input = std::str::from_utf8(bytes).unwrap();
         let sync1 = sync_document(input, &HashSet::new(), &[], &[]);
         let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
-        println!("SYNC1 blocks: {:?}", sync1.blocks);
+        println!("SYNC1 blocks: {:?}", sync1.prompts);
         println!("SYNC1 updated:\n{}", synced_text);
         let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
-        println!("SYNC2 blocks: {:?}", sync2.blocks);
-        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        println!("SYNC2 blocks: {:?}", sync2.prompts);
+        assert_eq!(sync1.prompts.len(), sync2.prompts.len());
         assert_eq!(sync2.updated_content, None);
     }
 
@@ -927,7 +927,7 @@ Real Cloze with {{valid cloze}} here.
         let sync1 = sync_document(input, &external_ids, &tags, &hints);
         let synced_text = sync1.updated_content.as_deref().unwrap_or(input);
         let sync2 = sync_document(synced_text, &external_ids, &tags, &hints);
-        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync1.prompts.len(), sync2.prompts.len());
         assert_eq!(sync2.updated_content, None);
     }
 
@@ -1029,8 +1029,8 @@ Real Cloze with {{valid cloze}} here.
         let sync1 = sync_document(&doc, &HashSet::new(), &[], &[]);
         let synced_text = sync1.updated_content.as_deref().unwrap_or(&doc);
         let sync2 = sync_document(synced_text, &HashSet::new(), &[], &[]);
-        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
-        for (b1, b2) in sync1.blocks.iter().zip(sync2.blocks.iter()) {
+        assert_eq!(sync1.prompts.len(), sync2.prompts.len());
+        for (b1, b2) in sync1.prompts.iter().zip(sync2.prompts.iter()) {
             assert_eq!(b1.reversible, b2.reversible);
         }
     }
@@ -1042,8 +1042,78 @@ Real Cloze with {{valid cloze}} here.
         let sync1 = sync_document(s, &HashSet::new(), &[], &[]);
         let synced = sync1.updated_content.as_deref().unwrap_or(s);
         let sync2 = sync_document(synced, &HashSet::new(), &[], &[]);
-        assert_eq!(sync1.blocks.len(), sync2.blocks.len());
+        assert_eq!(sync1.prompts.len(), sync2.prompts.len());
         assert_eq!(sync2.updated_content, None);
     }
 
+    #[test]
+    fn test_parse_qa_card_with_and_without_id() {
+        let input = r#"
+Q: What is the capital of Pakistan? #card/todo ^k9x2mp
+A: Islamabad
 
+Q: What is 2 + 2? #math
+A: 4
+"#;
+        let prompts = parse_markdown_blocks(input, &[]);
+        assert_eq!(prompts.len(), 2);
+
+        // Card 1
+        assert_eq!(prompts[0].card_type, CardType::Qa);
+        assert_eq!(prompts[0].id, "k9x2mp");
+        assert_eq!(prompts[0].front, "What is the capital of Pakistan? #card/todo");
+        assert_eq!(prompts[0].back, "Islamabad");
+        assert_eq!(prompts[0].line_start, 1);
+        assert_eq!(prompts[0].line_end, 2);
+        assert!(prompts[0].tags.contains(&"card/todo".to_string()));
+
+        // Card 2
+        assert_eq!(prompts[1].card_type, CardType::Qa);
+        assert_eq!(prompts[1].id, "");
+        assert_eq!(prompts[1].front, "What is 2 + 2? #math");
+        assert_eq!(prompts[1].back, "4");
+        assert!(prompts[1].tags.contains(&"math".to_string()));
+    }
+
+    #[test]
+    fn test_sync_document_qa_card_mints_id_on_q_line() {
+        let input = "Q: What is the largest ocean?\nA: Pacific Ocean";
+        let result = sync_document(input, &HashSet::new(), &[], &[]);
+
+        assert_eq!(result.prompts.len(), 1);
+        let minted_id = &result.prompts[0].id;
+        assert!(syntax::is_valid_block_id(minted_id));
+
+        let updated = result.updated_content.expect("Should update content with minted ID");
+        let lines: Vec<&str> = updated.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], format!("Q: What is the largest ocean? ^{minted_id}"));
+        assert_eq!(lines[1], "A: Pacific Ocean");
+    }
+
+    #[test]
+    fn test_qa_card_strict_adjacency_rejects_empty_line() {
+        let input = r#"
+Q: Non-adjacent question
+
+A: Non-adjacent answer
+"#;
+        let prompts = parse_markdown_blocks(input, &[]);
+        assert_eq!(prompts.len(), 0);
+    }
+
+    #[test]
+    fn test_tag_toggling_in_content() {
+        let input = "Q: What is water? ^k9x2mp\nA: H2O";
+        
+        // Add #card/todo
+        let with_todo = toggle_tag_in_content(input, "k9x2mp", "#card/todo")
+            .expect("Should add tag");
+        assert!(with_todo.contains("#card/todo ^k9x2mp"));
+
+        // Remove #card/todo by toggling again
+        let without_todo = toggle_tag_in_content(&with_todo, "k9x2mp", "#card/todo")
+            .expect("Should remove tag");
+        assert!(!without_todo.contains("#card/todo"));
+        assert!(without_todo.contains("^k9x2mp"));
+    }

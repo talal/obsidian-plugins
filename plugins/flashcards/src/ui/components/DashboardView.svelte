@@ -3,9 +3,9 @@
 
 	import type { DashboardStats, ReviewItem } from '../../types.ts';
 	import {
-		filterDashboardBlock,
-		groupCardsByBlock,
-		type DashboardBlockItem,
+		filterDashboardPrompt,
+		groupCardsByPrompt,
+		type DashboardPromptItem,
 	} from '../../utils/dashboardCards.ts';
 
 	interface Props {
@@ -42,34 +42,34 @@
 	let sortColumn = $state<'note' | 'due' | 'reviews' | 'last'>('due');
 	let sortAsc = $state(true);
 
-	let blockItems = $derived(groupCardsByBlock(items));
+	let promptItems = $derived(groupCardsByPrompt(items));
 
 	let statusCounts = $derived({
-		all: blockItems.length,
-		due: blockItems.filter((b) => filterDashboardBlock(b, 'due', dueCutoff, '')).length,
-		new: blockItems.filter((b) => filterDashboardBlock(b, 'new', dueCutoff, '')).length,
-		learning: blockItems.filter((b) => filterDashboardBlock(b, 'learning', dueCutoff, '')).length,
-		review: blockItems.filter((b) => filterDashboardBlock(b, 'review', dueCutoff, '')).length,
+		all: promptItems.length,
+		due: promptItems.filter((b) => filterDashboardPrompt(b, 'due', dueCutoff, '')).length,
+		new: promptItems.filter((b) => filterDashboardPrompt(b, 'new', dueCutoff, '')).length,
+		learning: promptItems.filter((b) => filterDashboardPrompt(b, 'learning', dueCutoff, '')).length,
+		review: promptItems.filter((b) => filterDashboardPrompt(b, 'review', dueCutoff, '')).length,
 	});
 
 	let filteredItems = $derived(
-		blockItems
-			.filter((item) => filterDashboardBlock(item, statusFilter, dueCutoff, searchQuery))
+		promptItems
+			.filter((item) => filterDashboardPrompt(item, statusFilter, dueCutoff, searchQuery))
 			.sort((a, b) => {
 				let cmp = 0;
 				if (sortColumn === 'note') {
-					cmp = a.noteTitle.localeCompare(b.noteTitle);
+					cmp = a.note_title.localeCompare(b.note_title);
 				} else if (sortColumn === 'due') {
-					const aDue = Math.min(a.forward?.dueAt ?? Infinity, a.reverse?.dueAt ?? Infinity);
-					const bDue = Math.min(b.forward?.dueAt ?? Infinity, b.reverse?.dueAt ?? Infinity);
+					const aDue = Math.min(a.forward?.due_at ?? Infinity, a.reverse?.due_at ?? Infinity);
+					const bDue = Math.min(b.forward?.due_at ?? Infinity, b.reverse?.due_at ?? Infinity);
 					cmp = aDue - bDue;
 				} else if (sortColumn === 'reviews') {
 					const aReps = (a.forward?.reps ?? 0) + (a.reverse?.reps ?? 0);
 					const bReps = (b.forward?.reps ?? 0) + (b.reverse?.reps ?? 0);
 					cmp = aReps - bReps;
 				} else if (sortColumn === 'last') {
-					const aLast = Math.max(a.forward?.lastReview ?? 0, a.reverse?.lastReview ?? 0);
-					const bLast = Math.max(b.forward?.lastReview ?? 0, b.reverse?.lastReview ?? 0);
+					const aLast = Math.max(a.forward?.last_review ?? 0, a.reverse?.last_review ?? 0);
+					const bLast = Math.max(b.forward?.last_review ?? 0, b.reverse?.last_review ?? 0);
 					cmp = aLast - bLast;
 				}
 				return sortAsc ? cmp : -cmp;
@@ -91,29 +91,29 @@
 	<header class="fc-dashboard-header">
 		<div class="fc-stats-bar">
 			<div class="fc-stat-item">
-				<span class="fc-stat-number">{stats.studiedToday}</span>
+				<span class="fc-stat-number">{stats.studied_today}</span>
 				<span class="fc-stat-label">Studied today</span>
 			</div>
 			<div class="fc-stat-divider"></div>
 			<div class="fc-stat-item">
-				<span class="fc-stat-number">{stats.dailyRetention}%</span>
+				<span class="fc-stat-number">{stats.daily_retention}%</span>
 				<span class="fc-stat-label">Retention</span>
 			</div>
 			<div class="fc-stat-divider"></div>
 			<div class="fc-stat-item">
-				<span class="fc-stat-number">{stats.studyStreak}d</span>
+				<span class="fc-stat-number">{stats.study_streak}d</span>
 				<span class="fc-stat-label">Streak</span>
 			</div>
 			<div class="fc-stat-divider"></div>
 			<div class="fc-stat-item">
-				<span class="fc-stat-number">{stats.totalCards}</span>
+				<span class="fc-stat-number">{stats.total_cards}</span>
 				<span class="fc-stat-label">Total cards</span>
 			</div>
 		</div>
 
 		<div class="fc-header-actions">
 			<button class="mod-cta" onclick={onStartReview}>
-				<span>Study all ({stats.dueToday} due)</span>
+				<span>Study all ({stats.due_today} due)</span>
 			</button>
 			<button onclick={onStudyDeck}>
 				<span>Study deck</span>
@@ -165,11 +165,11 @@
 						<td colspan="7" class="fc-empty-row">No flashcards match the current filter.</td>
 					</tr>
 				{:else}
-					{#each filteredItems as item (item.blockId)}
+					{#each filteredItems as item (item.prompt_id)}
 						{@const activeCard = item.forward ?? item.reverse}
 						<tr onclick={() => { if (activeCard) onOpenCard?.(activeCard); }}>
 							<td class="fc-cell-note">
-								<span class="fc-note-link" title={item.notePath} dir="auto">{item.noteTitle}</span>
+								<span class="fc-note-link" title={item.note_path} dir="auto">{item.note_title}</span>
 							</td>
 							<td>
 								<span class="fc-text-preview" dir="auto">{item.front}</span>
@@ -186,14 +186,14 @@
 							</td>
 							<td class="fc-cell-due">
 								{#if item.forward}
-									<span class="fc-due-badge" class:fc-due-now={item.forward.dueAt <= dueCutoff} dir="auto">
-										{item.forward.dueHuman}
+									<span class="fc-due-badge" class:fc-due-now={item.forward.due_at <= dueCutoff} dir="auto">
+										{item.forward.due_human}
 									</span>
 								{/if}
 								{#if item.reverse}
 									<div class="fc-metric-sub" dir="auto">
-										<span class="fc-due-badge" class:fc-due-now={item.reverse.dueAt <= dueCutoff}>
-											{item.reverse.dueHuman}
+										<span class="fc-due-badge" class:fc-due-now={item.reverse.due_at <= dueCutoff}>
+											{item.reverse.due_human}
 										</span>
 										<span class="fc-sub-icon" use:icon={'arrow-right-left'}></span>
 									</div>
@@ -209,10 +209,10 @@
 								{/if}
 							</td>
 							<td class="fc-cell-last">
-								<span>{item.forward?.lastPracticedHuman ?? 'Never'}</span>
+								<span>{item.forward?.last_practiced_human ?? 'Never'}</span>
 								{#if item.reverse}
 									<div class="fc-metric-sub" dir="auto">
-										<span>{item.reverse.lastPracticedHuman}</span>
+										<span>{item.reverse.last_practiced_human}</span>
 										<span class="fc-sub-icon" use:icon={'arrow-right-left'}></span>
 									</div>
 								{/if}

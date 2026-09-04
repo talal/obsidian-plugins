@@ -40,12 +40,6 @@ export default defineConfig({
 					);
 				}
 				fs.copyFileSync(flashcardsWasm, 'dist/flashcards_wasm_bg.wasm');
-
-				const sqlWasm = '../../node_modules/sql.js/dist/sql-wasm.wasm';
-				if (!fs.existsSync(sqlWasm)) {
-					throw new Error(`Missing ${sqlWasm}. Run "npm install" first.`);
-				}
-				fs.copyFileSync(sqlWasm, 'dist/sql-wasm.wasm');
 			},
 		},
 	],

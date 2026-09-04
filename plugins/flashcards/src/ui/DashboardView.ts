@@ -1,14 +1,11 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import { mount, unmount } from 'svelte';
 
-import { getStudyDayCutoff } from '../db/DatabaseManager.js';
 import type FlashcardsPlugin from '../main.js';
+import { SnapshotStore } from '../storage.js';
 import type { ReviewItem } from '../types.js';
-import {
-	DEFAULT_LEARNING_STEPS,
-	DEFAULT_RELEARNING_STEPS,
-	parseStudySteps,
-} from '../utils/studySteps.js';
+import { getStudyDayCutoff } from '../utils/studyDay.js';
+import { WasmBridge } from '../wasm.js';
 import DashboardViewComponent from './components/DashboardView.svelte';
 import { ReviewModal } from './ReviewModal.js';
 import { TagPickerModal } from './TagPickerModal.js';
@@ -40,23 +37,25 @@ export class DashboardView extends ItemView {
 	async onOpen() {
 		this.contentEl.empty();
 		this.contentEl.addClass('fc-dashboard-leaf');
-		this.renderComponent();
+		await this.renderComponent();
 	}
 
-	public refresh(): void {
+	public async refresh(): Promise<void> {
 		if (this.component) {
 			void unmount(this.component);
 			this.component = undefined;
 		}
 		this.contentEl.empty();
-		this.renderComponent();
+		await this.renderComponent();
 	}
 
-	private renderComponent(): void {
+	private async renderComponent(): Promise<void> {
+		const engine = await SnapshotStore.loadEngine(this.app);
+		const now = Date.now();
 		const rollover = this.plugin.settings.rolloverHour ?? 4;
-		const items = this.plugin.db.getAllCards();
-		const stats = this.plugin.db.getDashboardStats(rollover);
-		const dueCutoff = getStudyDayCutoff(rollover);
+		const dueCutoff = getStudyDayCutoff(rollover, new Date(now));
+		const items = WasmBridge.getAllCards(engine, now);
+		const stats = WasmBridge.getDashboardStats(engine, now, dueCutoff);
 
 		this.component = mount(DashboardViewComponent, {
 			target: this.contentEl,
@@ -64,36 +63,27 @@ export class DashboardView extends ItemView {
 				items,
 				stats,
 				dueCutoff,
-				onStartReview: () => {
-					const learningSteps = parseStudySteps(
-						this.plugin.settings.learningSteps,
-						DEFAULT_LEARNING_STEPS,
-					);
-					const relearningSteps = parseStudySteps(
-						this.plugin.settings.relearningSteps,
-						DEFAULT_RELEARNING_STEPS,
-					);
-					const dueItems = this.plugin.db.getDueCards(
-						undefined,
-						rollover,
-						learningSteps,
-						relearningSteps,
-					);
-					const queue = dueItems.length > 0 ? dueItems : items;
-					if (queue.length === 0) {
-						new Notice('No cards available to study.');
+				onStartReview: async () => {
+					const reviewEngine = await SnapshotStore.loadEngine(this.app);
+					const currentNow = Date.now();
+					const currentRollover = this.plugin.settings.rolloverHour ?? 4;
+					const currentDueCutoff = getStudyDayCutoff(currentRollover, new Date(currentNow));
+					const dueItems = WasmBridge.getDueCards(reviewEngine, currentNow, currentDueCutoff);
+					if (dueItems.length === 0) {
+						new Notice('All due cards completed for today!');
 						return;
 					}
-					new ReviewModal(this.app, this.plugin, queue, 'All Cards').open();
+					new ReviewModal(this.app, this.plugin, reviewEngine, dueItems, 'All Cards').open();
 				},
-				onStudyDeck: () => {
-					new TagPickerModal(this.app, this.plugin).open();
+				onStudyDeck: async () => {
+					const deckEngine = await SnapshotStore.loadEngine(this.app);
+					new TagPickerModal(this.app, this.plugin, deckEngine).open();
 				},
 				onSync: () => {
 					void this.plugin.syncVault();
 				},
 				onOpenCard: (item: ReviewItem) => {
-					const link = item.blockId ? `${item.notePath}#^${item.blockId}` : item.notePath;
+					const link = item.prompt_id ? `${item.note_path}#^${item.prompt_id}` : item.note_path;
 					void this.app.workspace.openLinkText(link, '', false);
 				},
 			},
